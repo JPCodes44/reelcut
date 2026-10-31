@@ -1,0 +1,177 @@
+#pragma once
+
+#include <QHash>
+#include <QJsonObject>
+#include <QObject>
+#include <QTemporaryDir>
+#include <QUrl>
+#include <QVariant>
+#include <QVector>
+
+#include <functional>
+#include <memory>
+
+#include "jobs.h"
+#include "project.h"
+
+class FilePicker;
+class QNetworkAccessManager;
+class QNetworkReply;
+class Theme;
+class ThumbProvider;
+
+// The app's state and work, handed to QML as `backend`. Project edits go
+// through here so undo, the dirty flag and the views stay in step.
+//
+// Discrete actions (split, delete, cut silences) record an undo step on
+// their own. Continuous edits (sliders, typing) don't, so a drag isn't a
+// hundred steps: QML calls checkpoint() when the edit begins.
+class Backend : public QObject {
+    Q_OBJECT
+    Q_PROPERTY(QVariantList clips READ clips NOTIFY projectChanged)
+    Q_PROPERTY(double duration READ duration NOTIFY projectChanged)
+    Q_PROPERTY(QVariantList captionLines READ captionLines NOTIFY projectChanged)
+    Q_PROPERTY(int wordCount READ wordCount NOTIFY projectChanged)
+    Q_PROPERTY(QString captionStyle READ captionStyle NOTIFY projectChanged)
+    Q_PROPERTY(double captionY READ captionY NOTIFY projectChanged)
+    Q_PROPERTY(QVariantList overlays READ overlays NOTIFY projectChanged)
+    Q_PROPERTY(QVariantMap music READ music NOTIFY projectChanged)
+    Q_PROPERTY(QVariantMap look READ look NOTIFY projectChanged)
+    Q_PROPERTY(QString platform READ platform NOTIFY projectChanged)
+    Q_PROPERTY(QString captionFont READ captionFont CONSTANT)
+    Q_PROPERTY(double captionScale READ captionScale CONSTANT)
+    Q_PROPERTY(bool canUndo READ canUndo NOTIFY projectChanged)
+    Q_PROPERTY(bool canRedo READ canRedo NOTIFY projectChanged)
+    Q_PROPERTY(bool dirty READ dirty NOTIFY projectChanged)
+    Q_PROPERTY(QString title READ title NOTIFY projectChanged)
+    Q_PROPERTY(bool busy READ busy NOTIFY jobChanged)
+    Q_PROPERTY(QString busyText READ busyText NOTIFY jobChanged)
+    Q_PROPERTY(double progress READ progress NOTIFY jobChanged)
+    Q_PROPERTY(QString message READ message NOTIFY messageChanged)
+    Q_PROPERTY(bool messageIsError READ messageIsError NOTIFY messageChanged)
+    Q_PROPERTY(QString lastExport READ lastExport NOTIFY messageChanged)
+    Q_PROPERTY(QString whisperState READ whisperState NOTIFY jobChanged)
+
+public:
+    Backend(FilePicker *picker, ThumbProvider *thumbs, Theme *theme, QObject *parent = nullptr);
+    ~Backend() override;
+
+    QVariantList clips() const;
+    double duration() const { return m_project.duration(); }
+    QVariantList captionLines() const;
+    int wordCount() const { return m_project.words.size(); }
+    QString captionStyle() const { return m_project.captionStyle; }
+    double captionY() const { return m_project.captionY; }
+    QVariantList overlays() const;
+    QVariantMap music() const;
+    QVariantMap look() const;
+    QString platform() const { return m_project.platform; }
+    QString captionFont() const;
+    // Qt pixel size per ASS font size unit; libass sizes a font by its line
+    // height (ascent + descent), Qt by its em, so the preview scales by this.
+    double captionScale() const;
+    bool canUndo() const { return !m_undo.isEmpty(); }
+    bool canRedo() const { return !m_redo.isEmpty(); }
+    bool dirty() const { return m_dirty; }
+    QString title() const;
+    bool busy() const { return !m_busyText.isEmpty(); }
+    QString busyText() const { return m_busyText; }
+    double progress() const { return m_progress; }
+    QString message() const { return m_message; }
+    bool messageIsError() const { return m_messageIsError; }
+    QString lastExport() const { return m_lastExport; }
+    // ready, no-whisper (the tool isn't installed), or no-model (downloads on first use)
+    QString whisperState() const;
+
+    const Project &project() const { return m_project; }
+
+    // Undo
+    Q_INVOKABLE void checkpoint();
+    Q_INVOKABLE void undo();
+    Q_INVOKABLE void redo();
+
+    // Clips
+    Q_INVOKABLE void addMedia();
+    Q_INVOKABLE void addUrls(const QList<QUrl> &urls);
+    Q_INVOKABLE void removeClip(int index);
+    Q_INVOKABLE void moveClip(int from, int to);
+    Q_INVOKABLE bool split(double time);
+    // in, out, speed, zoom, panX, panY; values are clamped to what makes sense
+    Q_INVOKABLE void setClipValue(int index, const QString &key, double value);
+    Q_INVOKABLE QVariantMap locate(double time) const;
+    Q_INVOKABLE void cutSilences(int index);
+
+    // Captions
+    Q_INVOKABLE void transcribe();
+    Q_INVOKABLE void setWordText(int index, const QString &text);
+    Q_INVOKABLE void clearCaptions();
+    Q_INVOKABLE void setCaptionStyle(const QString &style);
+    Q_INVOKABLE void setCaptionY(double y);
+
+    // Text overlays
+    Q_INVOKABLE int addOverlay(double time);
+    Q_INVOKABLE void setOverlayValue(int index, const QString &key, const QVariant &value);
+    Q_INVOKABLE void removeOverlay(int index);
+
+    // Music and look
+    Q_INVOKABLE void chooseMusic();
+    Q_INVOKABLE void removeMusic();
+    Q_INVOKABLE void setMusicValue(const QString &key, const QVariant &value);
+    Q_INVOKABLE void setLookValue(const QString &key, double value);
+    Q_INVOKABLE void chooseLut();
+    Q_INVOKABLE void clearLut();
+    Q_INVOKABLE void setPlatform(const QString &platform);
+
+    // Files and jobs
+    Q_INVOKABLE void newProject();
+    Q_INVOKABLE void open();
+    Q_INVOKABLE bool openFile(const QString &path);
+    Q_INVOKABLE void save();
+    Q_INVOKABLE void saveAs();
+    Q_INVOKABLE void exportVideo();
+    Q_INVOKABLE void cancelJob();
+    Q_INVOKABLE void dismissMessage();
+    Q_INVOKABLE void showExport();
+
+signals:
+    void projectChanged();
+    void jobChanged();
+    void messageChanged();
+
+private:
+    void picked(int kind, const QList<QUrl> &urls);
+    void changed();
+    void restore(const QJsonObject &json);
+    bool writeProject(const QString &path);
+    void setBusy(const QString &text, double progress = -1.0);
+    void clearBusy();
+    void setMessage(const QString &text, bool error);
+    int thumbKey(const QString &path);
+    void runExport(const QString &output, const QString &encoder);
+    void downloadModel();
+    void startTranscription();
+
+    FilePicker *m_picker;
+    ThumbProvider *m_thumbs;
+    Theme *m_theme;
+    Project m_project;
+    QVector<QJsonObject> m_undo;
+    QVector<QJsonObject> m_redo;
+    bool m_dirty = false;
+    QString m_path;
+
+    Job m_job;
+    // What to do when the running job ends; jobs chain (audio, then whisper).
+    std::function<void(bool, const QByteArray &, const QByteArray &)> m_then;
+    std::unique_ptr<QTemporaryDir> m_work;
+    QString m_busyText;
+    double m_progress = -1.0;
+    int m_probing = 0;
+    QString m_message;
+    bool m_messageIsError = false;
+    QString m_lastExport;
+
+    QHash<QString, int> m_thumbKeys;
+    QNetworkAccessManager *m_network = nullptr;
+    QNetworkReply *m_download = nullptr;
+};

@@ -1,0 +1,12 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="Main.qml">Main.qml</file>
+        <file alias="Preview.qml">Preview.qml</file>
+        <file alias="CaptionLayer.qml">CaptionLayer.qml</file>
+        <file alias="ReelTimeline.qml">ReelTimeline.qml</file>
+        <file alias="Inspector.qml">Inspector.qml</file>
+        <file alias="ValueSlider.qml">ValueSlider.qml</file>
+        <file alias="HelpOverlay.qml">HelpOverlay.qml</file>
+        <file alias="i18n/en.json">i18n/en.json</file>
+    </qresource>
+</RCC>

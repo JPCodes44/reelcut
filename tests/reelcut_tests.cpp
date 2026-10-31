@@ -5,8 +5,10 @@
 #include <QTemporaryDir>
 #include <QtTest>
 
+#include "backend.h"
 #include "captions.h"
 #include "exportgraph.h"
+#include "filepicker.h"
 #include "media.h"
 #include "project.h"
 #include "silence.h"
@@ -26,6 +28,14 @@ Clip clip(double in, double out, double speed = 1.0) {
     c.sourceDuration = out;
     return c;
 }
+
+// Answers every dialog with a preset file, the way the portal would.
+class FakePicker : public FilePicker {
+public:
+    QString answer;
+    void open(Kind kind) override { emit selected(kind, {QUrl::fromLocalFile(answer)}); }
+    void save(Kind kind, const QUrl &) override { emit selected(kind, {QUrl::fromLocalFile(answer)}); }
+};
 
 bool runFfmpeg(const QStringList &args) {
     QProcess proc;
@@ -320,6 +330,117 @@ private slots:
         QCOMPARE(out.height, 1920);
         QVERIFY(out.audio);
         QVERIFY(qAbs(out.duration - 3.0) < 0.15);
+    }
+
+    // Transcription input: the clips' sound at timeline speed, as Whisper wants it.
+    void timelineAudioIsWhisperReady()
+    {
+        QTemporaryDir dir;
+        const QString source = dir.filePath("a.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=320x240:rate=30:duration=4", "-f", "lavfi", "-i",
+                           "sine=frequency=440:duration=4", "-shortest", "-c:v", "libx264", "-c:a", "aac", source}));
+        Project p;
+        Clip a = clip(0, 2), b = clip(2, 4, 2.0);
+        a.path = b.path = source;
+        p.clips = {a, b};
+        QVERIFY(runFfmpeg(timelineAudioArgs(p, dir.filePath("audio.wav"))));
+        QProcess probe;
+        probe.start("ffprobe", {"-v", "error", "-show_entries", "stream=sample_rate,channels:format=duration",
+                                "-of", "csv=p=0", dir.filePath("audio.wav")});
+        QVERIFY(probe.waitForFinished(10000));
+        const QString out = QString::fromUtf8(probe.readAllStandardOutput());
+        QVERIFY2(out.contains("16000,1"), qPrintable(out));
+        QVERIFY2(qAbs(out.split('\n').value(1).toDouble() - 3.0) < 0.1, qPrintable(out));
+    }
+
+    // Backend
+
+    void undoAndRedoRestoreEdits()
+    {
+        QTemporaryDir dir;
+        Project p;
+        p.clips = {clip(0, 4), clip(10, 14)};
+        write(dir.filePath("a.reel"), QJsonDocument(p.toJson()).toJson());
+
+        Backend backend(nullptr, nullptr, nullptr);
+        QVERIFY(backend.openFile(dir.filePath("a.reel")));
+        QVERIFY(!backend.dirty());
+        QVERIFY(backend.split(2.0));
+        QCOMPARE(backend.project().clips.size(), 3);
+        QVERIFY(backend.dirty());
+
+        // A slider drag is one step however many values it sets.
+        backend.checkpoint();
+        backend.setClipValue(0, "speed", 1.5);
+        backend.setClipValue(0, "speed", 9.0);
+        QCOMPARE(backend.project().clips[0].speed, 4.0);
+
+        backend.undo();
+        QCOMPARE(backend.project().clips[0].speed, 1.0);
+        QCOMPARE(backend.project().clips.size(), 3);
+        backend.undo();
+        QCOMPARE(backend.project().clips.size(), 2);
+        QVERIFY(!backend.canUndo());
+        backend.redo();
+        QCOMPARE(backend.project().clips.size(), 3);
+    }
+
+    void cutsSilencesFromAClip()
+    {
+        QTemporaryDir dir;
+        const QString source = dir.filePath("talk.mp4");
+        // A second of tone, a second and a half of silence, a second of tone.
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "color=c=gray:size=320x240:rate=30:duration=3.5", "-f", "lavfi", "-i",
+                           "aevalsrc='if(between(t,1,2.5),0,0.5*sin(440*2*PI*t))':d=3.5", "-shortest",
+                           "-c:v", "libx264", "-c:a", "aac", source}));
+        Project p;
+        Clip c = clip(0, 3.5);
+        c.path = source;
+        p.clips = {c};
+        write(dir.filePath("talk.reel"), QJsonDocument(p.toJson()).toJson());
+
+        Backend backend(nullptr, nullptr, nullptr);
+        QVERIFY(backend.openFile(dir.filePath("talk.reel")));
+        backend.cutSilences(0);
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 30000);
+        QCOMPARE(backend.project().clips.size(), 2);
+        // 1.5 s of silence goes, minus 0.1 s of padding kept on each side.
+        QVERIFY2(qAbs(backend.project().duration() - 2.2) < 0.15,
+                 qPrintable(QString::number(backend.project().duration())));
+        backend.undo();
+        QCOMPARE(backend.project().clips.size(), 1);
+    }
+
+    void savesAndExportsThroughTheDialogs()
+    {
+        QTemporaryDir dir;
+        const QString source = dir.filePath("clip.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=640x360:rate=30:duration=2", "-f", "lavfi", "-i",
+                           "sine=frequency=440:duration=2", "-shortest", "-c:v", "libx264", "-c:a", "aac",
+                           source}));
+        FakePicker picker;
+        Backend backend(&picker, nullptr, nullptr);
+        backend.addUrls({QUrl::fromLocalFile(source)});
+        QTRY_COMPARE_WITH_TIMEOUT(backend.project().clips.size(), 1, 15000);
+        backend.addOverlay(0.0);
+
+        picker.answer = dir.filePath("mine");  // the extension is added
+        backend.saveAs();
+        QVERIFY(QFileInfo::exists(dir.filePath("mine.reel")));
+        QVERIFY(!backend.dirty());
+        QCOMPARE(backend.title(), QString("mine"));
+
+        picker.answer = dir.filePath("out.mp4");
+        backend.exportVideo();
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 120000);
+        QVERIFY2(!backend.messageIsError(), qPrintable(backend.message()));
+        QCOMPARE(backend.lastExport(), dir.filePath("out.mp4"));
+        const media::VideoInfo out = media::probe(dir.filePath("out.mp4"));
+        QVERIFY(out.ok);
+        QCOMPARE(out.height, 1920);
     }
 
 private:
