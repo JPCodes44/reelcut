@@ -46,6 +46,7 @@ struct Overlay {
     QString text;
     double start = 0.0;
     double end = 3.0;
+    double x = 0.5;  // center, as a fraction of the frame width
     double y = 0.2;  // center, as a fraction of the frame height
     int size = 96;   // pixels at 1080x1920
     QString animation = "pop";  // none, fade, pop, slide
@@ -79,7 +80,9 @@ struct Project {
     QVector<Overlay> overlays;
     QVector<Word> words;
     QString captionStyle = "highlight";  // bold, highlight, pop, box
+    double captionX = 0.5;
     double captionY = 0.68;
+    double captionScale = 1.0;  // 0.5 to 2 times the style's size
     Look look;
     QString platform = "instagram";      // instagram, tiktok
 
@@ -110,6 +113,8 @@ struct Project {
     bool setClipMotion(int index, const QString &motion);
     bool setOverlayValue(int index, const QString &key, const QVariant &value);
     bool setLookValue(const QString &key, double value);
+    // x, y (fractions of the frame) or scale.
+    bool setCaptionValue(const QString &key, double value);
     bool setMusicValue(const QString &key, const QVariant &value);
     // Times on the timeline where each clip starts, then the end.
     QVector<double> clipStarts() const;

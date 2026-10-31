@@ -238,11 +238,32 @@ Rectangle {
                             }
                         }
                         ValueSlider {
-                            label: qsTr("Position")
-                            from: 0.1; to: 0.9; resetValue: 0.68
+                            label: qsTr("Size")
+                            from: 0.5; to: 2; resetValue: 1
+                            value: backend.captionSize
+                            valueText: Math.round(value * 100) + "%"
+                            onMoved: function(v) { backend.setCaptionValue("scale", v) }
+                        }
+                        ValueSlider {
+                            label: qsTr("Up / down")
+                            from: 0.05; to: 0.95; resetValue: 0.68
                             value: backend.captionY
                             valueText: Math.round(value * 100) + "%"
-                            onMoved: function(v) { backend.setCaptionY(v) }
+                            onMoved: function(v) { backend.setCaptionValue("y", v) }
+                        }
+                        ValueSlider {
+                            label: qsTr("Left / right")
+                            from: 0; to: 1; resetValue: 0.5
+                            value: backend.captionX
+                            valueText: Math.round(value * 100) + "%"
+                            onMoved: function(v) { backend.setCaptionValue("x", v) }
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr("Or drag the captions in the preview, and pull a corner to resize.")
+                            color: "#9a9aa2"
+                            font.pixelSize: 12
+                            wrapMode: Text.Wrap
                         }
 
                         RowLayout {
@@ -334,10 +355,11 @@ Rectangle {
                     }
 
                     Repeater {
-                        model: backend.overlays
+                        model: backend.overlays.length
                         delegate: Rectangle {
                             id: card
-                            required property var modelData
+                            // Items stay put while their entry changes, so a drag survives edits.
+                            readonly property var modelData: backend.overlays[index] || ({})
                             required property int index
                             readonly property bool selected: index === root.selectedOverlay
                             Layout.fillWidth: true
@@ -404,7 +426,14 @@ Rectangle {
                                     onMoved: function(v) { backend.setOverlayValue(card.index, "size", Math.round(v)) }
                                 }
                                 ValueSlider {
-                                    label: qsTr("Position")
+                                    label: qsTr("Left / right")
+                                    from: 0; to: 1; resetValue: 0.5
+                                    value: card.modelData.x
+                                    valueText: Math.round(value * 100) + "%"
+                                    onMoved: function(v) { backend.setOverlayValue(card.index, "x", v) }
+                                }
+                                ValueSlider {
+                                    label: qsTr("Up / down")
                                     from: 0.05; to: 0.95; resetValue: 0.2
                                     value: card.modelData.y
                                     valueText: Math.round(value * 100) + "%"

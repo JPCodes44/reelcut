@@ -24,6 +24,8 @@ ApplicationWindow {
     property bool safeZones: true
     property int selectedClip: -1
     property int selectedOverlay: -1
+    // What a click last picked: clip, overlay, captions, or none. Delete acts on it.
+    property string selectionKind: "none"
     property real playhead: 0
     // Single-key shortcuts must not fire while the user is typing.
     readonly property bool typing: activeFocusItem !== null && activeFocusItem.hasOwnProperty("cursorPosition")
@@ -36,9 +38,28 @@ ApplicationWindow {
         preview.pause()
         seek(playhead + seconds)
     }
-    function selectClipAt(t) {
-        const at = backend.locate(t)
-        selectedClip = at.index
+    function select(kind, index) {
+        selectionKind = kind
+        if (kind === "clip") {
+            selectedClip = index
+            inspector.currentIndex = 0
+        } else if (kind === "overlay") {
+            selectedOverlay = index
+            inspector.currentIndex = 2
+        } else if (kind === "captions") {
+            inspector.currentIndex = 1
+        }
+    }
+    function deleteSelection() {
+        if (selectionKind === "overlay" && selectedOverlay >= 0) {
+            backend.removeOverlay(selectedOverlay)
+            selectionKind = "none"
+        } else if (selectionKind === "captions") {
+            backend.clearCaptions()
+            selectionKind = "none"
+        } else if (selectedClip >= 0) {
+            backend.removeClip(selectedClip)
+        }
     }
 
     Connections {
@@ -56,14 +77,14 @@ ApplicationWindow {
     }
 
     Shortcut { sequence: "?"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.helpVisible = !win.helpVisible }
-    Shortcut { sequence: "Esc"; context: Qt.ApplicationShortcut; onActivated: { win.helpVisible = false; win.contentItem.forceActiveFocus() } }
+    Shortcut { sequence: "Esc"; context: Qt.ApplicationShortcut; onActivated: { win.helpVisible = false; win.selectionKind = "none"; win.contentItem.forceActiveFocus() } }
     Shortcut { sequence: "Q"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.close() }
     Shortcut { sequence: "Space"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: preview.toggle() }
     Shortcut { sequence: "S"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: backend.split(win.playhead) }
     Shortcut { sequence: "I"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: backend.addMedia() }
-    Shortcut { sequence: "T"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: { inspector.currentIndex = 2; win.selectedOverlay = backend.addOverlay(win.playhead) } }
+    Shortcut { sequence: "T"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.select("overlay", backend.addOverlay(win.playhead)) }
     Shortcut { sequence: "G"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.safeZones = !win.safeZones }
-    Shortcut { sequences: ["Delete", "Backspace"]; enabled: !win.typing && win.selectedClip >= 0; context: Qt.ApplicationShortcut; onActivated: backend.removeClip(win.selectedClip) }
+    Shortcut { sequences: ["Delete", "Backspace"]; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.deleteSelection() }
     Shortcut { sequence: "Left"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.step(-1 / 30) }
     Shortcut { sequence: "Right"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.step(1 / 30) }
     Shortcut { sequence: "Shift+Left"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.step(-1) }
@@ -72,8 +93,8 @@ ApplicationWindow {
     Shortcut { sequence: "End"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.seek(backend.duration) }
     Shortcut { sequence: "Alt+Left"; enabled: !win.typing && win.selectedClip > 0; context: Qt.ApplicationShortcut; onActivated: { backend.moveClip(win.selectedClip, win.selectedClip - 1); win.selectedClip-- } }
     Shortcut { sequence: "Alt+Right"; enabled: !win.typing && win.selectedClip >= 0 && win.selectedClip < backend.clips.length - 1; context: Qt.ApplicationShortcut; onActivated: { backend.moveClip(win.selectedClip, win.selectedClip + 1); win.selectedClip++ } }
-    Shortcut { sequences: [StandardKey.Undo]; context: Qt.ApplicationShortcut; onActivated: backend.undo() }
-    Shortcut { sequences: [StandardKey.Redo, "Ctrl+Shift+Z"]; context: Qt.ApplicationShortcut; onActivated: backend.redo() }
+    Shortcut { sequences: [StandardKey.Undo]; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: backend.undo() }
+    Shortcut { sequences: ["Ctrl+Y", "Ctrl+Shift+Z", StandardKey.Redo]; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: backend.redo() }
     Shortcut { sequences: [StandardKey.Save]; context: Qt.ApplicationShortcut; onActivated: backend.save() }
     Shortcut { sequence: "Ctrl+Shift+S"; context: Qt.ApplicationShortcut; onActivated: backend.saveAs() }
     Shortcut { sequences: [StandardKey.Open]; context: Qt.ApplicationShortcut; onActivated: confirm.ask(qsTr("Open another project?"), function() { backend.open() }) }
@@ -182,7 +203,7 @@ ApplicationWindow {
                     selectedClip: win.selectedClip
                     selectedOverlay: win.selectedOverlay
                     playhead: win.playhead
-                    onOverlaySelected: function(i) { win.selectedOverlay = i }
+                    onOverlaySelected: function(i) { win.select("overlay", i) }
                     onSeekRequested: function(t) { win.seek(t) }
                 }
             }
@@ -197,9 +218,9 @@ ApplicationWindow {
                 selectedClip: win.selectedClip
                 selectedOverlay: win.selectedOverlay
                 onSeekRequested: function(t) { preview.pause(); win.seek(t) }
-                onClipSelected: function(i) { win.selectedClip = i; inspector.currentIndex = 0 }
-                onOverlaySelected: function(i) { win.selectedOverlay = i; inspector.currentIndex = 2 }
-                onCaptionsSelected: inspector.currentIndex = 1
+                onClipSelected: function(i) { win.select("clip", i) }
+                onOverlaySelected: function(i) { win.select("overlay", i) }
+                onCaptionsSelected: win.select("captions", -1)
                 onMusicSelected: inspector.currentIndex = 4
             }
         }

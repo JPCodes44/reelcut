@@ -38,12 +38,15 @@ omarchy-pkg-add whisper-cpp
 | S | Split at playhead |
 | ← / → | Step a frame (Shift: a second) |
 | Home / End | Go to start / end |
-| Delete | Delete the selected clip |
+| Delete | Delete what's selected (clip, text or captions) |
 | Alt+← / Alt+→ | Move the selected clip |
 | I | Add clips |
 | T | Add text at the playhead |
 | G | Show or hide safe zones |
-| Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
+| Ctrl+Z / Ctrl+Y | Undo / redo (Ctrl+Shift+Z also redoes) |
+| Drag in the preview | Move text, captions, or pan the picture |
+| Drag a corner / scroll | Resize text or captions, zoom the picture |
+| Drag in the timeline | Reorder clips, move text in time, trim either end |
 | Ctrl+S / Ctrl+Shift+S | Save / save as |
 | Ctrl+O | Open a project |
 | Ctrl+E | Export |

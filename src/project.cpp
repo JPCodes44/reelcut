@@ -107,7 +107,7 @@ QJsonObject Project::toJson(const QString &baseDir) const {
     QJsonArray overlayArray;
     for (const Overlay &o : overlays) {
         overlayArray.append(QJsonObject{
-            {"text", o.text}, {"start", o.start}, {"end", o.end}, {"y", o.y},
+            {"text", o.text}, {"start", o.start}, {"end", o.end}, {"x", o.x}, {"y", o.y},
             {"size", o.size}, {"animation", o.animation},
         });
     }
@@ -123,7 +123,9 @@ QJsonObject Project::toJson(const QString &baseDir) const {
         {"overlays", overlayArray},
         {"words", wordArray},
         {"captionStyle", captionStyle},
+        {"captionX", captionX},
         {"captionY", captionY},
+        {"captionScale", captionScale},
         {"look", QJsonObject{{"exposure", look.exposure}, {"contrast", look.contrast},
                              {"saturation", look.saturation}, {"temperature", look.temperature},
                              {"lut", storePath(look.lut, baseDir)}}},
@@ -168,6 +170,7 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
         overlay.text = o.value("text").toString();
         overlay.start = o.value("start").toDouble();
         overlay.end = o.value("end").toDouble(overlay.start + 3.0);
+        overlay.x = qBound(0.0, o.value("x").toDouble(overlay.x), 1.0);
         overlay.y = o.value("y").toDouble(overlay.y);
         overlay.size = o.value("size").toInt(overlay.size);
         overlay.animation = o.value("animation").toString(overlay.animation);
@@ -178,7 +181,9 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
         p.words.append({o.value("text").toString(), o.value("start").toDouble(), o.value("end").toDouble()});
     }
     p.captionStyle = json.value("captionStyle").toString(p.captionStyle);
+    p.captionX = qBound(0.0, json.value("captionX").toDouble(p.captionX), 1.0);
     p.captionY = json.value("captionY").toDouble(p.captionY);
+    p.captionScale = qBound(0.5, json.value("captionScale").toDouble(p.captionScale), 2.0);
     const QJsonObject l = json.value("look").toObject();
     p.look.exposure = l.value("exposure").toDouble();
     p.look.contrast = l.value("contrast").toDouble();
@@ -235,6 +240,8 @@ bool Project::setOverlayValue(int index, const QString &key, const QVariant &val
         o.start = qBound(0.0, value.toDouble(), o.end - 0.1);
     else if (key == "end")
         o.end = qMax(o.start + 0.1, value.toDouble());
+    else if (key == "x")
+        o.x = qBound(0.0, value.toDouble(), 1.0);
     else if (key == "y")
         o.y = qBound(0.05, value.toDouble(), 0.95);
     else if (key == "size")
@@ -259,6 +266,18 @@ bool Project::setLookValue(const QString &key, double value) {
         look.saturation = v;
     else if (key == "temperature")
         look.temperature = v;
+    else
+        return false;
+    return true;
+}
+
+bool Project::setCaptionValue(const QString &key, double value) {
+    if (key == "x")
+        captionX = qBound(0.0, value, 1.0);
+    else if (key == "y")
+        captionY = qBound(0.05, value, 0.95);
+    else if (key == "scale")
+        captionScale = qBound(0.5, value, 2.0);
     else
         return false;
     return true;

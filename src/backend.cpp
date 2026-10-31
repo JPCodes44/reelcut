@@ -108,7 +108,7 @@ QVariantList Backend::captionLines() const {
 QVariantList Backend::overlays() const {
     QVariantList list;
     for (const Overlay &o : m_project.overlays) {
-        list.append(QVariantMap{{"text", o.text}, {"start", o.start}, {"end", o.end}, {"y", o.y},
+        list.append(QVariantMap{{"text", o.text}, {"start", o.start}, {"end", o.end}, {"x", o.x}, {"y", o.y},
                                 {"size", o.size}, {"animation", o.animation}});
     }
     return list;
@@ -492,8 +492,12 @@ void Backend::setCaptionStyle(const QString &style) {
 }
 
 void Backend::setCaptionY(double y) {
-    m_project.captionY = qBound(0.1, y, 0.9);
-    changed();
+    setCaptionValue("y", y);
+}
+
+void Backend::setCaptionValue(const QString &key, double value) {
+    if (m_project.setCaptionValue(key, value))
+        changed();
 }
 
 // ---- Overlays ----

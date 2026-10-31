@@ -147,7 +147,7 @@ QJsonObject McpServer::handle(const QJsonObject &request) {
         const QString version = request.value("params").toObject().value("protocolVersion").toString("2025-06-18");
         return reply({{"protocolVersion", version},
                       {"capabilities", QJsonObject{{"tools", QJsonObject{}}}},
-                      {"serverInfo", QJsonObject{{"name", "reelcut"}, {"version", "0.3.1"}}},
+                      {"serverInfo", QJsonObject{{"name", "reelcut"}, {"version", "0.4.0"}}},
                       {"instructions", kInstructions}});
     }
     if (method == "ping")
@@ -231,12 +231,13 @@ QJsonObject McpServer::summary(const Call &call, bool withWords) const {
     for (int i = 0; i < p.overlays.size(); ++i) {
         const Overlay &o = p.overlays[i];
         overlays.append(QJsonObject{{"index", i}, {"text", o.text}, {"start", o.start}, {"end", o.end},
-                                    {"position", o.y}, {"size", o.size}, {"animation", o.animation}});
+                                    {"x", o.x}, {"position", o.y}, {"size", o.size}, {"animation", o.animation}});
     }
     QJsonArray lines;
     for (const CaptionLine &line : groupLines(p.words))
         lines.append(QJsonObject{{"start", line.start}, {"end", line.end}, {"text", line.text()}});
-    QJsonObject captions{{"style", p.captionStyle}, {"position", p.captionY}, {"word_count", int(p.words.size())},
+    QJsonObject captions{{"style", p.captionStyle}, {"x", p.captionX}, {"position", p.captionY},
+                         {"size", p.captionScale}, {"word_count", int(p.words.size())},
                          {"lines", lines}};
     if (withWords) {
         QJsonArray words;
@@ -505,7 +506,9 @@ void McpServer::defineTools() {
             {{"style", enumProp({"highlight", "pop", "bold", "box"},
                                 "highlight: line with the spoken word in the accent color; pop: one word at a time; "
                                 "bold: plain white line; box: white text on a dark box.")},
-             {"position", prop("number", "Vertical center, 0.1 (top) to 0.9 (bottom). Default 0.68.")},
+             {"position", prop("number", "Vertical center, 0.05 (top) to 0.95 (bottom). Default 0.68.")},
+             {"x", prop("number", "Horizontal center, 0 (left) to 1 (right). Default 0.5.")},
+             {"size", prop("number", "Size, 0.5 to 2 times normal. Default 1.")},
              {"words", QJsonObject{{"type", "array"},
                                    {"description", "Replace all caption words, each {text, start, end} in timeline seconds."},
                                    {"items", QJsonObject{{"type", "object"},
@@ -523,7 +526,11 @@ void McpServer::defineTools() {
                     p.captionStyle = style;
                 }
                 if (call.args.contains("position"))
-                    p.captionY = qBound(0.1, call.args.value("position").toDouble(), 0.9);
+                    p.setCaptionValue("y", call.args.value("position").toDouble());
+                if (call.args.contains("x"))
+                    p.setCaptionValue("x", call.args.value("x").toDouble());
+                if (call.args.contains("size"))
+                    p.setCaptionValue("scale", call.args.value("size").toDouble());
                 if (call.args.value("clear").toBool())
                     p.words.clear();
                 if (call.args.contains("words")) {
@@ -569,6 +576,7 @@ void McpServer::defineTools() {
             {"start", prop("number", "Timeline seconds it appears.")},
             {"end", prop("number", "Timeline seconds it disappears.")},
             {"position", prop("number", "Vertical center, 0.05 (top) to 0.95. Default 0.2.")},
+            {"x", prop("number", "Horizontal center, 0 (left) to 1 (right). Default 0.5.")},
             {"size", prop("integer", "Font size at 1080x1920, 40 to 200. Default 96.")},
             {"animation", enumProp({"pop", "fade", "slide", "none"}, "How it enters. Default pop.")}};
     };
@@ -576,7 +584,7 @@ void McpServer::defineTools() {
         if (args.contains("end"))
             p.setOverlayValue(index, "end", args.value("end").toDouble());
         const QList<QPair<QString, QString>> keys{{"text", "text"}, {"start", "start"}, {"end", "end"},
-                                                  {"position", "y"}, {"size", "size"}, {"animation", "animation"}};
+                                                  {"position", "y"}, {"x", "x"}, {"size", "size"}, {"animation", "animation"}};
         for (const auto &key : keys)
             if (args.contains(key.first) && !p.setOverlayValue(index, key.second, args.value(key.first).toVariant()))
                 throw ToolError{QString("Invalid %1.").arg(key.first)};

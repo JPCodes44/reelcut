@@ -6,6 +6,13 @@
 #include <QTemporaryDir>
 #include <QtTest>
 
+#include <functional>
+#include <QQmlApplicationEngine>
+#include <QQmlContext>
+#include <QQuickItem>
+#include <QQuickStyle>
+#include <QQuickWindow>
+
 #include "backend.h"
 #include "captions.h"
 #include "exportgraph.h"
@@ -139,7 +146,7 @@ private slots:
         p.clips[0].path = "/home/me/reels/clips/a.mp4";
         p.clips[0].panX = -0.5;
         p.music.path = "/home/me/reels/song.mp3";
-        p.overlays = {{"Wait for it", 0, 2, 0.2, 100, "slide"}};
+        p.overlays = {{"Wait for it", 0, 2, 0.5, 0.2, 100, "slide"}};
         p.words = {{"hello", 0.1, 0.4}};
         p.look.saturation = 0.3;
         p.captionStyle = "pop";
@@ -212,7 +219,7 @@ private slots:
     {
         Project p;
         p.words = {{"hey", 0, .3}, {"you", .3, .6}};
-        p.overlays = {{"Watch {this}", 0, 2, 0.2, 96, "pop"}};
+        p.overlays = {{"Watch {this}", 0, 2, 0.5, 0.2, 96, "pop"}};
         const QString ass = assDocument(p, "#FF0000");
         QCOMPARE(ass.count("Style: Caption"), 1);
         QCOMPARE(ass.count(",Caption,"), 2);
@@ -509,7 +516,7 @@ private slots:
                    media::clipFor(media::probe(dir.filePath("tall.png")), 1.5),
                    media::clipFor(media::probe(dir.filePath("video.mp4")))};
         p.clips[1].motion = "pan-right";
-        p.overlays = {{"Slide one", 0, 2, 0.2, 96, "pop"}};
+        p.overlays = {{"Slide one", 0, 2, 0.5, 0.2, 96, "pop"}};
 
         QString encoder, error;
         QVERIFY2(exportProject(p, "#FFD60A", dir.filePath("show.mp4"), &encoder, &error), qPrintable(error));
@@ -667,6 +674,119 @@ private slots:
         // The outside edit is one undo away in the window.
         backend.undo();
         QCOMPARE(backend.project().clips.size(), 1);
+    }
+
+    // The real window, offscreen: everything on the picture moves and resizes
+    // with the mouse, one undo step per gesture, Ctrl+Z / Ctrl+Y.
+    void previewItemsDragAndResize()
+    {
+        QTemporaryDir dir, state, themeDir;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1600x1200",
+                           "-frames:v", "1", dir.filePath("photo.jpg")}));
+        Project p;
+        p.clips = {media::clipFor(media::probe(dir.filePath("photo.jpg")), 4.0)};
+        p.clips[0].motion = "none";
+        p.clips[0].zoom = 1.5;
+        p.clips.append(media::clipFor(media::probe(dir.filePath("photo.jpg")), 2.0));
+        p.overlays = {{"drag me", 0, 4, 0.5, 0.3, 96, "none"}};
+        p.overlays[0].x = 0.5;
+        p.words = {{"hello", 0.0, 2.0}, {"there", 2.0, 4.0}};
+        write(dir.filePath("ui.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+
+        QQuickStyle::setStyle("Material");
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("ui.reel")));
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.load(QUrl("qrc:/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360, 860);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, 1.0));
+        QTest::qWait(300);
+
+        // Repeater delegates aren't QObject children, so walk the visual tree.
+        std::function<QQuickItem *(QQuickItem *, const QString &)> find = [&](QQuickItem *item, const QString &name) -> QQuickItem * {
+            if (item->objectName() == name)
+                return item;
+            for (QQuickItem *child : item->childItems())
+                if (QQuickItem *found = find(child, name))
+                    return found;
+            return nullptr;
+        };
+        auto center = [&](const char *name) {
+            auto *item = find(window->contentItem(), name);
+            if (!item || !item->isVisible())
+                return QPoint(-1, -1);
+            return item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint();
+        };
+        auto drag = [&](QPoint from, QPoint to) {
+            QTest::mousePress(window, Qt::LeftButton, {}, from);
+            for (int i = 1; i <= 8; ++i) {
+                QTest::mouseMove(window, from + (to - from) * i / 8);
+                QTest::qWait(15);
+            }
+            QTest::mouseRelease(window, Qt::LeftButton, {}, to);
+            QTest::qWait(30);
+        };
+
+        // Drag the text overlay right and down.
+        const QPoint text = center("overlayBox0");
+        QVERIFY(text.x() > 0);
+        drag(text, text + QPoint(60, 40));
+        QTRY_VERIFY(backend.project().overlays[0].x > 0.6);
+        QVERIFY(backend.project().overlays[0].y > 0.33);
+
+        // Pull its bottom-right corner out to make it bigger.
+        auto *box = find(window->contentItem(), "overlayBox0");
+        const QPoint corner = box->mapToScene(QPointF(box->width(), box->height())).toPoint();
+        drag(corner, corner + QPoint(50, 30));
+        QTRY_VERIFY(backend.project().overlays[0].size > 110);
+
+        // Ctrl+Z undoes the resize, then the move; Ctrl+Y brings the move back.
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+        QTRY_COMPARE(backend.project().overlays[0].size, 96);
+        QVERIFY(backend.project().overlays[0].x > 0.6);
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+        QTRY_COMPARE(backend.project().overlays[0].x, 0.5);
+        QTest::keyClick(window, Qt::Key_Y, Qt::ControlModifier);
+        QTRY_VERIFY(backend.project().overlays[0].x > 0.6);
+
+        // Captions move too.
+        const QPoint caption = center("captionBox");
+        QVERIFY(caption.x() > 0);
+        drag(caption, caption + QPoint(0, -80));
+        QTRY_VERIFY(backend.project().captionY < 0.6);
+
+        // Dragging the picture pans it; the wheel zooms it.
+        const QPoint picture = center("clipBox") + QPoint(0, 150);
+        drag(picture, picture + QPoint(-40, 0));
+        QTRY_VERIFY(backend.project().clips[0].panX > 0.05);
+        QTest::wheelEvent(window, picture, QPoint(0, 240), QPoint(0, 0));
+        QTRY_VERIFY(backend.project().clips[0].zoom > 1.5);
+
+        // In the timeline, dragging a text bar moves it later without changing its length.
+        auto *bar = find(window->contentItem(), "textBar0");
+        QVERIFY(bar);
+        const QPoint barCenter = bar->mapToScene(QPointF(bar->width() / 2, bar->height() / 2)).toPoint();
+        drag(barCenter, barCenter + QPoint(-200, 0));  // can't go before 0
+        QTRY_COMPARE(backend.project().overlays[0].start, 0.0);
+        const Overlay moved = backend.project().overlays[0];
+        QCOMPARE(moved.end - moved.start, 4.0);
+
+        // Dragging the first clip past the second swaps them.
+        auto *first = find(window->contentItem(), "clip0");
+        QVERIFY(first);
+        const QPoint from = first->mapToScene(QPointF(first->width() / 2, first->height() / 2)).toPoint();
+        drag(from, from + QPoint(int(first->width() * 0.9), 0));
+        QTRY_COMPARE(backend.project().clips[0].duration(), 2.0);
+        QCOMPARE(backend.project().clips[1].duration(), 4.0);
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+        QTRY_COMPARE(backend.project().clips[0].duration(), 4.0);
     }
 
 private:

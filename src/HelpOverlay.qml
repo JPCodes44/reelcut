@@ -41,12 +41,13 @@ Rectangle {
                 model: [
                     ["Space", qsTr("Play / pause")], ["S", qsTr("Split at playhead")],
                     ["← →", qsTr("Step a frame")], ["Shift+← →", qsTr("Step a second")],
-                    ["Home / End", qsTr("Go to start / end")], ["Delete", qsTr("Delete clip")],
+                    ["Home / End", qsTr("Go to start / end")], ["Delete", qsTr("Delete selection")],
                     ["Alt+← →", qsTr("Move clip")], ["I", qsTr("Add clips")],
                     ["T", qsTr("Add text")], ["G", qsTr("Safe zones")],
-                    ["Ctrl+Z", qsTr("Undo")], ["Ctrl+Shift+Z", qsTr("Redo")],
+                    ["Ctrl+Z", qsTr("Undo")], ["Ctrl+Y", qsTr("Redo")],
                     ["Ctrl+S", qsTr("Save")], ["Ctrl+O", qsTr("Open")],
                     ["Ctrl+E", qsTr("Export")], ["Ctrl+scroll", qsTr("Zoom timeline")],
+                    [qsTr("Drag"), qsTr("Move text, captions, picture")], [qsTr("Corner / scroll"), qsTr("Resize them")],
                     ["?", qsTr("Shortcuts")], ["Q", qsTr("Quit")]
                 ]
                 delegate: RowLayout {

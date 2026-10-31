@@ -7,6 +7,7 @@
         <file alias="Inspector.qml">Inspector.qml</file>
         <file alias="ValueSlider.qml">ValueSlider.qml</file>
         <file alias="HelpOverlay.qml">HelpOverlay.qml</file>
+        <file alias="EditBox.qml">EditBox.qml</file>
         <file alias="i18n/en.json">i18n/en.json</file>
     </qresource>
 </RCC>

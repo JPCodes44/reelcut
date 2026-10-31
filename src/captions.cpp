@@ -34,8 +34,8 @@ QString escape(QString text) {
     return text;
 }
 
-QString position(double y) {
-    return QString("\\an5\\pos(%1,%2)").arg(Project::Width / 2).arg(qRound(y * Project::Height));
+QString position(double x, double y) {
+    return QString("\\an5\\pos(%1,%2)").arg(qRound(x * Project::Width)).arg(qRound(y * Project::Height));
 }
 
 QString dialogue(double start, double end, const QString &style, const QString &text) {
@@ -119,7 +119,10 @@ QString assDocument(const Project &project, const QString &accent) {
     ass += style("Hook", 96, 1, 8, shade);
     ass += "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
 
-    const QString pos = position(project.captionY);
+    // Captions take the style's size times the project's caption scale.
+    const auto sized = [&](int size) { return QString("\\fs%1").arg(qRound(size * project.captionScale)); };
+    const QString pos = position(project.captionX, project.captionY) + sized(84);
+    const QString boxPos = position(project.captionX, project.captionY) + sized(76);
     const QString accentTag = QString("\\c%1").arg(tagColor(QColor(accent)));
     const QString resetTag = QString("\\c%1").arg(tagColor(Qt::white));
     for (const CaptionLine &line : groupLines(project.words)) {
@@ -146,7 +149,7 @@ QString assDocument(const Project &project, const QString &accent) {
                                     + escape(line.words[i].text.toUpper()));
             }
         } else if (captionStyle == "box") {
-            ass += dialogue(line.start, line.end, "Box", "{" + pos + "}" + escape(line.text()));
+            ass += dialogue(line.start, line.end, "Box", "{" + boxPos + "}" + escape(line.text()));
         } else {
             ass += dialogue(line.start, line.end, "Caption", "{" + pos + "}" + escape(line.text().toUpper()));
         }
@@ -155,7 +158,7 @@ QString assDocument(const Project &project, const QString &accent) {
     for (const Overlay &overlay : project.overlays) {
         if (overlay.text.trimmed().isEmpty() || overlay.end <= overlay.start)
             continue;
-        const int x = Project::Width / 2, y = qRound(overlay.y * Project::Height);
+        const int x = qRound(overlay.x * Project::Width), y = qRound(overlay.y * Project::Height);
         QString tags = QString("\\an5\\fs%1").arg(overlay.size);
         if (overlay.animation == "fade")
             tags += QString("\\pos(%1,%2)\\fad(250,150)").arg(x).arg(y);

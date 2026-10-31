@@ -35,7 +35,9 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList captionLines READ captionLines NOTIFY projectChanged)
     Q_PROPERTY(int wordCount READ wordCount NOTIFY projectChanged)
     Q_PROPERTY(QString captionStyle READ captionStyle NOTIFY projectChanged)
+    Q_PROPERTY(double captionX READ captionX NOTIFY projectChanged)
     Q_PROPERTY(double captionY READ captionY NOTIFY projectChanged)
+    Q_PROPERTY(double captionSize READ captionSize NOTIFY projectChanged)
     Q_PROPERTY(QVariantList overlays READ overlays NOTIFY projectChanged)
     Q_PROPERTY(QVariantMap music READ music NOTIFY projectChanged)
     Q_PROPERTY(QVariantMap look READ look NOTIFY projectChanged)
@@ -66,7 +68,9 @@ public:
     QVariantList captionLines() const;
     int wordCount() const { return m_project.words.size(); }
     QString captionStyle() const { return m_project.captionStyle; }
+    double captionX() const { return m_project.captionX; }
     double captionY() const { return m_project.captionY; }
+    double captionSize() const { return m_project.captionScale; }
     QVariantList overlays() const;
     QVariantMap music() const;
     QVariantMap look() const;
@@ -113,6 +117,8 @@ public:
     Q_INVOKABLE void clearCaptions();
     Q_INVOKABLE void setCaptionStyle(const QString &style);
     Q_INVOKABLE void setCaptionY(double y);
+    // x, y or scale; no undo step of its own (call checkpoint() first).
+    Q_INVOKABLE void setCaptionValue(const QString &key, double value);
 
     // Text overlays
     Q_INVOKABLE int addOverlay(double time);

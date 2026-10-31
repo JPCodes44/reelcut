@@ -203,6 +203,38 @@ Rectangle {
                     }
                 }
 
+                // The picture itself: drag to pan the framing, corners or wheel to zoom.
+                EditBox {
+                    objectName: "clipBox"
+                    anchors.fill: parent
+                    handlesInside: true
+                    visible: root.currentClip !== null
+                    selected: win.selectionKind === "clip" && win.selectedClip === root.clipIndex
+                    property real startPanX
+                    property real startPanY
+                    property real startZoom
+                    property real spanX
+                    property real spanY
+                    onPressed: {
+                        win.select("clip", root.clipIndex)
+                        startPanX = root.currentClip.panX
+                        startPanY = root.currentClip.panY
+                        startZoom = root.currentClip.zoom
+                        // How far a pan of 1 moves the picture, as framed now.
+                        spanX = (framed.width - frame.width) / 2
+                        spanY = (framed.height - frame.height) / 2
+                    }
+                    onBegan: backend.checkpoint()
+                    onDragged: function(dx, dy) {
+                        if (spanX > 0.5) backend.setClipValue(root.clipIndex, "panX", startPanX - dx / spanX)
+                        if (spanY > 0.5) backend.setClipValue(root.clipIndex, "panY", startPanY - dy / spanY)
+                    }
+                    onResized: function(factor) { backend.setClipValue(root.clipIndex, "zoom", startZoom * factor) }
+                    onWheeled: function(steps) {
+                        backend.setClipValue(root.clipIndex, "zoom", root.currentClip.zoom * Math.pow(1.05, steps))
+                    }
+                }
+
                 // Temperature, as a light tint over the picture.
                 Rectangle {
                     anchors.fill: parent

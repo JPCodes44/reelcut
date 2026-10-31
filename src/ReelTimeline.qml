@@ -104,13 +104,18 @@ Rectangle {
 
         // Video lane
         Repeater {
-            model: backend.clips
+            model: backend.clips.length
             delegate: Rectangle {
                 id: clipItem
-                required property var modelData
+                objectName: "clip" + index
+                // Items stay put while their entry changes, so a drag survives edits.
+                readonly property var modelData: backend.clips[index] || ({})
                 required property int index
                 readonly property bool selected: index === root.selectedClip
-                x: modelData.start * root.pps
+                property real dragOffset: 0
+                x: modelData.start * root.pps + dragOffset
+                z: dragOffset !== 0 ? 10 : 0
+                opacity: dragOffset !== 0 ? 0.8 : 1
                 y: root.rulerH + 6
                 width: Math.max(4, modelData.duration * root.pps - 2)
                 height: root.videoH
@@ -157,14 +162,42 @@ Rectangle {
                     background: Rectangle { color: Qt.rgba(0, 0, 0, 0.6); radius: 2 }
                 }
 
+                // Click to select and seek; drag sideways to move the clip elsewhere.
                 MouseArea {
                     anchors.fill: parent
                     anchors.leftMargin: 8
                     anchors.rightMargin: 8
+                    preventStealing: true
+                    cursorShape: dragging ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+                    property real startX: 0
+                    property bool dragging: false
                     onPressed: function(mouse) {
+                        startX = mapToItem(flick.contentItem, mouse.x, 0).x
+                        dragging = false
                         root.clipSelected(clipItem.index)
                         root.seekRequested(clipItem.modelData.start + mouse.x / root.pps)
                     }
+                    onPositionChanged: function(mouse) {
+                        if (!pressed) return
+                        const dx = mapToItem(flick.contentItem, mouse.x, 0).x - startX
+                        if (!dragging && Math.abs(dx) < 6) return
+                        dragging = true
+                        clipItem.dragOffset = dx
+                    }
+                    onReleased: function(mouse) {
+                        if (dragging) {
+                            // Drop where the clip's middle lands.
+                            const middle = clipItem.modelData.start + clipItem.modelData.duration / 2 + clipItem.dragOffset / root.pps
+                            const target = backend.locate(Math.max(0, Math.min(middle, backend.duration))).index
+                            clipItem.dragOffset = 0
+                            dragging = false
+                            if (target >= 0 && target !== clipItem.index) {
+                                backend.moveClip(clipItem.index, target)
+                                root.clipSelected(target)
+                            }
+                        }
+                    }
+                    onCanceled: { clipItem.dragOffset = 0; dragging = false }
                 }
 
                 // Trim handles: drag to move the in and out points.
@@ -230,9 +263,12 @@ Rectangle {
 
         // Text lane
         Repeater {
-            model: backend.overlays
+            model: backend.overlays.length
             delegate: Rectangle {
-                required property var modelData
+                id: textBar
+                objectName: "textBar" + index
+                // Items stay put while their entry changes, so a drag survives edits.
+                readonly property var modelData: backend.overlays[index] || ({})
                 required property int index
                 x: modelData.start * root.pps
                 y: root.rulerH + 6 + root.videoH + 6 + root.laneH + 6
@@ -250,9 +286,50 @@ Rectangle {
                     font.pixelSize: 11
                     elide: Text.ElideRight
                 }
+                // Drag to move in time; drag an edge to change when it starts or ends.
                 MouseArea {
                     anchors.fill: parent
-                    onClicked: { root.overlaySelected(parent.index); root.seekRequested(parent.modelData.start) }
+                    preventStealing: true
+                    hoverEnabled: true
+                    cursorShape: mouseX < 6 || mouseX > width - 6 ? Qt.SizeHorCursor : Qt.OpenHandCursor
+                    property string part: "body"
+                    property real startX: 0
+                    property real startStart: 0
+                    property real startEnd: 0
+                    property bool moving: false
+                    onPressed: function(mouse) {
+                        part = mouse.x < 6 ? "start" : mouse.x > width - 6 ? "end" : "body"
+                        startX = mapToItem(flick.contentItem, mouse.x, 0).x
+                        startStart = textBar.modelData.start
+                        startEnd = textBar.modelData.end
+                        moving = false
+                        root.overlaySelected(textBar.index)
+                    }
+                    onPositionChanged: function(mouse) {
+                        if (!pressed) return
+                        const dt = (mapToItem(flick.contentItem, mouse.x, 0).x - startX) / root.pps
+                        if (!moving && Math.abs(dt * root.pps) < 3) return
+                        if (!moving) {
+                            moving = true
+                            backend.checkpoint()
+                        }
+                        if (part === "start") {
+                            backend.setOverlayValue(textBar.index, "start", Math.max(0, startStart + dt))
+                        } else if (part === "end") {
+                            backend.setOverlayValue(textBar.index, "end", startEnd + dt)
+                        } else {
+                            // Keep its length; set the side moving away first so neither clamps.
+                            const shift = Math.max(-startStart, dt)
+                            if (shift > 0) {
+                                backend.setOverlayValue(textBar.index, "end", startEnd + shift)
+                                backend.setOverlayValue(textBar.index, "start", startStart + shift)
+                            } else {
+                                backend.setOverlayValue(textBar.index, "start", startStart + shift)
+                                backend.setOverlayValue(textBar.index, "end", startEnd + shift)
+                            }
+                        }
+                    }
+                    onReleased: if (!moving) root.seekRequested(textBar.modelData.start)
                 }
             }
         }
