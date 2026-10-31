@@ -85,7 +85,7 @@ Export: `ExportGraph.build(project)` → `.ass` written to a temp dir → `Expor
 
 ## Testing
 
-Qt Test (`tests/`), run with `make check`:
+Qt Test (`tests/reelcut_tests.cpp`), run with `bin/test`:
 - `ExportGraph`: golden tests for filter strings (speed, crop, color, music, no-audio clip).
 - `CaptionRenderer`: line grouping and ASS timestamps.
 - `SilenceParser`: parsing of real silencedetect output; keep-range computation with padding.
@@ -95,5 +95,5 @@ Qt Test (`tests/`), run with `make check`:
 
 ## Packaging
 
-qmake6 + make, single binary `reelcut`, `.desktop` file, SVG icon, PKGBUILD in `pkg/`.
-Runtime deps: qt6-base, qt6-declarative, qt6-multimedia, ffmpeg. Optional: whisper.cpp (captions).
+qmake6 + make via `bin/build`, single binary `reelcut`, `.desktop` file, SVG icon, PKGBUILD in `pkgbuild/`, installed with `bin/install`. Project lives in `~/Work/reelcut` and follows the omarchy-app skill (live theme accent and rounding, Translator with `qsTr`, portal file picker, `?` help overlay, `Q` quit with unsaved-work prompt).
+Runtime deps: qt6-base, qt6-declarative, qt6-multimedia, ffmpeg. Optional: `whisper-cpp` from extra (captions; binary `whisper-cli`).
