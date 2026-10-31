@@ -154,7 +154,7 @@ QJsonObject McpServer::handle(const QJsonObject &request) {
         const QString version = request.value("params").toObject().value("protocolVersion").toString("2025-06-18");
         return reply({{"protocolVersion", version},
                       {"capabilities", QJsonObject{{"tools", QJsonObject{}}}},
-                      {"serverInfo", QJsonObject{{"name", "reelcut"}, {"version", "0.1.0"}}},
+                      {"serverInfo", QJsonObject{{"name", "reelcut"}, {"version", "0.2.0"}}},
                       {"instructions", kInstructions}});
     }
     if (method == "ping")
