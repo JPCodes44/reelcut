@@ -4,6 +4,7 @@
 #include "effects.h"
 #include "transitions.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -113,6 +114,9 @@ QStringList effectChains(const Project &project) {
     return out;
 }
 
+// Back down to the 4:2:0 that phones play, with Lanczos chroma, after text.
+const char *const kTo420 = "scale=flags=lanczos+accurate_rnd+full_chroma_int,format=yuv420p";
+
 // The look sliders, the filter, the user's LUT, then text, which must stay white.
 // Fisheye text images (inputs textInputs[i] >= 0) go over everything, each
 // switched on for its overlay's stretch of time.
@@ -131,15 +135,23 @@ QString videoFinish(const Project &project, const ExportOptions &options, const 
         video << QString("lut3d=file=%1:interp=tetrahedral").arg(options.filterFile);
     if (!options.lutFile.isEmpty())
         video << QString("lut3d=file=%1").arg(options.lutFile);
+    // Text is drawn onto full-color-resolution frames (4:4:4), so colored edges
+    // keep every pixel, then the frame goes down to 4:2:0 with a Lanczos
+    // filter, which keeps them sharper than drawing straight onto 4:2:0.
+    const bool hasText = !options.assFile.isEmpty() || std::any_of(textInputs.begin(), textInputs.end(),
+                                                                   [](int i) { return i >= 0; });
+    if (hasText)
+        video << "format=yuv444p";
     if (!options.assFile.isEmpty())
         video << QString("ass=filename=%1").arg(options.assFile);
+    const QString finish = hasText ? QString(",") + kTo420 : QString();
     const QString in = project.effects.isEmpty() ? "[vcat]" : "[vfx]";
     QVector<int> texts;
     for (int i = 0; i < textInputs.size(); ++i)
         if (textInputs[i] >= 0)
             texts << i;
     if (texts.isEmpty())
-        return in + (video.isEmpty() ? QString("null") : video.join(',')) + "[vout]";
+        return in + (video.isEmpty() ? QString("null") : video.join(',')) + finish + "[vout]";
 
     QStringList out{in + (video.isEmpty() ? QString("null") : video.join(',')) + "[vlook]"};
     QString below = "[vlook]";
@@ -159,8 +171,9 @@ QString videoFinish(const Project &project, const ExportOptions &options, const 
         const QString next = k == texts.size() - 1 ? "[vout]" : QString("[vt%1]").arg(k);
         out << QString("[%1:v]format=rgba%2%3").arg(textInputs[texts[k]])
                    .arg(fades.isEmpty() ? QString() : "," + fades.join(','), pad);
-        out << QString("%1%2overlay=x=0:y=%3:enable='between(t,%4,%5)':format=auto,format=yuv420p%6")
-                   .arg(below, pad, y, s, e, next);
+        const bool last = k == texts.size() - 1;
+        out << QString("%1%2overlay=x=0:y=%3:enable='between(t,%4,%5)':format=yuv444%6%7")
+                   .arg(below, pad, y, s, e, last ? finish : QString(), next);
         below = next;
     }
     return out.join(';');
@@ -329,10 +342,10 @@ QStringList exportArgs(const Project &project, const ExportOptions &options) {
     args << "-filter_complex" << graph.join(';');
     args << "-map" << "[vout]" << "-map" << "[aout]";
     if (options.encoder == "h264_nvenc")
-        args << "-c:v" << "h264_nvenc" << "-preset" << "p5" << "-rc" << "vbr" << "-cq" << "21"
+        args << "-c:v" << "h264_nvenc" << "-preset" << "p5" << "-rc" << "vbr" << "-cq" << "18"
              << "-b:v" << "0" << "-maxrate" << "20M" << "-bufsize" << "40M";
     else
-        args << "-c:v" << "libx264" << "-preset" << "medium" << "-crf" << "20";
+        args << "-c:v" << "libx264" << "-preset" << "medium" << "-crf" << "17";
     args << "-profile:v" << "high" << "-pix_fmt" << "yuv420p" << "-r" << QString::number(Project::Fps)
          << "-g" << QString::number(Project::Fps * 2)
          << "-c:a" << "aac" << "-b:a" << "192k" << "-ar" << "48000" << "-ac" << "2"

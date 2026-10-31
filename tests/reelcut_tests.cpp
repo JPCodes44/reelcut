@@ -295,7 +295,8 @@ private slots:
         QVERIFY(graph.contains("setpts=(PTS-STARTPTS)/2,"));
         QVERIFY(graph.contains("[2:a]atrim=start=0:duration=3,"));
         QVERIFY(graph.contains("sidechaincompress"));
-        QVERIFY(graph.contains("[vcat]lut3d=file=look.cube,ass=filename=captions.ass[vout]"));
+        QVERIFY(graph.contains("[vcat]lut3d=file=look.cube,format=yuv444p,ass=filename=captions.ass,"
+                               "scale=flags=lanczos+accurate_rnd+full_chroma_int,format=yuv420p[vout]"));
         QVERIFY(!graph.contains("eq="));
         QVERIFY(args.contains("libx264"));
         QCOMPARE(args.last(), QString("/out/reel.mp4"));

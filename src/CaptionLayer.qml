@@ -65,6 +65,8 @@ Item {
 
         // Pop: the spoken word alone, growing in.
         Text {
+            // Glyph outlines drawn as curves: sharp at any size and zoom.
+            renderType: Text.CurveRendering
             id: popWord
             visible: root.style === "pop"
             anchors.centerIn: parent
@@ -88,6 +90,8 @@ Item {
             height: boxText.implicitHeight + 20 * root.scaleFactor * backend.captionSize
             color: Qt.rgba(0.07, 0.07, 0.07, 0.87)
             Text {
+                // Glyph outlines drawn as curves: sharp at any size and zoom.
+                renderType: Text.CurveRendering
                 id: boxText
                 anchors.centerIn: parent
                 text: root.line ? root.line.words.map(w => w.text).join(" ") : ""
@@ -183,6 +187,8 @@ Item {
                     color: overlay.boxColor
                 }
                 Text {
+                    // Glyph outlines drawn as curves: sharp at any size and zoom.
+                    renderType: Text.CurveRendering
                     // ASS draws a hard shadow the shadow distance down and right.
                     readonly property real d: (overlay.modelData.shadowDistanceValue || 0) * root.scaleFactor
                     visible: !overlay.fisheye && overlay.shadowColor.a > 0 && d > 0
@@ -200,6 +206,8 @@ Item {
                 Repeater {
                     model: overlay.outlineOffsets
                     Text {
+                        // Glyph outlines drawn as curves: sharp at any size and zoom.
+                        renderType: Text.CurveRendering
                         required property var modelData
                         x: modelData[0]
                         y: modelData[1]
@@ -212,6 +220,8 @@ Item {
                     }
                 }
                 Text {
+                    // Glyph outlines drawn as curves: sharp at any size and zoom.
+                    renderType: Text.CurveRendering
                     id: label
                     objectName: "overlayText" + overlay.index
                     width: Math.min(implicitWidth, root.width * 0.94)
@@ -238,12 +248,11 @@ Item {
                 visible: false
                 sourceRect: Qt.rect(-(lens.width - label.width) / 2, -(lens.height - label.height) / 2,
                                     lens.width, lens.height)
-                // The lens enlarges the middle, so capture the text finer than it shows
-                // (FisheyeText::FlatScale) or it goes soft.
-                textureSize: Qt.size(Math.ceil(lens.width * 4 * Screen.devicePixelRatio),
-                                     Math.ceil(lens.height * 4 * Screen.devicePixelRatio))
+                // The lens enlarges the middle about 1.5x, so capture the text 3x finer
+                // than it shows; the shader averages 4 samples per pixel from it.
+                textureSize: Qt.size(Math.ceil(lens.width * 3 * Screen.devicePixelRatio),
+                                     Math.ceil(lens.height * 3 * Screen.devicePixelRatio))
                 smooth: true
-                mipmap: true
             }
             ShaderEffect {
                 id: lens
@@ -259,6 +268,9 @@ Item {
                 readonly property real d: (overlay.modelData.shadowDistanceValue || 0) * root.scaleFactor
                 property point shadow: Qt.point(0.66 * d / Math.max(1, width), d / Math.max(1, height))
                 property point blur: Qt.point(5 * root.scaleFactor / Math.max(1, width), 5 * root.scaleFactor / Math.max(1, height))
+                // One screen pixel, in the lens's 0..1 coordinates, for the 4-sample average.
+                property point px: Qt.point(1 / Math.max(1, width * Screen.devicePixelRatio),
+                                            1 / Math.max(1, height * Screen.devicePixelRatio))
                 property vector4d shadowColor: Qt.vector4d(overlay.shadowColor.r, overlay.shadowColor.g,
                                                            overlay.shadowColor.b, overlay.shadowColor.a)
                 fragmentShader: "qrc:/shaders/fisheye.frag.qsb"

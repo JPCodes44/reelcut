@@ -13,6 +13,7 @@ layout(std140, binding = 0) uniform buf {
     vec2 shadow;      // shadow offset, in this item's 0..1 coordinates
     vec2 blur;        // shadow softness, likewise
     vec4 shadowColor; // straight RGBA; alpha 0 for no shadow
+    vec2 px;          // one screen pixel in 0..1 coordinates
 };
 layout(binding = 1) uniform sampler2D source;
 
@@ -27,7 +28,11 @@ vec4 lens(vec2 uv) {
 }
 
 void main() {
-    vec4 text = lens(qt_TexCoord0);
+    // Four samples spread over the pixel: sharp where the lens enlarges, smooth
+    // where it shrinks the text toward the rim.
+    vec2 q = px * 0.25;
+    vec4 text = 0.25 * (lens(qt_TexCoord0 + vec2(-q.x, -q.y)) + lens(qt_TexCoord0 + vec2(q.x, -q.y))
+                      + lens(qt_TexCoord0 + vec2(-q.x, q.y)) + lens(qt_TexCoord0 + vec2(q.x, q.y)));
     float a = 0.0;
     for (int i = 0; i < 12; ++i) {
         float t = float(i) * 0.5236;
