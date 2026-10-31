@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Reelcut
+Comment=Make vertical reels for Instagram and TikTok
+Exec=reelcut %F
+Icon=reelcut
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+MimeType=video/mp4;video/quicktime;video/webm;video/x-matroska;
+StartupWMClass=reelcut

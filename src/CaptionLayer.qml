@@ -93,7 +93,7 @@ Item {
             readonly property real entrance: Math.min(1, Math.max(0, age / 0.25))
             visible: root.time >= modelData.start && root.time < modelData.end && modelData.text.length > 0
             text: modelData.text
-            width: root.width * 0.9
+            width: root.width * 0.94
             x: (root.width - width) / 2
             y: modelData.y * root.height - height / 2
                + (modelData.animation === "slide" ? (1 - entrance) * 160 * root.scaleFactor : 0)
