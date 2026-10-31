@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Controls.Material
 import QtQuick.Effects
 import QtQuick.Layouts
+import QtQuick.Shapes
 import QtMultimedia
 
 // Plays the edit: one player hops from clip to clip, at each clip's speed,
@@ -215,22 +216,28 @@ Rectangle {
                     scaleFactor: frame.scaleFactor
                 }
 
-                // Where the app's own buttons and text sit over the video.
-                Item {
+                // Where the app's own buttons and text don't cover the video:
+                // a dashed outline only, so the picture itself stays untouched.
+                Shape {
+                    id: safeArea
                     anchors.fill: parent
                     visible: root.safeZones && backend.clips.length > 0
                     readonly property bool tiktok: backend.platform === "tiktok"
-                    readonly property real topBand: (tiktok ? 160 : 220) * frame.scaleFactor
-                    readonly property real bottomBand: (tiktok ? 480 : 420) * frame.scaleFactor
-                    readonly property real rightBand: (tiktok ? 150 : 130) * frame.scaleFactor
-                    Rectangle { width: parent.width; height: parent.topBand; color: Qt.rgba(1, 0.3, 0.3, 0.13) }
-                    Rectangle { width: parent.width; height: parent.bottomBand; anchors.bottom: parent.bottom; color: Qt.rgba(1, 0.3, 0.3, 0.13) }
-                    Rectangle {
-                        width: parent.rightBand
-                        anchors.right: parent.right
-                        y: parent.topBand
-                        height: parent.height - parent.topBand - parent.bottomBand
-                        color: Qt.rgba(1, 0.3, 0.3, 0.13)
+                    readonly property real topEdge: (tiktok ? 160 : 220) * frame.scaleFactor
+                    readonly property real bottomEdge: height - (tiktok ? 480 : 420) * frame.scaleFactor
+                    readonly property real leftEdge: 40 * frame.scaleFactor
+                    readonly property real rightEdge: width - (tiktok ? 150 : 130) * frame.scaleFactor
+                    ShapePath {
+                        strokeColor: Qt.rgba(1, 1, 1, 0.7)
+                        strokeWidth: 1
+                        strokeStyle: ShapePath.DashLine
+                        dashPattern: [4, 4]
+                        fillColor: "transparent"
+                        startX: safeArea.leftEdge; startY: safeArea.topEdge
+                        PathLine { x: safeArea.rightEdge; y: safeArea.topEdge }
+                        PathLine { x: safeArea.rightEdge; y: safeArea.bottomEdge }
+                        PathLine { x: safeArea.leftEdge; y: safeArea.bottomEdge }
+                        PathLine { x: safeArea.leftEdge; y: safeArea.topEdge }
                     }
                 }
 
