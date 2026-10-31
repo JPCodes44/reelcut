@@ -8,6 +8,9 @@ Item {
     property real time: 0
     property real scaleFactor: 1
     property bool editable: true
+    // Entrances play only while playing; paused, everything sits at its final
+    // size and place, so it can be grabbed where it looks to be.
+    property bool animate: false
     // Frame scale times the ASS-to-Qt font size conversion.
     readonly property real fontScale: scaleFactor * backend.captionScale
     readonly property real captionPx: Math.max(1, Math.round(84 * fontScale * backend.captionSize))
@@ -73,7 +76,7 @@ Item {
             color: "white"
             style: Text.Outline
             styleColor: "black"
-            scale: word ? Math.min(1, 0.7 + 0.3 * (root.time - word.start) / 0.09) : 1
+            scale: word && root.animate ? Math.min(1, 0.7 + 0.3 * (root.time - word.start) / 0.09) : 1
         }
 
         // Box: plain case on a dark box.
@@ -129,7 +132,7 @@ Item {
             readonly property var modelData: backend.overlays[index] || ({})
             required property int index
             readonly property real age: root.time - modelData.start
-            readonly property real entrance: Math.min(1, Math.max(0, age / 0.25))
+            readonly property real entrance: root.animate ? Math.min(1, Math.max(0, age / 0.25)) : 1
             visible: root.time >= modelData.start && root.time < modelData.end && modelData.text.length > 0
             width: label.width
             height: label.height
@@ -138,6 +141,7 @@ Item {
 
             Text {
                 id: label
+                objectName: "overlayText" + overlay.index
                 width: Math.min(implicitWidth, root.width * 0.94)
                 text: overlay.modelData.text
                 horizontalAlignment: Text.AlignHCenter
@@ -152,7 +156,7 @@ Item {
                     y: overlay.modelData.animation === "slide" ? (1 - overlay.entrance) * 160 * root.scaleFactor : 0
                 }
                 opacity: overlay.modelData.animation === "fade" || overlay.modelData.animation === "slide" ? overlay.entrance : 1
-                scale: overlay.modelData.animation === "pop" ? 0.4 + 0.6 * Math.min(1, overlay.age / 0.18) : 1
+                scale: overlay.modelData.animation === "pop" && root.animate ? 0.4 + 0.6 * Math.min(1, overlay.age / 0.18) : 1
             }
 
             EditBox {

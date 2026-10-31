@@ -688,7 +688,7 @@ private slots:
         p.clips[0].motion = "none";
         p.clips[0].zoom = 1.5;
         p.clips.append(media::clipFor(media::probe(dir.filePath("photo.jpg")), 2.0));
-        p.overlays = {{"drag me", 0, 4, 0.5, 0.3, 96, "none"}};
+        p.overlays = {{"drag me", 0, 4, 0.5, 0.3, 96, "pop"}};
         p.overlays[0].x = 0.5;
         p.words = {{"hello", 0.0, 2.0}, {"there", 2.0, 4.0}};
         write(dir.filePath("ui.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
@@ -733,6 +733,14 @@ private slots:
             QTest::mouseRelease(window, Qt::LeftButton, {}, to);
             QTest::qWait(30);
         };
+
+        // Paused at the very start of a pop entrance, the text is at full size,
+        // so its box fits what's on screen.
+        QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, 0.0));
+        QTest::qWait(100);
+        QCOMPARE(find(window->contentItem(), "overlayText0")->scale(), 1.0);
+        QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, 1.0));
+        QTest::qWait(100);
 
         // Drag the text overlay right and down.
         const QPoint text = center("overlayBox0");

@@ -245,6 +245,7 @@ Rectangle {
                 CaptionLayer {
                     anchors.fill: parent
                     time: root.time
+                    animate: root.playing
                     scaleFactor: frame.scaleFactor
                 }
 
