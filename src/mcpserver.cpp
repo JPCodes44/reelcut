@@ -1,5 +1,10 @@
 #include "mcpserver.h"
 
+#include "bodyeffects.h"
+#include "effects.h"
+#include "filters.h"
+#include "transitions.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -52,6 +57,28 @@ QJsonObject failure(const QString &message) {
 struct ToolError {
     QString message;
 };
+
+// The color wheels argument shared by edit_clip and set_look.
+QJsonObject wheelsProp() {
+    return prop("object",
+                "DaVinci-style color wheels, as {key: number}. Keys: lift.x, lift.y, lift.master, and the same "
+                "for gamma, gain and offset (x, y: the puck in the unit disc, red at the top and hue clockwise "
+                "to green and blue; master -1 to 1); contrast (0-2, default 1), pivot (0-1, default 0.435), "
+                "saturation (0-2, default 1), hue (degrees), temperature and tint (-1 to 1). "
+                "{\"reset\": 1} clears them, \"reset.lift\" one wheel.");
+}
+
+// Applies a color_wheels argument to a grade target (-1: the whole reel).
+void applyWheels(Project &p, int index, const QJsonValue &value) {
+    const QJsonObject wheels = value.toObject();
+    // Resets first, so {"reset": 1, "gain.master": 0.2} starts clean.
+    for (auto it = wheels.begin(); it != wheels.end(); ++it)
+        if (it.key().startsWith("reset") && !p.setGrade(index, it.key(), 0))
+            throw ToolError{QString("Unknown color wheel key %1.").arg(it.key())};
+    for (auto it = wheels.begin(); it != wheels.end(); ++it)
+        if (!it.key().startsWith("reset") && !p.setGrade(index, it.key(), it.value().toDouble()))
+            throw ToolError{QString("Unknown color wheel key %1.").arg(it.key())};
+}
 
 }  // namespace
 
@@ -214,24 +241,35 @@ bool McpServer::save(const QString &path, const Project &project, QString *error
 QJsonObject McpServer::summary(const Call &call, bool withWords) const {
     const Project &p = call.project;
     QJsonArray clips;
-    double start = 0.0;
+    const QVector<double> starts = p.clipStarts();
     for (int i = 0; i < p.clips.size(); ++i) {
         const Clip &c = p.clips[i];
         clips.append(QJsonObject{
-            {"index", i}, {"file", c.path}, {"start", start}, {"duration", c.duration()},
+            {"index", i}, {"file", c.path}, {"start", starts[i]}, {"duration", c.duration()},
             {"source_in", c.in}, {"source_out", c.out}, {"source_duration", c.sourceDuration},
             {"speed", c.speed}, {"zoom", c.zoom}, {"pan_x", c.panX}, {"pan_y", c.panY},
             {"size", QString("%1x%2").arg(c.width).arg(c.height)}, {"has_audio", c.audio},
             {"photo", c.still}, {"motion", c.motion},
+            {"transition", c.transition}, {"transition_seconds", c.transitionSeconds},
+            {"overlap", p.overlap(i)}, {"body", c.body}, {"body_amount", c.bodyAmount},
+            {"color_wheels", c.grade.isNeutral() ? QJsonValue(QJsonValue::Null) : QJsonValue(c.grade.toJson())},
             {"missing", !QFileInfo::exists(c.path)},
         });
-        start += c.duration();
     }
     QJsonArray overlays;
     for (int i = 0; i < p.overlays.size(); ++i) {
         const Overlay &o = p.overlays[i];
         overlays.append(QJsonObject{{"index", i}, {"text", o.text}, {"start", o.start}, {"end", o.end},
-                                    {"x", o.x}, {"position", o.y}, {"size", o.size}, {"animation", o.animation}});
+                                    {"x", o.x}, {"position", o.y}, {"size", o.size}, {"animation", o.animation},
+                                    {"style", o.style}, {"bulge", o.bulge}, {"fill", o.colorOf("fill")},
+                                    {"outline", o.colorOf("outline")}, {"shadow", o.colorOf("shadow")},
+                                    {"box", o.colorOf("box")}});
+    }
+    QJsonArray effects;
+    for (int i = 0; i < p.effects.size(); ++i) {
+        const Effect &e = p.effects[i];
+        effects.append(QJsonObject{{"index", i}, {"kind", e.kind}, {"start", e.start}, {"end", e.end},
+                                   {"intensity", e.intensity}, {"speed", e.speed}});
     }
     QJsonArray lines;
     for (const CaptionLine &line : groupLines(p.words))
@@ -253,9 +291,13 @@ QJsonObject McpServer::summary(const Call &call, bool withWords) const {
         {"clips", clips},
         {"captions", captions},
         {"text_overlays", overlays},
+        {"effects", effects},
         {"look", QJsonObject{{"exposure", p.look.exposure}, {"contrast", p.look.contrast},
                              {"saturation", p.look.saturation}, {"temperature", p.look.temperature},
-                             {"lut", p.look.lut}}},
+                             {"lut", p.look.lut}, {"filter", p.look.filter},
+                             {"filter_amount", p.look.filterAmount},
+                             {"color_wheels", p.look.grade.isNeutral() ? QJsonValue(QJsonValue::Null)
+                                                                       : QJsonValue(p.look.grade.toJson())}}},
         {"music", p.music.isSet() ? QJsonValue(QJsonObject{{"file", p.music.path}, {"volume", p.music.volume},
                                                            {"start_in_song", p.music.offset}, {"duck", p.music.duck}})
                                   : QJsonValue(QJsonValue::Null)},
@@ -437,9 +479,30 @@ void McpServer::defineTools() {
              {"speed", prop("number", "0.25 to 4.")},
              {"zoom", prop("number", "1 (fills the frame) to 3.")},
              {"pan_x", prop("number", "-1 (left edge) to 1 (right edge); 0 is centered.")},
-             {"pan_y", prop("number", "-1 (top) to 1 (bottom); 0 is centered.")}},
+             {"pan_y", prop("number", "-1 (top) to 1 (bottom); 0 is centered.")},
+             {"transition", enumProp(QStringList{""} + Transitions::ids(),
+                                     "Transition from this clip into the next. Empty string makes it a cut. "
+                                     "A transition overlaps the two clips, so the reel gets shorter.")},
+             {"transition_seconds", prop("number", "0.1 to 2. Default 0.5. Limited to half of either clip.")},
+             {"body", enumProp(QStringList{""} + Body::ids(),
+                               "A body effect: treats the person and the background differently. Empty removes it. "
+                               "The person is found with a segmentation model before export or preview_frame "
+                               "(downloaded once, ~6 MB).")},
+             {"body_amount", prop("number", "0 to 1, how strong the body effect is. Default 0.8.")},
+             {"color_wheels", wheelsProp()}},
             {"index"}, true, [this](Call &call) {
                 const int index = requireIndex(call.args, "index", call.project.clips.size(), "clip");
+                if (call.args.contains("transition") &&
+                    !call.project.setClipTransition(index, call.args.value("transition").toString()))
+                    throw ToolError{"Unknown transition. Use one of: " + Transitions::ids().join(", ")};
+                if (call.args.contains("body") && !call.project.setClipBody(index, call.args.value("body").toString()))
+                    throw ToolError{"Unknown body effect. Use one of: " + Body::ids().join(", ")};
+                if (call.args.contains("body_amount"))
+                    call.project.setClipValue(index, "bodyAmount", call.args.value("body_amount").toDouble());
+                if (call.args.contains("color_wheels"))
+                    applyWheels(call.project, index, call.args.value("color_wheels"));
+                if (call.args.contains("transition_seconds"))
+                    call.project.setClipValue(index, "transitionSeconds", call.args.value("transition_seconds").toDouble());
                 const QList<QPair<QString, QString>> keys{{"source_in", "in"}, {"source_out", "out"}, {"speed", "speed"},
                                                           {"zoom", "zoom"}, {"pan_x", "panX"}, {"pan_y", "panY"}};
                 // Out before in, so widening a clip both ways in one call works.
@@ -578,13 +641,25 @@ void McpServer::defineTools() {
             {"position", prop("number", "Vertical center, 0.05 (top) to 0.95. Default 0.2.")},
             {"x", prop("number", "Horizontal center, 0 (left) to 1 (right). Default 0.5.")},
             {"size", prop("integer", "Font size at 1080x1920, 40 to 200. Default 96.")},
-            {"animation", enumProp({"pop", "fade", "slide", "none"}, "How it enters. Default pop.")}};
+            {"animation", enumProp({"pop", "fade", "slide", "none"}, "How it enters. Default pop.")},
+            {"style", enumProp({"plain", "fisheye"},
+                               "plain: white with an outline. fisheye: yellow serif bulged through a lens, "
+                               "biggest in the middle. Default plain.")},
+            {"bulge", prop("number", "Fisheye strength, 0 to 1. Default 0.6.")},
+            {"fill", prop("string", "Text color: #rrggbb, #aarrggbb (aa = opacity), a color name, "
+                                    "\"transparent\", or \"default\" for the style's own.")},
+            {"outline", prop("string", "Outline color, same forms as fill.")},
+            {"shadow", prop("string", "Shadow color, same forms as fill. Plain text has none by default.")},
+            {"box", prop("string", "Color of a box behind the text, same forms as fill. None by default; "
+                                   "on plain text a box replaces the outline.")}};
     };
     auto applyOverlay = [](Project &p, int index, const QJsonObject &args) {
         if (args.contains("end"))
             p.setOverlayValue(index, "end", args.value("end").toDouble());
         const QList<QPair<QString, QString>> keys{{"text", "text"}, {"start", "start"}, {"end", "end"},
-                                                  {"position", "y"}, {"x", "x"}, {"size", "size"}, {"animation", "animation"}};
+                                                  {"position", "y"}, {"x", "x"}, {"size", "size"}, {"animation", "animation"},
+                                                  {"style", "style"}, {"bulge", "bulge"}, {"fill", "fill"},
+                                                  {"outline", "outline"}, {"shadow", "shadow"}, {"box", "box"}};
         for (const auto &key : keys)
             if (args.contains(key.first) && !p.setOverlayValue(index, key.second, args.value(key.first).toVariant()))
                 throw ToolError{QString("Invalid %1.").arg(key.first)};
@@ -612,17 +687,64 @@ void McpServer::defineTools() {
                 return json(summary(call));
             });
 
+    // Video effects
+
+    auto effectProps = [&]() {
+        return QJsonObject{
+            {"start", prop("number", "Timeline seconds where it begins.")},
+            {"end", prop("number", "Timeline seconds where it ends. Default 1.5 s after start.")},
+            {"intensity", prop("number", "0 to 1. Default 0.6.")},
+            {"speed", prop("number", "0 to 1, for effects that move (shake, zoom-pulse, strobe, glitch, "
+                                     "mono-flicker). Default 0.5.")}};
+    };
+    auto applyEffect = [](Project &p, int index, const QJsonObject &args) {
+        // End before start when moving later, so neither clamps against the old value.
+        if (args.contains("end") && args.value("end").toDouble() > p.effects[index].end)
+            p.setEffectValue(index, "end", args.value("end").toDouble());
+        for (const QString &key : QStringList{"start", "end", "intensity", "speed"})
+            if (args.contains(key))
+                p.setEffectValue(index, key, args.value(key).toDouble());
+    };
+    QJsonObject addEffectProps = effectProps();
+    addEffectProps.insert("kind", enumProp(Effects::ids(), "Which effect."));
+    addTool("add_effect",
+            "Add a video effect for a stretch of the timeline, on the effects track. Effects stack in order.",
+            addEffectProps, {"kind"}, true, [this, applyEffect](Call &call) {
+                const double start = call.args.value("start").toDouble(0.0);
+                const int index = call.project.addEffect(call.args.value("kind").toString(), start,
+                                                         call.args.value("end").toDouble(-1.0));
+                if (index < 0)
+                    throw ToolError{"Unknown effect. Use one of: " + Effects::ids().join(", ")};
+                applyEffect(call.project, index, call.args);
+                return json(summary(call));
+            });
+    QJsonObject editEffectProps = effectProps();
+    editEffectProps.insert("index", prop("integer", "Effect index."));
+    addTool("edit_effect", "Change a video effect's timing, intensity or speed.", editEffectProps, {"index"}, true,
+            [this, applyEffect](Call &call) {
+                applyEffect(call.project, requireIndex(call.args, "index", call.project.effects.size(), "effect"), call.args);
+                return json(summary(call));
+            });
+    addTool("remove_effect", "Delete a video effect.", {{"index", prop("integer", "Effect index.")}}, {"index"}, true,
+            [this](Call &call) {
+                call.project.effects.remove(requireIndex(call.args, "index", call.project.effects.size(), "effect"));
+                return json(summary(call));
+            });
+
     // Look
 
     addTool("set_look",
-            "Color the whole reel: a preset, sliders from -1 to 1 (0 is untouched), and/or a .cube LUT. "
-            "A preset is applied first, then any sliders given.",
+            "Color the whole reel: a preset, sliders from -1 to 1 (0 is untouched), a filter from the "
+            "built-in library, and/or a .cube LUT. A preset is applied first, then any sliders given.",
             {{"preset", enumProp(Project::presets(), "A starting look.")},
              {"exposure", prop("number", "-1 to 1.")},
              {"contrast", prop("number", "-1 to 1.")},
              {"saturation", prop("number", "-1 (black and white) to 1.")},
              {"temperature", prop("number", "-1 (cool) to 1 (warm).")},
-             {"lut", prop("string", "A .cube file, applied over the sliders. Empty string removes it.")}},
+             {"filter", enumProp(QStringList{""} + Filters::ids(), "A look from the filter library. Empty string removes it.")},
+             {"filter_amount", prop("number", "0 to 1, how strong the filter is. Default 1.")},
+             {"lut", prop("string", "A .cube file, applied over the sliders. Empty string removes it.")},
+             {"color_wheels", wheelsProp()}},
             {}, true, [this](Call &call) {
                 Project &p = call.project;
                 if (call.args.contains("preset") && !p.applyPreset(call.args.value("preset").toString()))
@@ -630,6 +752,12 @@ void McpServer::defineTools() {
                 for (const QString &key : {"exposure", "contrast", "saturation", "temperature"})
                     if (call.args.contains(key))
                         p.setLookValue(key, call.args.value(key).toDouble());
+                if (call.args.contains("filter") && !p.setFilter(call.args.value("filter").toString()))
+                    throw ToolError{"Unknown filter. Use one of: " + Filters::ids().join(", ")};
+                if (call.args.contains("filter_amount"))
+                    p.setLookValue("filterAmount", call.args.value("filter_amount").toDouble());
+                if (call.args.contains("color_wheels"))
+                    applyWheels(p, -1, call.args.value("color_wheels"));
                 if (call.args.contains("lut")) {
                     const QString lut = call.args.value("lut").toString();
                     if (!lut.isEmpty() && !QFileInfo::exists(absolute(lut)))

@@ -1,7 +1,13 @@
 #include "project.h"
 
+#include <QColor>
 #include <QDir>
 #include <QJsonArray>
+
+#include "filters.h"
+#include "bodyeffects.h"
+#include "effects.h"
+#include "transitions.h"
 
 namespace {
 // Shorter than a frame, a cut would leave an empty clip behind.
@@ -25,37 +31,46 @@ QStringList Clip::motions() {
 }
 
 QVector<double> Project::clipStarts() const {
-    QVector<double> starts{0.0};
-    for (const Clip &clip : clips)
-        starts.append(starts.last() + clip.duration());
+    QVector<double> starts;
+    double start = 0.0;
+    for (int i = 0; i < clips.size(); ++i) {
+        starts.append(start);
+        start += clips[i].duration() - overlap(i);
+    }
+    starts.append(start);
     return starts;
 }
 
+double Project::overlap(int index) const {
+    if (index < 0 || index + 1 >= clips.size())
+        return 0.0;
+    const Clip &a = clips[index];
+    if (a.transition.isEmpty() || !Transitions::find(a.transition))
+        return 0.0;
+    const double limit = qMin(a.duration(), clips[index + 1].duration()) / 2.0;
+    return qMax(0.0, qMin(a.transitionSeconds, limit));
+}
+
 double Project::duration() const {
-    double total = 0.0;
-    for (const Clip &clip : clips)
-        total += clip.duration();
-    return total;
+    return clipStarts().constLast();
 }
 
 double Project::clipStart(int index) const {
-    double start = 0.0;
-    for (int i = 0; i < index && i < clips.size(); ++i)
-        start += clips[i].duration();
-    return start;
+    const QVector<double> starts = clipStarts();
+    return starts.value(qBound(0, index, int(starts.size()) - 1));
 }
 
 Project::Position Project::locate(double t) const {
-    double start = 0.0;
+    const QVector<double> starts = clipStarts();
     for (int i = 0; i < clips.size(); ++i) {
         const Clip &clip = clips[i];
-        const double end = start + clip.duration();
-        // The last clip owns the very end, so the playhead can rest there.
-        if (t < end || i == clips.size() - 1) {
-            const double local = qBound(0.0, t - start, clip.duration());
+        // During a transition the outgoing clip owns the time; the incoming
+        // one is already playing underneath. The last clip owns the very end,
+        // so the playhead can rest there.
+        if (t < starts[i] + clip.duration() || i == clips.size() - 1) {
+            const double local = qBound(0.0, t - starts[i], clip.duration());
             return {i, clip.in + local * clip.speed};
         }
-        start = end;
     }
     return {};
 }
@@ -69,6 +84,8 @@ bool Project::split(double t) {
         return false;
     Clip first = clip, second = clip;
     first.out = at.source;
+    // The transition belongs to the clip's end, which is now the second piece.
+    first.transition.clear();
     second.in = at.source;
     clips[at.index] = first;
     clips.insert(at.index + 1, second);
@@ -97,20 +114,29 @@ void Project::replaceClipWithRanges(int index, const QVector<QPair<double, doubl
 QJsonObject Project::toJson(const QString &baseDir) const {
     QJsonArray clipArray;
     for (const Clip &c : clips) {
-        clipArray.append(QJsonObject{
+        QJsonObject clip{
             {"path", storePath(c.path, baseDir)}, {"in", c.in}, {"out", c.out}, {"speed", c.speed},
             {"zoom", c.zoom}, {"panX", c.panX}, {"panY", c.panY}, {"width", c.width},
             {"height", c.height}, {"audio", c.audio}, {"sourceDuration", c.sourceDuration},
-            {"still", c.still}, {"motion", c.motion},
-        });
+            {"still", c.still}, {"motion", c.motion}, {"transition", c.transition},
+            {"transitionSeconds", c.transitionSeconds}, {"body", c.body}, {"bodyAmount", c.bodyAmount},
+        };
+        if (!c.grade.isNeutral())
+            clip["grade"] = c.grade.toJson();
+        clipArray.append(clip);
     }
     QJsonArray overlayArray;
     for (const Overlay &o : overlays) {
         overlayArray.append(QJsonObject{
             {"text", o.text}, {"start", o.start}, {"end", o.end}, {"x", o.x}, {"y", o.y},
-            {"size", o.size}, {"animation", o.animation},
+            {"size", o.size}, {"animation", o.animation}, {"style", o.style}, {"bulge", o.bulge},
+            {"fill", o.fill}, {"outline", o.outline}, {"shadow", o.shadow}, {"box", o.box},
         });
     }
+    QJsonArray effectArray;
+    for (const Effect &e : effects)
+        effectArray.append(QJsonObject{{"kind", e.kind}, {"start", e.start}, {"end", e.end},
+                                       {"intensity", e.intensity}, {"speed", e.speed}});
     QJsonArray wordArray;
     for (const Word &w : words)
         wordArray.append(QJsonObject{{"text", w.text}, {"start", w.start}, {"end", w.end}});
@@ -121,6 +147,7 @@ QJsonObject Project::toJson(const QString &baseDir) const {
         {"music", QJsonObject{{"path", storePath(music.path, baseDir)}, {"volume", music.volume},
                               {"offset", music.offset}, {"duck", music.duck}}},
         {"overlays", overlayArray},
+        {"effects", effectArray},
         {"words", wordArray},
         {"captionStyle", captionStyle},
         {"captionX", captionX},
@@ -128,7 +155,8 @@ QJsonObject Project::toJson(const QString &baseDir) const {
         {"captionScale", captionScale},
         {"look", QJsonObject{{"exposure", look.exposure}, {"contrast", look.contrast},
                              {"saturation", look.saturation}, {"temperature", look.temperature},
-                             {"lut", storePath(look.lut, baseDir)}}},
+                             {"lut", storePath(look.lut, baseDir)}, {"filter", look.filter},
+                             {"filterAmount", look.filterAmount}, {"grade", look.grade.toJson()}}},
         {"platform", platform},
     };
 }
@@ -151,6 +179,14 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
         c.sourceDuration = o.value("sourceDuration").toDouble(c.out);
         c.still = o.value("still").toBool(false);
         c.motion = Clip::motions().contains(o.value("motion").toString()) ? o.value("motion").toString() : "none";
+        const Transitions::Kind *kind = Transitions::find(o.value("transition").toString());
+        c.transition = kind ? kind->id : QString();
+        c.transitionSeconds = qBound(Transitions::MinSeconds, o.value("transitionSeconds").toDouble(Transitions::DefaultSeconds),
+                                     Transitions::MaxSeconds);
+        const Body::Kind *body = Body::find(o.value("body").toString());
+        c.body = body ? body->id : QString();
+        c.bodyAmount = qBound(0.0, o.value("bodyAmount").toDouble(c.bodyAmount), 1.0);
+        c.grade = ColorGrade::Grade::fromJson(o.value("grade").toObject());
         if (c.still) {
             c.audio = false;
             c.speed = 1.0;
@@ -174,7 +210,24 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
         overlay.y = o.value("y").toDouble(overlay.y);
         overlay.size = o.value("size").toInt(overlay.size);
         overlay.animation = o.value("animation").toString(overlay.animation);
+        overlay.style = o.value("style").toString() == "fisheye" ? "fisheye" : "plain";
+        overlay.bulge = qBound(0.0, o.value("bulge").toDouble(overlay.bulge), 1.0);
+        for (const QString &part : Overlay::colorParts())
+            overlay.setColor(part, o.value(part).toString());
         p.overlays.append(overlay);
+    }
+    for (const auto &value : json.value("effects").toArray()) {
+        const QJsonObject o = value.toObject();
+        const Effects::Kind *kind = Effects::find(o.value("kind").toString());
+        if (!kind)
+            continue;  // from a newer version; dropped rather than kept broken
+        Effect e;
+        e.kind = kind->id;
+        e.start = qMax(0.0, o.value("start").toDouble());
+        e.end = qMax(e.start + kMinClip, o.value("end").toDouble(e.start + Effects::DefaultSeconds));
+        e.intensity = qBound(0.0, o.value("intensity").toDouble(e.intensity), 1.0);
+        e.speed = qBound(0.0, o.value("speed").toDouble(e.speed), 1.0);
+        p.effects.append(e);
     }
     for (const auto &value : json.value("words").toArray()) {
         const QJsonObject o = value.toObject();
@@ -190,6 +243,11 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
     p.look.saturation = l.value("saturation").toDouble();
     p.look.temperature = l.value("temperature").toDouble();
     p.look.lut = loadPath(l.value("lut").toString(), baseDir);
+    // An id this version doesn't know (a newer file) is dropped, not kept broken.
+    const Filters::Look *filter = Filters::find(l.value("filter").toString());
+    p.look.filter = filter ? filter->id : QString();
+    p.look.filterAmount = qBound(0.0, l.value("filterAmount").toDouble(1.0), 1.0);
+    p.look.grade = ColorGrade::Grade::fromJson(l.value("grade").toObject());
     p.platform = json.value("platform").toString(p.platform);
     return p;
 }
@@ -218,8 +276,40 @@ bool Project::setClipValue(int index, const QString &key, double value) {
         c.panX = qBound(-1.0, value, 1.0);
     else if (key == "panY")
         c.panY = qBound(-1.0, value, 1.0);
+    else if (key == "transitionSeconds")
+        c.transitionSeconds = qBound(Transitions::MinSeconds, value, Transitions::MaxSeconds);
+    else if (key == "bodyAmount")
+        c.bodyAmount = qBound(0.0, value, 1.0);
     else
         return false;
+    return true;
+}
+
+bool Project::setClipBody(int index, const QString &id) {
+    if (index < 0 || index >= clips.size())
+        return false;
+    if (id.isEmpty()) {
+        clips[index].body.clear();
+        return true;
+    }
+    const Body::Kind *kind = Body::find(id);
+    if (!kind)
+        return false;
+    clips[index].body = kind->id;
+    return true;
+}
+
+bool Project::setClipTransition(int index, const QString &id) {
+    if (index < 0 || index >= clips.size())
+        return false;
+    if (id.isEmpty()) {
+        clips[index].transition.clear();
+        return true;
+    }
+    const Transitions::Kind *kind = Transitions::find(id);
+    if (!kind)
+        return false;
+    clips[index].transition = kind->id;
     return true;
 }
 
@@ -228,6 +318,52 @@ bool Project::setClipMotion(int index, const QString &motion) {
         return false;
     clips[index].motion = motion;
     return true;
+}
+
+bool Project::setGrade(int index, const QString &key, double value) {
+    if (index == -1)
+        return look.grade.set(key, value);
+    if (index < 0 || index >= clips.size())
+        return false;
+    return clips[index].grade.set(key, value);
+}
+
+QStringList Overlay::colorParts() { return {"fill", "outline", "shadow", "box"}; }
+
+bool Overlay::setColor(const QString &part, const QString &value) {
+    QString *slot = part == "fill" ? &fill : part == "outline" ? &outline : part == "shadow" ? &shadow
+                  : part == "box" ? &box : nullptr;
+    if (!slot)
+        return false;
+    const QString v = value.trimmed();
+    if (v.isEmpty() || v == "default") {
+        slot->clear();
+        return true;
+    }
+    if (v == "transparent") {
+        *slot = "#00000000";
+        return true;
+    }
+    const QColor color = QColor::fromString(v);
+    if (!color.isValid())
+        return false;
+    *slot = color.name(QColor::HexArgb);
+    return true;
+}
+
+QString Overlay::colorOf(const QString &part) const {
+    const QString set = part == "fill" ? fill : part == "outline" ? outline : part == "shadow" ? shadow : box;
+    if (!set.isEmpty())
+        return set;
+    const bool fisheye = style == "fisheye";
+    // Plain text: white with a black outline. Fisheye: yellow with a soft shadow.
+    if (part == "fill")
+        return fisheye ? "#ffffee00" : "#ffffffff";
+    if (part == "outline")
+        return fisheye ? "#00000000" : "#ff000000";
+    if (part == "shadow")
+        return fisheye ? "#8c000000" : "#00000000";
+    return "#00000000";
 }
 
 bool Project::setOverlayValue(int index, const QString &key, const QVariant &value) {
@@ -251,7 +387,16 @@ bool Project::setOverlayValue(int index, const QString &key, const QVariant &val
         if (!QStringList{"none", "fade", "pop", "slide"}.contains(animation))
             return false;
         o.animation = animation;
-    } else
+    } else if (key == "style") {
+        const QString style = value.toString();
+        if (style != "plain" && style != "fisheye")
+            return false;
+        o.style = style;
+    } else if (key == "bulge")
+        o.bulge = qBound(0.0, value.toDouble(), 1.0);
+    else if (Overlay::colorParts().contains(key))
+        return o.setColor(key, value.toString());
+    else
         return false;
     return true;
 }
@@ -266,8 +411,22 @@ bool Project::setLookValue(const QString &key, double value) {
         look.saturation = v;
     else if (key == "temperature")
         look.temperature = v;
+    else if (key == "filterAmount")
+        look.filterAmount = qBound(0.0, value, 1.0);
     else
         return false;
+    return true;
+}
+
+bool Project::setFilter(const QString &id) {
+    if (id.isEmpty()) {
+        look.filter.clear();
+        return true;
+    }
+    const Filters::Look *found = Filters::find(id);
+    if (!found)
+        return false;
+    look.filter = found->id;
     return true;
 }
 
@@ -324,6 +483,35 @@ bool Project::applyPreset(const QString &name) {
         }
     }
     return false;
+}
+
+int Project::addEffect(const QString &kind, double start, double end) {
+    const Effects::Kind *found = Effects::find(kind);
+    if (!found)
+        return -1;
+    Effect effect;
+    effect.kind = found->id;
+    effect.start = qMax(0.0, start);
+    effect.end = end > effect.start ? end : effect.start + Effects::DefaultSeconds;
+    effects.append(effect);
+    return effects.size() - 1;
+}
+
+bool Project::setEffectValue(int index, const QString &key, double value) {
+    if (index < 0 || index >= effects.size())
+        return false;
+    Effect &e = effects[index];
+    if (key == "start")
+        e.start = qBound(0.0, value, e.end - kMinClip);
+    else if (key == "end")
+        e.end = qMax(e.start + kMinClip, value);
+    else if (key == "intensity")
+        e.intensity = qBound(0.0, value, 1.0);
+    else if (key == "speed")
+        e.speed = qBound(0.0, value, 1.0);
+    else
+        return false;
+    return true;
 }
 
 int Project::addOverlay(const QString &text, double start, double end) {

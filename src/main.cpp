@@ -1,9 +1,11 @@
 // reelcut — make vertical reels: cut, caption, color, music, export.
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFileSystemWatcher>
 #include <QGuiApplication>
 #include <QIcon>
 #include <QJsonDocument>
@@ -11,6 +13,7 @@
 #include <QProcess>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QTemporaryDir>
@@ -85,7 +88,11 @@ int exportCommand(const QStringList &args) {
 int main(int argc, char *argv[]) {
     const QString command = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QString();
     if (command == "export" || command == "mcp" || command == "help" || command == "--help" || command == "-h") {
-        QCoreApplication app(argc, argv);
+        // Fisheye text is drawn with QPainter, which needs fonts and so a
+        // QGuiApplication; offscreen, since there's no window.
+        if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORM"))
+            qputenv("QT_QPA_PLATFORM", "offscreen");
+        QGuiApplication app(argc, argv);
         app.setApplicationName("reelcut");
         if (command == "export")
             return exportCommand(app.arguments().mid(2));
@@ -144,12 +151,74 @@ int main(int argc, char *argv[]) {
     if (!clips.isEmpty())
         backend.addUrls(clips);
 
+    // Live reload while developing: with REELCUT_DEV_RELOAD set, a rebuilt
+    // binary replaces the running app. The project is saved, the new build
+    // starts on it at the same playhead, and this one exits.
+    if (qEnvironmentVariableIsSet("REELCUT_DEV_RELOAD")) {
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        const QString exe = QCoreApplication::applicationFilePath();
+        const QDateTime built = QFileInfo(exe).lastModified();
+        auto *watcher = new QFileSystemWatcher({QFileInfo(exe).absolutePath()}, &app);
+        auto *settle = new QTimer(&app);  // let the linker finish writing
+        settle->setSingleShot(true);
+        settle->setInterval(1500);
+        QObject::connect(watcher, &QFileSystemWatcher::directoryChanged, settle, qOverload<>(&QTimer::start));
+        QObject::connect(settle, &QTimer::timeout, &app, [&backend, window, exe, built] {
+            const QFileInfo binary(exe);
+            if (!binary.exists() || !binary.isExecutable() || binary.lastModified() <= built)
+                return;
+            if (backend.dirty()) {
+                if (backend.path().isEmpty()) {
+                    qWarning("reelcut: new build ready; save the project to switch to it");
+                    return;
+                }
+                backend.save();
+            }
+            qputenv("REELCUT_RESUME_AT", QByteArray::number(window->property("playhead").toDouble()));
+            if (QProcess::startDetached(exe, backend.path().isEmpty() ? QStringList() : QStringList{backend.path()}))
+                QCoreApplication::exit(0);
+        });
+    }
+    if (qEnvironmentVariableIsSet("REELCUT_RESUME_AT")) {
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QTimer::singleShot(500, window, [window] {
+            QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, qEnvironmentVariable("REELCUT_RESUME_AT").toDouble()));
+        });
+        qunsetenv("REELCUT_RESUME_AT");
+    }
+
     // For screenshots of the real window (README, checking a change offscreen):
-    // REELCUT_GRAB=out.png [REELCUT_GRAB_SECONDS=3] [REELCUT_GRAB_AT=seconds on the timeline].
+    // REELCUT_GRAB=out.png [REELCUT_GRAB_SECONDS=3] [REELCUT_GRAB_AT=seconds on the timeline]
+    // [REELCUT_GRAB_SELECT=kind:index] [REELCUT_GRAB_TAB=inspector tab] [REELCUT_GRAB_SIZE=WxH]
+    // [REELCUT_GRAB_SCROLL=pixels].
     const QString grab = qEnvironmentVariable("REELCUT_GRAB");
     if (!grab.isEmpty()) {
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         const int delay = qEnvironmentVariableIntValue("REELCUT_GRAB_SECONDS") * 1000;
+        // REELCUT_GRAB_SELECT=clip:0 (or overlay:1, effect:0) selects something first,
+        // REELCUT_GRAB_TAB=3 then opens that inspector tab.
+        // REELCUT_GRAB_SIZE=1200x2400 sizes the window, to see a long panel whole.
+        const QStringList size = qEnvironmentVariable("REELCUT_GRAB_SIZE").split('x');
+        if (size.size() == 2)
+            window->resize(size[0].toInt(), size[1].toInt());
+        const QStringList select = qEnvironmentVariable("REELCUT_GRAB_SELECT").split(':');
+        if (select.size() == 2)
+            QTimer::singleShot(qMax(400, delay / 3), window, [window, select] {
+                QMetaObject::invokeMethod(window, "select", Q_ARG(QVariant, select[0]), Q_ARG(QVariant, select[1].toInt()));
+            });
+        if (qEnvironmentVariableIsSet("REELCUT_GRAB_TAB"))
+            QTimer::singleShot(qMax(450, delay / 3 + 50), window, [window] {
+                if (QObject *inspector = window->findChild<QObject *>("inspector"))
+                    inspector->setProperty("currentIndex", qEnvironmentVariableIntValue("REELCUT_GRAB_TAB"));
+            });
+        // REELCUT_GRAB_SCROLL=600 scrolls the inspector's visible panel down that far.
+        if (qEnvironmentVariableIsSet("REELCUT_GRAB_SCROLL"))
+            QTimer::singleShot(qMax(800, delay / 2), window, [window] {
+                QObject *inspector = window->findChild<QObject *>("inspector");
+                for (QQuickItem *item : inspector ? inspector->findChildren<QQuickItem *>() : QList<QQuickItem *>())
+                    if (item->inherits("QQuickFlickable") && item->isVisible() && item->width() > 0)
+                        item->setProperty("contentY", qEnvironmentVariableIntValue("REELCUT_GRAB_SCROLL"));
+            });
         if (qEnvironmentVariableIsSet("REELCUT_GRAB_AT"))
             QTimer::singleShot(qMax(500, delay / 2), window, [window] {
                 QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, qEnvironmentVariable("REELCUT_GRAB_AT").toDouble()));

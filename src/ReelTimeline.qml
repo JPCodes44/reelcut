@@ -11,6 +11,7 @@ Rectangle {
     property real playhead: 0
     property int selectedClip: -1
     property int selectedOverlay: -1
+    property int selectedEffect: -1
     property real zoom: 1
     readonly property real gutter: 74
     readonly property real fitPps: Math.max(8, (width - gutter - 24) / Math.max(backend.duration, 5))
@@ -29,6 +30,7 @@ Rectangle {
     signal seekRequested(real t)
     signal clipSelected(int index)
     signal overlaySelected(int index)
+    signal effectSelected(int index)
     signal captionsSelected()
     signal musicSelected()
 
@@ -40,7 +42,8 @@ Rectangle {
         spacing: 6
         Repeater {
             model: [{ label: qsTr("Video"), h: root.videoH }, { label: qsTr("Captions"), h: root.laneH },
-                    { label: qsTr("Text"), h: root.laneH }, { label: qsTr("Music"), h: root.laneH }]
+                    { label: qsTr("Text"), h: root.laneH }, { label: qsTr("Music"), h: root.laneH },
+                    { label: qsTr("Effects"), h: root.laneH }]
             delegate: Label {
                 required property var modelData
                 width: root.gutter
@@ -262,6 +265,29 @@ Rectangle {
         }
 
         // Text lane
+        // Transitions: where two clips overlap, a marker over the overlap.
+        Repeater {
+            model: backend.clips.length
+            delegate: Rectangle {
+                required property int index
+                readonly property var modelData: backend.clips[index] || ({})
+                objectName: "transition" + index
+                visible: (modelData.overlap || 0) > 0
+                x: (modelData.start + modelData.duration - (modelData.overlap || 0)) * root.pps
+                y: root.rulerH + 6 + root.videoH - 14
+                z: 5
+                width: Math.max(10, (modelData.overlap || 0) * root.pps)
+                height: 12
+                radius: 3
+                color: theme.accent
+                opacity: 0.85
+                ToolTip.visible: tip.hovered
+                ToolTip.text: (modelData.transitionName || "") + " · " + (modelData.overlap || 0).toFixed(2) + " s"
+                HoverHandler { id: tip }
+                TapHandler { onTapped: root.clipSelected(parent.index) }
+            }
+        }
+
         Repeater {
             model: backend.overlays.length
             delegate: Rectangle {
@@ -330,6 +356,78 @@ Rectangle {
                         }
                     }
                     onReleased: if (!moving) root.seekRequested(textBar.modelData.start)
+                }
+            }
+        }
+
+        // Effects lane: drag to move, drag an edge to trim, click to select.
+        Repeater {
+            model: backend.effects.length
+            delegate: Rectangle {
+                id: effectBar
+                objectName: "effectBar" + index
+                readonly property var modelData: backend.effects[index] || ({})
+                required property int index
+                readonly property bool selected: index === root.selectedEffect
+                x: modelData.start * root.pps
+                y: root.rulerH + 6 + root.videoH + 6 + (root.laneH + 6) * 3
+                width: Math.max(3, (modelData.end - modelData.start) * root.pps - 1)
+                height: root.laneH
+                radius: Math.min(4, theme.radius)
+                color: selected ? theme.accent : Qt.rgba(0.75, 0.45, 1, 0.45)
+                clip: true
+                Label {
+                    anchors.fill: parent
+                    anchors.leftMargin: 4
+                    verticalAlignment: Text.AlignVCenter
+                    text: "✦ " + (effectBar.modelData.label || "")
+                    color: effectBar.selected ? theme.accentForeground : "white"
+                    font.pixelSize: 11
+                    elide: Text.ElideRight
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    preventStealing: true
+                    hoverEnabled: true
+                    cursorShape: mouseX < 6 || mouseX > width - 6 ? Qt.SizeHorCursor : Qt.OpenHandCursor
+                    property string part: "body"
+                    property real startX: 0
+                    property real startStart: 0
+                    property real startEnd: 0
+                    property bool moving: false
+                    onPressed: function(mouse) {
+                        part = mouse.x < 6 ? "start" : mouse.x > width - 6 ? "end" : "body"
+                        startX = mapToItem(flick.contentItem, mouse.x, 0).x
+                        startStart = effectBar.modelData.start
+                        startEnd = effectBar.modelData.end
+                        moving = false
+                        root.effectSelected(effectBar.index)
+                    }
+                    onPositionChanged: function(mouse) {
+                        if (!pressed) return
+                        const dt = (mapToItem(flick.contentItem, mouse.x, 0).x - startX) / root.pps
+                        if (!moving && Math.abs(dt * root.pps) < 3) return
+                        if (!moving) {
+                            moving = true
+                            backend.checkpoint()
+                        }
+                        if (part === "start") {
+                            backend.setEffectValue(effectBar.index, "start", Math.max(0, startStart + dt))
+                        } else if (part === "end") {
+                            backend.setEffectValue(effectBar.index, "end", startEnd + dt)
+                        } else {
+                            // Keep its length; move the side heading away first so neither clamps.
+                            const shift = Math.max(-startStart, dt)
+                            if (shift > 0) {
+                                backend.setEffectValue(effectBar.index, "end", startEnd + shift)
+                                backend.setEffectValue(effectBar.index, "start", startStart + shift)
+                            } else {
+                                backend.setEffectValue(effectBar.index, "start", startStart + shift)
+                                backend.setEffectValue(effectBar.index, "end", startEnd + shift)
+                            }
+                        }
+                    }
+                    onReleased: if (!moving) root.seekRequested(effectBar.modelData.start)
                 }
             }
         }

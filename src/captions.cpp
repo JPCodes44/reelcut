@@ -6,6 +6,20 @@
 #include <cmath>
 
 namespace {
+// Text box padding and shadow offset, in pixels at 1080x1920. The preview
+// (src/CaptionLayer.qml) draws them the same size.
+constexpr int TextBoxPadding = 18;
+constexpr int TextShadowOffset = 5;
+
+QString hex2(int v) { return QString("%1").arg(v, 2, 16, QChar('0')).toUpper(); }
+
+// An override tag pair for ASS color n (1 fill, 3 outline/box, 4 shadow):
+// \nc&HBBGGRR& and \na&HAA&, where alpha counts up to transparent.
+QString colorTag(int n, const QColor &c) {
+    return QString("\\%1c&H%2%3%4&\\%1a&H%5&")
+        .arg(n).arg(hex2(c.blue()), hex2(c.green()), hex2(c.red()), hex2(255 - c.alpha()));
+}
+
 // ASS colors are &HAABBGGRR, alpha 00 opaque.
 QString assColor(const QColor &color, int alpha = 0) {
     return QString("&H%1%2%3%4")
@@ -117,6 +131,9 @@ QString assDocument(const Project &project, const QString &accent) {
     ass += QString("Style: Box,%1,76,%2,%2,%3,%3,-1,0,0,0,100,100,0,0,3,14,0,5,60,60,0,1\n")
                .arg(font, white, assColor(QColor(17, 17, 17), 0x20));
     ass += style("Hook", 96, 1, 8, shade);
+    // Text with a box behind it: BorderStyle 3, the box in the outline color.
+    ass += QString("Style: HookBox,%1,96,%2,%2,%3,%4,-1,0,0,0,100,100,0,0,3,%5,0,5,60,60,0,1\n")
+               .arg(font, white, black, shade).arg(TextBoxPadding);
     ass += "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
 
     // Captions take the style's size times the project's caption scale.
@@ -156,8 +173,8 @@ QString assDocument(const Project &project, const QString &accent) {
     }
 
     for (const Overlay &overlay : project.overlays) {
-        if (overlay.text.trimmed().isEmpty() || overlay.end <= overlay.start)
-            continue;
+        if (overlay.text.trimmed().isEmpty() || overlay.end <= overlay.start || overlay.style == "fisheye")
+            continue;  // fisheye text is an image laid over by the export (src/fisheyetext.h)
         const int x = qRound(overlay.x * Project::Width), y = qRound(overlay.y * Project::Height);
         QString tags = QString("\\an5\\fs%1").arg(overlay.size);
         if (overlay.animation == "fade")
@@ -168,7 +185,22 @@ QString assDocument(const Project &project, const QString &accent) {
             tags += QString("\\move(%1,%2,%1,%3,0,250)\\fad(200,0)").arg(x).arg(y + 160).arg(y);
         else
             tags += QString("\\pos(%1,%2)").arg(x).arg(y);
-        ass += dialogue(overlay.start, overlay.end, "Hook", "{" + tags + "}" + escape(overlay.text));
+        // Colors: \1 fill, \3 outline (or the box), \4 shadow. ASS alpha counts up to transparent.
+        const QColor fill = QColor::fromString(overlay.colorOf("fill"));
+        const QColor outline = QColor::fromString(overlay.colorOf("outline"));
+        const QColor shadow = QColor::fromString(overlay.colorOf("shadow"));
+        const QColor box = QColor::fromString(overlay.colorOf("box"));
+        tags += colorTag(1, fill);
+        if (box.alpha() > 0)
+            tags += colorTag(3, box);  // the box replaces the outline
+        else if (outline.alpha() > 0)
+            tags += colorTag(3, outline);
+        else
+            tags += "\\bord0";
+        if (shadow.alpha() > 0)
+            tags += colorTag(4, shadow) + QString("\\shad%1").arg(TextShadowOffset);
+        ass += dialogue(overlay.start, overlay.end, box.alpha() > 0 ? "HookBox" : "Hook",
+                        "{" + tags + "}" + escape(overlay.text));
     }
     return ass;
 }

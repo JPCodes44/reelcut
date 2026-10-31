@@ -1,5 +1,9 @@
 #include "exportgraph.h"
 
+#include "bodyeffects.h"
+#include "effects.h"
+#include "transitions.h"
+
 #include <cmath>
 
 namespace {
@@ -10,22 +14,27 @@ int even(double value) {
     return rounded + (rounded % 2);
 }
 
-// One clip's video and audio chains, labelled [v<i>] and [a<i>].
-QStringList clipChains(const Project &project, bool withVideo, bool withAudio, const QString &audioFormat) {
+// One clip's video and audio chains, labelled [v<i>] and [a<i>]. A clip
+// with a body effect and a mask (maskInputs[i] >= 0) goes through
+// Body::exportStatements on its way to [v<i>].
+QStringList clipChains(const Project &project, bool withVideo, bool withAudio, const QString &audioFormat,
+                       const QVector<int> &maskInputs = {}, const QStringList &grades = {}) {
     QStringList chains;
     for (int i = 0; i < project.clips.size(); ++i) {
         const Clip &c = project.clips[i];
-        if (withVideo && c.still) {
-            // A looped photo: framed once, then moved over its duration.
-            QString motion = motionFilter(c);
-            chains << QString("[%1:v]trim=duration=%2,setpts=PTS-STARTPTS,%3%4,setsar=1,fps=%5,format=yuv420p[v%1]")
-                          .arg(i).arg(num(c.duration()), framingFilter(c), motion.isEmpty() ? QString() : "," + motion)
-                          .arg(Project::Fps);
-        } else if (withVideo) {
-            chains << QString("[%1:v]trim=start=%2:end=%3,setpts=(PTS-STARTPTS)/%4,%5,setsar=1,fps=%6,"
-                              "format=yuv420p[v%1]")
-                          .arg(i).arg(num(c.in), num(c.out), num(c.speed, 4), framingFilter(c))
-                          .arg(Project::Fps);
+        if (withVideo) {
+            const int mask = maskInputs.value(i, -1);
+            QString picture = clipVideoChain(c, QString("[%1:v]").arg(i));
+            // The clip's own color wheels come first, before its body effect.
+            if (!grades.value(i).isEmpty())
+                picture += QString(",lut3d=file=%1:interp=tetrahedral,format=yuv420p").arg(grades.value(i));
+            if (mask >= 0 && Body::find(c.body)) {
+                chains << picture + QString("[vb%1]").arg(i);
+                chains << Body::exportStatements(c, QString("[vb%1]").arg(i), QString("[%1:v]").arg(mask),
+                                                 QString("[v%1]").arg(i), i);
+            } else {
+                chains << picture + QString("[v%1]").arg(i);
+            }
         }
         if (!withAudio)
             continue;
@@ -45,15 +54,69 @@ QStringList clipChains(const Project &project, bool withVideo, bool withAudio, c
     return chains;
 }
 
-QString concatInputs(int count, bool withVideo, bool withAudio) {
-    QString inputs;
-    for (int i = 0; i < count; ++i)
-        inputs += (withVideo ? QString("[v%1]").arg(i) : QString()) + (withAudio ? QString("[a%1]").arg(i) : QString());
-    return inputs;
+// Joins the clip chains into [vcat] and/or [acat]. Without transitions
+// this is one concat. With them it is a chain, two at a time: xfade (video)
+// and acrossfade (sound) where a clip has a transition into the next, a
+// two-input concat at plain cuts. xfade's offset is where the transition
+// starts on the timeline, which is where the next clip starts.
+QStringList joinClips(const Project &project, bool withVideo, bool withAudio) {
+    const int n = project.clips.size();
+    bool anyOverlap = false;
+    for (int i = 0; i + 1 < n; ++i)
+        anyOverlap = anyOverlap || project.overlap(i) > 0.0;
+    if (!anyOverlap || n < 2) {
+        QString inputs;
+        for (int i = 0; i < n; ++i)
+            inputs += (withVideo ? QString("[v%1]").arg(i) : QString()) + (withAudio ? QString("[a%1]").arg(i) : QString());
+        return {inputs + QString("concat=n=%1:v=%2:a=%3").arg(n).arg(withVideo ? 1 : 0).arg(withAudio ? 1 : 0) +
+                (withVideo ? "[vcat]" : "") + (withAudio ? "[acat]" : "")};
+    }
+    const QVector<double> starts = project.clipStarts();
+    QStringList out;
+    QString video = "[v0]", audio = "[a0]";
+    for (int i = 1; i < n; ++i) {
+        const double overlap = project.overlap(i - 1);
+        const bool last = i == n - 1;
+        const QString nextVideo = last ? "[vcat]" : QString("[vj%1]").arg(i);
+        const QString nextAudio = last ? "[acat]" : QString("[aj%1]").arg(i);
+        if (overlap > 0.0) {
+            const Transitions::Kind *kind = Transitions::find(project.clips[i - 1].transition);
+            if (withVideo)
+                out << QString("%1[v%2]xfade=transition=%3:duration=%4:offset=%5%6")
+                           .arg(video).arg(i).arg(kind->xfade, num(overlap), num(starts[i]), nextVideo);
+            if (withAudio)
+                out << QString("%1[a%2]acrossfade=d=%3:c1=tri:c2=tri%4").arg(audio).arg(i).arg(num(overlap), nextAudio);
+        } else {
+            if (withVideo)
+                out << QString("%1[v%2]concat=n=2:v=1:a=0%3").arg(video).arg(i).arg(nextVideo);
+            if (withAudio)
+                out << QString("%1[a%2]concat=n=2:v=0:a=1%3").arg(audio).arg(i).arg(nextAudio);
+        }
+        video = nextVideo;
+        audio = nextAudio;
+    }
+    return out;
 }
 
-// The look, then the LUT on top of it, then text, which must stay white.
-QString videoFinish(const Project &project, const ExportOptions &options) {
+// The effects track, in order, each over the result of the one before:
+// [vcat] in, [vfx] out. Nothing at all when there are no effects.
+QStringList effectChains(const Project &project) {
+    if (project.effects.isEmpty())
+        return {};
+    QStringList out;
+    QString in = "[vcat]";
+    for (int i = 0; i < project.effects.size(); ++i) {
+        const QString next = i == project.effects.size() - 1 ? "[vfx]" : QString("[vfx%1]").arg(i);
+        out << Effects::exportChain(project.effects[i], in, next, i);
+        in = next;
+    }
+    return out;
+}
+
+// The look sliders, the filter, the user's LUT, then text, which must stay white.
+// Fisheye text images (inputs textInputs[i] >= 0) go over everything, each
+// switched on for its overlay's stretch of time.
+QString videoFinish(const Project &project, const ExportOptions &options, const QVector<int> &textInputs) {
     QStringList video;
     const Look &look = project.look;
     if (!look.isNeutral()) {
@@ -62,11 +125,76 @@ QString videoFinish(const Project &project, const ExportOptions &options) {
         if (look.temperature != 0.0)
             video << QString("colortemperature=temperature=%1").arg(qRound(6500 - look.temperature * 2500));
     }
+    if (!options.gradeFile.isEmpty())
+        video << QString("lut3d=file=%1:interp=tetrahedral").arg(options.gradeFile);
+    if (!options.filterFile.isEmpty())
+        video << QString("lut3d=file=%1:interp=tetrahedral").arg(options.filterFile);
     if (!options.lutFile.isEmpty())
         video << QString("lut3d=file=%1").arg(options.lutFile);
     if (!options.assFile.isEmpty())
         video << QString("ass=filename=%1").arg(options.assFile);
-    return "[vcat]" + (video.isEmpty() ? QString("null") : video.join(',')) + "[vout]";
+    const QString in = project.effects.isEmpty() ? "[vcat]" : "[vfx]";
+    QVector<int> texts;
+    for (int i = 0; i < textInputs.size(); ++i)
+        if (textInputs[i] >= 0)
+            texts << i;
+    if (texts.isEmpty())
+        return in + (video.isEmpty() ? QString("null") : video.join(',')) + "[vout]";
+
+    QStringList out{in + (video.isEmpty() ? QString("null") : video.join(',')) + "[vlook]"};
+    QString below = "[vlook]";
+    for (int k = 0; k < texts.size(); ++k) {
+        const Overlay &o = project.overlays[texts[k]];
+        const QString s = num(o.start), e = num(o.end);
+        // Entrances, as near the .ass ones as an image allows: pop fades in.
+        QStringList fades;
+        if (o.animation == "fade" || o.animation == "pop")
+            fades << QString("fade=t=in:st=%1:d=0.25:alpha=1").arg(s);
+        if (o.animation == "slide")
+            fades << QString("fade=t=in:st=%1:d=0.2:alpha=1").arg(s);
+        if (o.animation == "fade")
+            fades << QString("fade=t=out:st=%1:d=0.15:alpha=1").arg(num(qMax(o.start, o.end - 0.15)));
+        const QString y = o.animation == "slide" ? QString("'160*max(0,1-(t-%1)/0.25)'").arg(s) : QString("0");
+        const QString pad = QString("[ft%1]").arg(k);
+        const QString next = k == texts.size() - 1 ? "[vout]" : QString("[vt%1]").arg(k);
+        out << QString("[%1:v]format=rgba%2%3").arg(textInputs[texts[k]])
+                   .arg(fades.isEmpty() ? QString() : "," + fades.join(','), pad);
+        out << QString("%1%2overlay=x=0:y=%3:enable='between(t,%4,%5)':format=auto,format=yuv420p%6")
+                   .arg(below, pad, y, s, e, next);
+        below = next;
+    }
+    return out.join(';');
+}
+
+// The fisheye text images as extra inputs, numbered from `first`: each a
+// still frame looped until its overlay ends. Which input each overlay is (or -1).
+QVector<int> textInputs(const Project &project, const ExportOptions &options, int first, QStringList *args) {
+    QVector<int> index(project.overlays.size(), -1);
+    int next = first;
+    for (int i = 0; i < project.overlays.size(); ++i) {
+        const QString image = options.textImages.value(i);
+        if (image.isEmpty())
+            continue;
+        *args << "-loop" << "1" << "-framerate" << QString::number(Project::Fps)
+              << "-t" << num(project.overlays[i].end + 0.1) << "-i" << image;
+        index[i] = next++;
+    }
+    return index;
+}
+
+// The mask videos as extra inputs, numbered from `first`; which input each
+// clip's mask is (or -1).
+QVector<int> maskInputs(const Project &project, const ExportOptions &options, int first, QStringList *args) {
+    QVector<int> index(project.clips.size(), -1);
+    int next = first;
+    for (int i = 0; i < project.clips.size(); ++i) {
+        const QString mask = options.masks.value(i);
+        if (mask.isEmpty() || !Body::find(project.clips[i].body))
+            continue;
+        *args << "-i" << mask;
+        index[i] = next++;
+    }
+    return index;
 }
 
 QStringList clipInputs(const Project &project) {
@@ -90,6 +218,19 @@ QString num(double value, int decimals) {
             text.chop(1);
     }
     return text == "-0" ? "0" : text;
+}
+
+QString clipVideoChain(const Clip &c, const QString &input) {
+    if (c.still) {
+        // A looped photo: framed once, then moved over its duration.
+        const QString motion = motionFilter(c);
+        return QString("%1trim=duration=%2,setpts=PTS-STARTPTS,%3%4,setsar=1,fps=%5,format=yuv420p")
+            .arg(input, num(c.duration()), framingFilter(c), motion.isEmpty() ? QString() : "," + motion)
+            .arg(Project::Fps);
+    }
+    return QString("%1trim=start=%2:end=%3,setpts=(PTS-STARTPTS)/%4,%5,setsar=1,fps=%6,format=yuv420p")
+        .arg(input, num(c.in), num(c.out), num(c.speed, 4), framingFilter(c))
+        .arg(Project::Fps);
 }
 
 QString framingFilter(const Clip &clip) {
@@ -149,10 +290,16 @@ QStringList exportArgs(const Project &project, const ExportOptions &options) {
     args << clipInputs(project);
     if (project.music.isSet())
         args << "-i" << project.music.path;
+    const QVector<int> masks = maskInputs(project, options, n + (project.music.isSet() ? 1 : 0), &args);
+    int inputs = n + (project.music.isSet() ? 1 : 0);
+    for (int m : masks)
+        inputs += m >= 0;
+    const QVector<int> texts = textInputs(project, options, inputs, &args);
 
-    QStringList graph = clipChains(project, true, true, kAudioFormat);
-    graph << concatInputs(n, true, true) + QString("concat=n=%1:v=1:a=1[vcat][acat]").arg(n);
-    graph << videoFinish(project, options);
+    QStringList graph = clipChains(project, true, true, kAudioFormat, masks, options.clipGrades);
+    graph << joinClips(project, true, true);
+    graph << effectChains(project);
+    graph << videoFinish(project, options, texts);
 
     QString voice = "[acat]";
     if (project.music.isSet()) {
@@ -171,7 +318,13 @@ QStringList exportArgs(const Project &project, const ExportOptions &options) {
         voice = "[mix]";
     }
     // loudnorm works at 192 kHz internally; bring it back down for AAC.
-    graph << voice + "loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[aout]";
+    // A reel with no sound at all is left alone: there's nothing to level,
+    // and loudnorm turns crossfaded digital silence into NaN samples that
+    // the AAC encoder rejects.
+    bool hasSound = project.music.isSet();
+    for (const Clip &c : project.clips)
+        hasSound = hasSound || (c.audio && !c.still);
+    graph << voice + (hasSound ? "loudnorm=I=-14:TP=-1.5:LRA=11," : QString()) + "aresample=48000[aout]";
 
     args << "-filter_complex" << graph.join(';');
     args << "-map" << "[vout]" << "-map" << "[aout]";
@@ -189,22 +342,26 @@ QStringList exportArgs(const Project &project, const ExportOptions &options) {
 
 QStringList timelineAudioArgs(const Project &project, const QString &wav) {
     const QString mono = "aformat=sample_fmts=s16:sample_rates=16000:channel_layouts=mono";
-    const int n = project.clips.size();
     QStringList args{"-hide_banner", "-nostdin", "-y", "-progress", "pipe:1", "-nostats"};
     args << clipInputs(project);
     QStringList graph = clipChains(project, false, true, mono);
-    graph << concatInputs(n, false, true) + QString("concat=n=%1:v=0:a=1[aout]").arg(n);
-    args << "-filter_complex" << graph.join(';') << "-map" << "[aout]" << "-c:a" << "pcm_s16le" << wav;
+    graph << joinClips(project, false, true);
+    args << "-filter_complex" << graph.join(';') << "-map" << "[acat]" << "-c:a" << "pcm_s16le" << wav;
     return args;
 }
 
 QStringList frameArgs(const Project &project, const ExportOptions &options, double time, const QString &png, int width) {
-    const int n = project.clips.size();
     QStringList args{"-hide_banner", "-nostdin", "-y", "-loglevel", "error"};
     args << clipInputs(project);
-    QStringList graph = clipChains(project, true, false, {});
-    graph << concatInputs(n, true, false) + QString("concat=n=%1:v=1:a=0[vcat]").arg(n);
-    graph << videoFinish(project, options);
+    const QVector<int> masks = maskInputs(project, options, project.clips.size(), &args);
+    int inputs = project.clips.size();
+    for (int m : masks)
+        inputs += m >= 0;
+    const QVector<int> texts = textInputs(project, options, inputs, &args);
+    QStringList graph = clipChains(project, true, false, {}, masks, options.clipGrades);
+    graph << joinClips(project, true, false);
+    graph << effectChains(project);
+    graph << videoFinish(project, options, texts);
     graph.last().replace("[vout]", QString(",scale=%1:-2[vout]").arg(width));
     // Seeking the output keeps every filter's timing (captions, speed) exact.
     args << "-filter_complex" << graph.join(';') << "-map" << "[vout]"

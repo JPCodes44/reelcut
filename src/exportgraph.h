@@ -12,6 +12,16 @@ struct ExportOptions {
     QString assFile;  // captions and overlays; empty for none
     QString lutFile;  // copy of the project's LUT; empty for none
     QString encoder = "h264_nvenc";  // or libx264
+    QString filterFile;  // the filter library look baked into a .cube; empty for none
+    // Per clip: the person mask video for its body effect (absolute path), or empty.
+    QStringList masks;
+    // Per text overlay: its fisheye image (absolute path, see src/fisheyetext.h),
+    // or empty for a plain overlay, which the .ass file draws.
+    QStringList textImages;
+    // Color wheels baked into .cube files (src/colorgrade.h): per clip (empty
+    // for an ungraded clip), and the whole reel's (empty for none).
+    QStringList clipGrades;
+    QString gradeFile;
 };
 
 // The ffmpeg arguments that render the whole reel to options.output:
@@ -28,6 +38,11 @@ QStringList timelineAudioArgs(const Project &project, const QString &wav);
 // export draws (framing, look, LUT, captions, text), without the audio.
 QStringList frameArgs(const Project &project, const ExportOptions &options, double time, const QString &png,
                       int width = 540);
+
+// One clip's picture as the export draws it, from input pad `input` (e.g.
+// "[0:v]"): trimmed, sped, framed, moved, 30 fps, without a label. The person
+// mask job reads exactly these frames so its mask lines up.
+QString clipVideoChain(const Clip &clip, const QString &input);
 
 // scale+crop that fills the 9:16 frame with a clip, honoring zoom and pan.
 QString framingFilter(const Clip &clip);

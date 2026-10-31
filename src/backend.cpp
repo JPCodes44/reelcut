@@ -1,5 +1,6 @@
 #include "backend.h"
 
+#include <QColor>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
@@ -7,6 +8,7 @@
 #include <QFont>
 #include <QFontMetricsF>
 #include <QFutureWatcher>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QNetworkAccessManager>
@@ -18,6 +20,11 @@
 
 #include "captions.h"
 #include "filepicker.h"
+#include "bodyeffects.h"
+#include "effects.h"
+#include "filters.h"
+#include "segment.h"
+#include "transitions.h"
 #include "mcpserver.h"
 #include "media.h"
 #include "silence.h"
@@ -77,8 +84,11 @@ Backend::~Backend() {
 
 QVariantList Backend::clips() const {
     QVariantList list;
-    double start = 0.0;
-    for (const Clip &c : m_project.clips) {
+    const QVector<double> starts = m_project.clipStarts();
+    for (int i = 0; i < m_project.clips.size(); ++i) {
+        const Clip &c = m_project.clips[i];
+        const double start = starts[i];
+        const Transitions::Kind *kind = Transitions::find(c.transition);
         list.append(QVariantMap{
             {"path", c.path}, {"name", fileName(c.path)}, {"in", c.in}, {"out", c.out},
             {"speed", c.speed}, {"zoom", c.zoom}, {"panX", c.panX}, {"panY", c.panY},
@@ -86,8 +96,16 @@ QVariantList Backend::clips() const {
             {"sourceDuration", c.sourceDuration}, {"start", start}, {"duration", c.duration()},
             {"thumb", m_thumbKeys.value(c.path, -1)}, {"offline", !QFileInfo::exists(c.path)},
             {"still", c.still}, {"motion", c.motion},
+            // The transition into the next clip; overlap is its effective length.
+            {"transition", c.transition}, {"transitionName", kind ? kind->label : QString()},
+            {"transitionSeconds", c.transitionSeconds}, {"overlap", m_project.overlap(i)},
+            {"transitionMode", kind ? kind->previewMode : -1},
+            // The body effect, and its person mask once made (for the preview).
+            {"body", c.body}, {"bodyAmount", c.bodyAmount},
+            {"bodyMode", Body::find(c.body) ? Body::find(c.body)->previewMode : -1},
+            {"mask", !c.body.isEmpty() && Segment::hasMask(c) ? QUrl::fromLocalFile(Segment::maskPath(c)).toString() : QString()},
+            {"grade", c.grade.toMap()},
         });
-        start += c.duration();
     }
     return list;
 }
@@ -109,7 +127,35 @@ QVariantList Backend::overlays() const {
     QVariantList list;
     for (const Overlay &o : m_project.overlays) {
         list.append(QVariantMap{{"text", o.text}, {"start", o.start}, {"end", o.end}, {"x", o.x}, {"y", o.y},
-                                {"size", o.size}, {"animation", o.animation}});
+                                {"size", o.size}, {"animation", o.animation}, {"style", o.style},
+                                {"bulge", o.bulge}, {"fill", o.fill}, {"outline", o.outline}, {"shadow", o.shadow},
+                                {"box", o.box}, {"fillColor", o.colorOf("fill")}, {"outlineColor", o.colorOf("outline")},
+                                {"shadowColor", o.colorOf("shadow")}, {"boxColor", o.colorOf("box")}});
+    }
+    return list;
+}
+
+QVariantList Backend::bodyKinds() const {
+    QVariantList list;
+    for (const Body::Kind &k : Body::kinds())
+        list << QVariantMap{{"id", k.id}, {"label", k.label}, {"mode", k.previewMode}};
+    return list;
+}
+
+QVariantList Backend::effectKinds() const {
+    QVariantList list;
+    for (const Effects::Kind &k : Effects::kinds())
+        list << QVariantMap{{"id", k.id}, {"label", k.label}, {"mode", k.previewMode}, {"usesSpeed", k.usesSpeed}};
+    return list;
+}
+
+QVariantList Backend::effects() const {
+    QVariantList list;
+    for (const Effect &e : m_project.effects) {
+        const Effects::Kind *kind = Effects::find(e.kind);
+        list << QVariantMap{{"kind", e.kind}, {"label", kind ? kind->label : e.kind}, {"start", e.start},
+                            {"end", e.end}, {"intensity", e.intensity}, {"speed", e.speed},
+                            {"mode", kind ? kind->previewMode : -1}, {"usesSpeed", kind && kind->usesSpeed}};
     }
     return list;
 }
@@ -120,10 +166,46 @@ QVariantMap Backend::music() const {
             {"offset", m.offset}, {"duck", m.duck}};
 }
 
+namespace {
+// The preview shader's strip LUT for a look, written once to the cache.
+QString filterStrip(const Filters::Look &look) {
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/filters";
+    const QString path = dir + "/" + look.id + ".png";
+    if (!QFileInfo::exists(path)) {
+        QDir().mkpath(dir);
+        if (!Filters::stripImage(look).save(path))
+            return {};
+    }
+    return QUrl::fromLocalFile(path).toString();
+}
+}  // namespace
+
 QVariantMap Backend::look() const {
     const Look &l = m_project.look;
+    const Filters::Look *filter = Filters::find(l.filter);
     return {{"exposure", l.exposure}, {"contrast", l.contrast}, {"saturation", l.saturation},
-            {"temperature", l.temperature}, {"lut", l.lut}, {"lutName", fileName(l.lut)}};
+            {"temperature", l.temperature}, {"lut", l.lut}, {"lutName", fileName(l.lut)},
+            {"filter", l.filter}, {"filterName", filter ? filter->label : QString()},
+            {"filterAmount", l.filterAmount}, {"filterStrip", filter ? filterStrip(*filter) : QString()},
+            {"grade", l.grade.toMap()}};
+}
+
+QVariantList Backend::transitions() const {
+    QVariantList list;
+    for (const Transitions::Kind &k : Transitions::kinds())
+        list << QVariantMap{{"id", k.id}, {"label", k.label}, {"mode", k.previewMode}};
+    return list;
+}
+
+QVariantList Backend::filters() const {
+    QVariantList list;
+    for (const Filters::Look &look : Filters::looks()) {
+        QVariantList colors;
+        for (const QColor &c : Filters::swatch(look))
+            colors << c;
+        list << QVariantMap{{"id", look.id}, {"label", look.label}, {"swatch", colors}};
+    }
+    return list;
 }
 
 QString Backend::captionFont() const {
@@ -285,6 +367,82 @@ void Backend::setClipMotion(int index, const QString &motion) {
     checkpoint();
     if (m_project.setClipMotion(index, motion))
         changed();
+}
+
+void Backend::setClipTransition(int index, const QString &id) {
+    if (index < 0 || index >= m_project.clips.size() || m_project.clips[index].transition == id ||
+        (!id.isEmpty() && !Transitions::find(id)))
+        return;
+    checkpoint();
+    m_project.setClipTransition(index, id);
+    changed();
+}
+
+void Backend::setGrade(int index, const QString &key, double value) {
+    // Undo steps come from the wheels' and sliders' presses (checkpoint()),
+    // so a drag is one step; resets make their own.
+    if (key.startsWith("reset"))
+        checkpoint();
+    if (m_project.setGrade(index, key, value))
+        changed();
+}
+
+QString Backend::pixelColor(const QVariant &image, double x, double y) const {
+    const QImage img = image.value<QImage>();
+    if (img.isNull())
+        return {};
+    const int px = qBound(0, qRound(x * (img.width() - 1)), img.width() - 1);
+    const int py = qBound(0, qRound(y * (img.height() - 1)), img.height() - 1);
+    return QColor(img.pixel(px, py)).name(QColor::HexArgb);
+}
+
+void Backend::setClipBody(int index, const QString &id) {
+    if (index < 0 || index >= m_project.clips.size() || m_project.clips[index].body == id ||
+        (!id.isEmpty() && !Body::find(id)))
+        return;
+    checkpoint();
+    m_project.setClipBody(index, id);
+    changed();
+    if (!id.isEmpty() && !busy())
+        findPeople();
+}
+
+void Backend::findPeople(std::function<void()> then) {
+    bool missing = false;
+    for (const Clip &clip : m_project.clips)
+        missing = missing || (Body::find(clip.body) && !Segment::hasMask(clip));
+    if (!missing) {
+        if (then)
+            then();
+        return;
+    }
+    const Project project = m_project;
+    m_stopMasks = std::make_shared<std::atomic_bool>(false);
+    auto stop = m_stopMasks;
+    setBusy(QFileInfo::exists(Segment::modelPath()) ? tr("Finding the person…") : tr("Downloading the person model (once)…"), 0.0);
+    auto *watcher = new QFutureWatcher<QString>(this);
+    connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher, stop, then] {
+        const QString error = watcher->result();
+        watcher->deleteLater();
+        clearBusy();
+        emit projectChanged();  // the clips now carry their masks
+        if (*stop)
+            return;
+        if (!error.isEmpty()) {
+            setMessage(error, true);
+            return;
+        }
+        if (then)
+            then();
+    });
+    watcher->setFuture(QtConcurrent::run([this, project, stop] {
+        QString error;
+        Segment::ensureMasks(project, [this, stop](double f) {
+            QMetaObject::invokeMethod(this, [this, f] { setBusy(tr("Finding the person…"), f); }, Qt::QueuedConnection);
+            return !*stop;
+        }, &error);
+        return *stop ? QString() : error;
+    }));
 }
 
 void Backend::exportPhotos() {
@@ -509,6 +667,18 @@ int Backend::addOverlay(double time) {
     return index;
 }
 
+int Backend::addFisheyeText(double time) {
+    checkpoint();
+    const int index = m_project.addOverlay(tr("Your text here"), time);
+    Overlay &o = m_project.overlays[index];
+    o.style = "fisheye";
+    o.animation = "none";
+    o.size = 92;
+    o.y = 0.33;
+    changed();
+    return index;
+}
+
 void Backend::setOverlayValue(int index, const QString &key, const QVariant &value) {
     if (m_project.setOverlayValue(index, key, value))
         changed();
@@ -519,6 +689,30 @@ void Backend::removeOverlay(int index) {
         return;
     checkpoint();
     m_project.overlays.remove(index);
+    changed();
+}
+
+// ---- Video effects ----
+
+int Backend::addEffect(const QString &kind, double time) {
+    if (!Effects::find(kind))
+        return -1;
+    checkpoint();
+    const int index = m_project.addEffect(kind, time);
+    changed();
+    return index;
+}
+
+void Backend::setEffectValue(int index, const QString &key, double value) {
+    if (m_project.setEffectValue(index, key, value))
+        changed();
+}
+
+void Backend::removeEffect(int index) {
+    if (index < 0 || index >= m_project.effects.size())
+        return;
+    checkpoint();
+    m_project.effects.remove(index);
     changed();
 }
 
@@ -551,6 +745,14 @@ void Backend::applyPreset(const QString &name) {
     checkpoint();
     if (m_project.applyPreset(name))
         changed();
+}
+
+void Backend::setFilter(const QString &id) {
+    if (id == m_project.look.filter || (!id.isEmpty() && !Filters::find(id)))
+        return;
+    checkpoint();
+    m_project.setFilter(id);
+    changed();
 }
 
 void Backend::chooseLut() {
@@ -743,6 +945,13 @@ void Backend::exportVideo() {
 }
 
 void Backend::runExport(const QString &output, const QString &encoder) {
+    // Body effects need their person masks before ffmpeg can use them.
+    for (const Clip &clip : m_project.clips) {
+        if (Body::find(clip.body) && !Segment::hasMask(clip)) {
+            findPeople([this, output, encoder] { runExport(output, encoder); });
+            return;
+        }
+    }
     m_work = std::make_unique<QTemporaryDir>();
     QString error;
     const ExportOptions prepared =
@@ -775,6 +984,8 @@ void Backend::runExport(const QString &output, const QString &encoder) {
 }
 
 void Backend::cancelJob() {
+    if (m_stopMasks)
+        *m_stopMasks = true;
     if (m_download) {
         m_download->abort();
         return;

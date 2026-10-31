@@ -6,9 +6,10 @@ import QtQuick.Layouts
 import QtQuick.Shapes
 import QtMultimedia
 
-// Plays the edit: one player hops from clip to clip, at each clip's speed,
-// framed exactly as the export frames it. The look is approximated live; the
-// LUT only applies on export.
+// Plays the edit: two clip slots take turns (even and odd clips), so the
+// next clip is ready before the cut and both can show during a transition.
+// Each clip is framed exactly as the export frames it. The look and filter
+// are drawn live; a .cube LUT you load only applies on export.
 Rectangle {
     id: root
     color: "#0b0b0d"
@@ -18,69 +19,68 @@ Rectangle {
     property bool playing: false
     property int clipIndex: -1
     property var currentClip: clipIndex >= 0 && clipIndex < backend.clips.length ? backend.clips[clipIndex] : null
-    // Where to seek once a newly set source has loaded, in milliseconds.
-    property real pendingSeek: -1
+    readonly property var nextClip: clipIndex >= 0 && clipIndex + 1 < backend.clips.length ? backend.clips[clipIndex + 1] : null
+    // Inside a transition: the next clip has started while this one plays out.
+    readonly property bool inTransition: currentClip !== null && nextClip !== null && currentClip.overlap > 0
+                                         && time >= nextClip.start - 0.0001
+    readonly property real transitionProgress: inTransition ? Math.max(0, Math.min(1, (time - nextClip.start) / currentClip.overlap)) : 0
+    // The video effect showing now: the last one on the track that covers
+    // this time. (The export applies every overlapping effect; the preview
+    // draws one.)
+    readonly property var activeEffect: {
+        const list = backend.effects
+        for (let k = list.length - 1; k >= 0; --k)
+            if (time >= list[k].start && time < list[k].end) return list[k]
+        return null
+    }
     // Wall-clock time of the last tick, for advancing through photos.
     property real lastTick: 0
     signal timeAdvanced(real t)
+
+    // Even clips play in one slot, odd clips in the other, so the next clip
+    // is always loaded in the slot that isn't showing.
+    function slotFor(i) { return i % 2 === 0 ? slotEven : slotOdd }
 
     function seek(t) {
         const at = backend.locate(t)
         clipIndex = at.index
         if (at.index < 0) {
-            player.stop()
-            player.source = ""
+            slotEven.clear()
+            slotOdd.clear()
             return
         }
-        load(backend.clips[at.index], at.source)
+        slotFor(at.index).show(at.index, at.source, playing)
+        prepareNext(t)
+        lastTick = Date.now()
         music.sync(t)
     }
-    function refresh() { seek(time) }
-    function load(c, sourceSeconds) {
-        // Photos have no player; the timer moves through them by the clock.
-        if (c.still) {
-            pendingSeek = -1
-            player.stop()
-            player.source = ""
-            lastTick = Date.now()
+    // Loads the clip after the current one: at its place if a transition has
+    // already started, otherwise paused at its first frame.
+    function prepareNext(t) {
+        const n = clipIndex + 1
+        const other = slotFor(n)
+        if (n >= backend.clips.length) {
+            other.clear()
             return
         }
-        const url = "file://" + c.path
-        player.playbackRate = c.speed
-        if (player.source.toString() !== encodeURI(url) && player.source.toString() !== url) {
-            pendingSeek = sourceSeconds * 1000
-            player.source = url
-            if (playing) player.play(); else player.pause()
-        } else {
-            player.position = sourceSeconds * 1000
-        }
+        const nc = backend.clips[n]
+        const local = t - nc.start
+        if (local >= 0) other.show(n, nc.in + local * nc.speed, playing)
+        else other.show(n, nc.in, false)
     }
+    function refresh() { seek(time) }
     function toggle() { playing ? pause() : play() }
     function play() {
         if (backend.clips.length === 0) return
-        if (time >= backend.duration - 0.05) { timeAdvanced(0); seek(0) }
+        if (time >= backend.duration - 0.05) { timeAdvanced(0); playing = true; seek(0); return }
         playing = true
-        lastTick = Date.now()
-        if (!(currentClip && currentClip.still)) player.play()
-        music.sync(time)
+        seek(time)
     }
     function pause() {
         playing = false
-        player.pause()
+        slotEven.pause()
+        slotOdd.pause()
         music.pause()
-    }
-
-    MediaPlayer {
-        id: player
-        videoOutput: video
-        audioOutput: AudioOutput { volume: 1.0 }
-        onMediaStatusChanged: {
-            if ((mediaStatus === MediaPlayer.LoadedMedia || mediaStatus === MediaPlayer.BufferedMedia) && root.pendingSeek >= 0) {
-                position = root.pendingSeek
-                root.pendingSeek = -1
-                if (root.playing) play(); else pause()
-            }
-        }
     }
 
     MediaPlayer {
@@ -94,36 +94,42 @@ Rectangle {
         }
     }
 
-    // Follows the player while playing and moves on at each clip's out point.
+    // Follows the current clip's player while playing, starts the next clip
+    // when its transition begins, and moves on at each clip's out point.
     Timer {
         interval: 16
         repeat: true
         running: root.playing
         onTriggered: {
             const c = root.currentClip
-            if (!c || root.pendingSeek >= 0) return
+            const cur = root.slotFor(root.clipIndex)
+            if (!c || cur.loading) return
             const now = Date.now()
-            let t, done
-            if (c.still) {
-                t = root.time + (now - root.lastTick) / 1000
-                done = t >= c.start + c.duration
-            } else {
-                const source = player.position / 1000
-                t = c.start + Math.max(0, source - c.in) / c.speed
-                done = source >= c.out - 0.02 || player.mediaStatus === MediaPlayer.EndOfMedia
-            }
+            const t = c.still ? root.time + (now - root.lastTick) / 1000 : cur.reached()
+            const done = c.still ? t >= c.start + c.duration : cur.finished()
             root.lastTick = now
+
+            const n = root.clipIndex + 1
+            const nc = root.nextClip
+            if (nc && c.overlap > 0 && t >= nc.start) {
+                const incoming = root.slotFor(n)
+                if (!incoming.playing || incoming.index !== n)
+                    incoming.show(n, nc.in + (t - nc.start) * nc.speed, true)
+            }
             if (done) {
-                const next = root.clipIndex + 1
-                if (next >= backend.clips.length) {
+                if (!nc) {
                     root.pause()
                     root.timeAdvanced(backend.duration)
                     return
                 }
-                root.clipIndex = next
-                root.load(backend.clips[next], backend.clips[next].in)
-                if (!backend.clips[next].still) player.play()
-                root.timeAdvanced(backend.clips[next].start)
+                const incoming = root.slotFor(n)
+                if (!incoming.playing || incoming.index !== n)
+                    incoming.show(n, nc.in + Math.max(0, t - nc.start) * nc.speed, true)
+                root.clipIndex = n
+                // The slot just freed loads the clip after next.
+                if (n + 1 < backend.clips.length) root.slotFor(n + 1).show(n + 1, backend.clips[n + 1].in, false)
+                else root.slotFor(n + 1).clear()
+                root.timeAdvanced(Math.max(t, nc.start))
                 return
             }
             root.timeAdvanced(Math.min(t, backend.duration))
@@ -150,56 +156,122 @@ Rectangle {
                 color: "black"
                 clip: true
 
-                // A photo's slow zoom or pan, the same moves as motionFilter().
+                // The picture: both clip slots, and during a transition the
+                // shader that blends them. The filter look applies on top.
                 Item {
-                    id: mover
-                    width: frame.width
-                    height: frame.height
-                    readonly property var c: root.currentClip
-                    readonly property string motion: c && c.still ? c.motion : "none"
-                    readonly property real p: c && c.duration > 0 ? Math.max(0, Math.min(1, (root.time - c.start) / c.duration)) : 0
-                    readonly property real zoomLevel: motion === "zoom-in" ? 1 + 0.12 * p
-                                            : motion === "zoom-out" ? 1.12 - 0.12 * p
-                                            : motion === "pan-left" || motion === "pan-right" ? 1.12 : 1
-                    readonly property real across: motion === "pan-right" ? p : motion === "pan-left" ? 1 - p : 0.5
-                    transform: [
-                        Scale { xScale: mover.zoomLevel; yScale: mover.zoomLevel },
-                        Translate { x: -(mover.zoomLevel - 1) * frame.width * mover.across; y: -(mover.zoomLevel - 1) * frame.height / 2 }
-                    ]
+                    id: picture
+                    anchors.fill: parent
+                    layer.enabled: backend.look.filter.length > 0 && backend.look.filterAmount > 0
+                    layer.effect: ShaderEffect {
+                        // src/shaders/lut.frag explains the lookup.
+                        property variant lut: Image {
+                            source: backend.look.filterStrip
+                            smooth: true
+                            mipmap: false
+                            visible: false
+                        }
+                        property real amount: backend.look.filterAmount
+                        fragmentShader: "qrc:/shaders/lut.frag.qsb"
+                    }
 
+                    // The whole reel's color wheels, after the clips and the
+                    // video effect, before the filter (as in the export).
                     Item {
-                        id: framed
-                        readonly property var c: root.currentClip
-                        readonly property real srcW: c && c.width > 0 ? c.width : 1080
-                        readonly property real srcH: c && c.height > 0 ? c.height : 1920
-                        // Same math as framingFilter(): cover, zoom, then pan the crop.
-                        readonly property real s: Math.max(frame.width / srcW, frame.height / srcH) * (c ? c.zoom : 1)
-                        width: srcW * s
-                        height: srcH * s
-                        x: -(width - frame.width) * ((c ? c.panX : 0) + 1) / 2
-                        y: -(height - frame.height) * ((c ? c.panY : 0) + 1) / 2
-                        layer.enabled: true
-                        layer.effect: MultiEffect {
-                            brightness: backend.look.exposure * 0.25
-                            contrast: backend.look.contrast * 0.5
-                            saturation: backend.look.saturation
-                        }
+                        id: graded
+                        objectName: "reelGrade"
+                        anchors.fill: parent
+                        layer.enabled: backend.look.grade !== undefined && !backend.look.grade.neutral
+                        layer.effect: GradeEffect { grade: backend.look.grade }
 
-                        VideoOutput {
-                            id: video
+                        // Clips, transitions and the active video effect. The filter
+                        // look above applies after the effect, as in the export.
+                        Item {
+                            id: effected
                             anchors.fill: parent
-                            fillMode: VideoOutput.Stretch
-                            visible: !(framed.c && framed.c.still)
+                            layer.enabled: root.activeEffect !== null
+                            layer.effect: ShaderEffect {
+                                // src/shaders/effect.frag draws each effect.
+                                property real mode: root.activeEffect ? root.activeEffect.mode : -1
+                                property real local: root.activeEffect ? root.time - root.activeEffect.start : 0
+                                property real intensity: root.activeEffect ? root.activeEffect.intensity : 0
+                                property real speed: root.activeEffect ? root.activeEffect.speed : 0
+                                property real aspect: effected.width / Math.max(1, effected.height)
+                                fragmentShader: "qrc:/shaders/effect.frag.qsb"
+                            }
+
+                            ClipSlot {
+                                id: slotEven
+                                objectName: "slotEven"
+                                anchors.fill: parent
+                                time: root.time
+                                z: root.clipIndex % 2 === 0 ? 1 : 0
+                                opacity: root.inTransition || root.clipIndex % 2 === 0 ? 1 : 0
+                                volume: root.inTransition ? (root.clipIndex % 2 === 0 ? 1 - root.transitionProgress : root.transitionProgress) : 1
+                            }
+                            ClipSlot {
+                                id: slotOdd
+                                objectName: "slotOdd"
+                                anchors.fill: parent
+                                time: root.time
+                                z: root.clipIndex % 2 === 1 ? 1 : 0
+                                opacity: root.inTransition || root.clipIndex % 2 === 1 ? 1 : 0
+                                volume: root.inTransition ? (root.clipIndex % 2 === 1 ? 1 - root.transitionProgress : root.transitionProgress) : 1
+                            }
+
+                            // src/shaders/transition.frag draws each transition.
+                            ShaderEffect {
+                                objectName: "transitionEffect"
+                                anchors.fill: parent
+                                z: 2
+                                visible: root.inTransition
+                                property variant from: ShaderEffectSource {
+                                    sourceItem: root.clipIndex % 2 === 0 ? slotEven : slotOdd
+                                    hideSource: root.inTransition
+                                    live: true
+                                }
+                                property variant to: ShaderEffectSource {
+                                    sourceItem: root.clipIndex % 2 === 0 ? slotOdd : slotEven
+                                    hideSource: root.inTransition
+                                    live: true
+                                }
+                                property real progress: root.transitionProgress
+                                property real mode: root.currentClip && root.currentClip.transitionMode >= 0 ? root.currentClip.transitionMode : 0
+                                property real aspect: width / Math.max(1, height)
+                                fragmentShader: "qrc:/shaders/transition.frag.qsb"
+                            }
+
                         }
-                        Image {
-                            anchors.fill: parent
-                            visible: framed.c !== null && framed.c.still
-                            source: visible ? "file://" + framed.c.path : ""
-                            fillMode: Image.Stretch
-                            asynchronous: true
-                            autoTransform: true
-                            sourceSize.width: 2160
-                        }
+                    }
+                }
+
+                // The eyedropper: while it's on, a click reads the video's color there.
+                MouseArea {
+                    objectName: "eyedropperArea"
+                    anchors.fill: parent
+                    z: 100
+                    visible: win.eyedropperCallback !== null
+                    cursorShape: Qt.CrossCursor
+                    hoverEnabled: true
+                    function pick(mx, my) {
+                        const fx = mx / width, fy = my / height
+                        picture.grabToImage(function(result) {
+                            const callback = win.eyedropperCallback
+                            win.eyedropperCallback = null
+                            const color = backend.pixelColor(result.image, fx, fy)
+                            if (callback && color.length > 0)
+                                callback(color)
+                        })
+                    }
+                    onClicked: function(m) { pick(m.x, m.y) }
+                    Rectangle {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.top: parent.top
+                        anchors.topMargin: 10
+                        width: hint.implicitWidth + 20
+                        height: hint.implicitHeight + 10
+                        radius: height / 2
+                        color: "#cc000000"
+                        Label { id: hint; anchors.centerIn: parent; text: qsTr("Click to pick a color · Esc to cancel"); color: "white"; font.pixelSize: 12 }
                     }
                 }
 
@@ -221,6 +293,7 @@ Rectangle {
                         startPanY = root.currentClip.panY
                         startZoom = root.currentClip.zoom
                         // How far a pan of 1 moves the picture, as framed now.
+                        const framed = root.slotFor(root.clipIndex).framedItem
                         spanX = (framed.width - frame.width) / 2
                         spanY = (framed.height - frame.height) / 2
                     }

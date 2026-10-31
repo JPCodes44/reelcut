@@ -11,6 +11,7 @@
 #include <QVector>
 
 #include <functional>
+#include <atomic>
 #include <memory>
 
 #include "jobs.h"
@@ -41,6 +42,11 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList overlays READ overlays NOTIFY projectChanged)
     Q_PROPERTY(QVariantMap music READ music NOTIFY projectChanged)
     Q_PROPERTY(QVariantMap look READ look NOTIFY projectChanged)
+    Q_PROPERTY(QVariantList filters READ filters CONSTANT)
+    Q_PROPERTY(QVariantList transitions READ transitions CONSTANT)
+    Q_PROPERTY(QVariantList effectKinds READ effectKinds CONSTANT)
+    Q_PROPERTY(QVariantList effects READ effects NOTIFY projectChanged)
+    Q_PROPERTY(QVariantList bodyKinds READ bodyKinds CONSTANT)
     Q_PROPERTY(QString platform READ platform NOTIFY projectChanged)
     Q_PROPERTY(QString captionFont READ captionFont CONSTANT)
     Q_PROPERTY(double captionScale READ captionScale CONSTANT)
@@ -74,6 +80,14 @@ public:
     QVariantList overlays() const;
     QVariantMap music() const;
     QVariantMap look() const;
+    // The filter library: id, label and three swatch colors per look.
+    QVariantList filters() const;
+    // The transition library: id and label.
+    QVariantList transitions() const;
+    // The effects library (id, label, mode, usesSpeed) and the effects track.
+    QVariantList effectKinds() const;
+    QVariantList effects() const;
+    QVariantList bodyKinds() const;
     QString platform() const { return m_project.platform; }
     QString captionFont() const;
     // Qt pixel size per ASS font size unit; libass sizes a font by its line
@@ -82,6 +96,7 @@ public:
     bool canUndo() const { return !m_undo.isEmpty(); }
     bool canRedo() const { return !m_redo.isEmpty(); }
     bool dirty() const { return m_dirty; }
+    QString path() const { return m_path; }  // the open .reel, empty if never saved
     QString title() const;
     bool busy() const { return !m_busyText.isEmpty(); }
     QString busyText() const { return m_busyText; }
@@ -108,6 +123,18 @@ public:
     // in, out, speed, zoom, panX, panY; values are clamped to what makes sense
     Q_INVOKABLE void setClipValue(int index, const QString &key, double value);
     Q_INVOKABLE void setClipMotion(int index, const QString &motion);
+    // The transition from clip `index` into the next; empty for a cut.
+    Q_INVOKABLE void setClipTransition(int index, const QString &id);
+    // A body effect on a clip; empty removes it. Finds the person in the
+    // clip in the background if that hasn't been done for these frames yet.
+    Q_INVOKABLE void setClipBody(int index, const QString &id);
+    // Color wheels (src/colorgrade.h): index -1 is the whole reel.
+    Q_INVOKABLE void setGrade(int index, const QString &key, double value);
+    // The eyedropper: the color at (x, y), 0..1 across a grabbed image.
+    Q_INVOKABLE QString pixelColor(const QVariant &image, double x, double y) const;
+    // Makes any person masks the project's body effects still need, then
+    // runs `then` (on success). Shows progress; Cancel stops it.
+    void findPeople(std::function<void()> then = {});
     Q_INVOKABLE QVariantMap locate(double time) const;
     Q_INVOKABLE void cutSilences(int index);
 
@@ -122,8 +149,17 @@ public:
 
     // Text overlays
     Q_INVOKABLE int addOverlay(double time);
+    // The "Fisheye Text" preset: a fisheye-style overlay at `time`.
+    Q_INVOKABLE int addFisheyeText(double time);
     Q_INVOKABLE void setOverlayValue(int index, const QString &key, const QVariant &value);
     Q_INVOKABLE void removeOverlay(int index);
+
+    // Video effects
+    // An effect at `time`; returns its index, or -1 for an unknown kind.
+    Q_INVOKABLE int addEffect(const QString &kind, double time);
+    // start, end, intensity, speed; no undo step of its own (call checkpoint() first).
+    Q_INVOKABLE void setEffectValue(int index, const QString &key, double value);
+    Q_INVOKABLE void removeEffect(int index);
 
     // Music and look
     Q_INVOKABLE void chooseMusic();
@@ -131,6 +167,8 @@ public:
     Q_INVOKABLE void setMusicValue(const QString &key, const QVariant &value);
     Q_INVOKABLE void setLookValue(const QString &key, double value);
     Q_INVOKABLE void applyPreset(const QString &name);
+    // A look from the filter library; empty removes it. Records an undo step.
+    Q_INVOKABLE void setFilter(const QString &id);
     Q_INVOKABLE void chooseLut();
     Q_INVOKABLE void clearLut();
     Q_INVOKABLE void setPlatform(const QString &platform);
@@ -198,4 +236,5 @@ private:
     QByteArray m_onDisk;
     QNetworkAccessManager *m_network = nullptr;
     QNetworkReply *m_download = nullptr;
+    std::shared_ptr<std::atomic_bool> m_stopMasks;
 };

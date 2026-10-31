@@ -24,11 +24,17 @@ ApplicationWindow {
     property bool safeZones: true
     property int selectedClip: -1
     property int selectedOverlay: -1
+    property int selectedEffect: -1
     // What a click last picked: clip, overlay, captions, or none. Delete acts on it.
     property string selectionKind: "none"
     property real playhead: 0
     // Single-key shortcuts must not fire while the user is typing.
     readonly property bool typing: activeFocusItem !== null && activeFocusItem.hasOwnProperty("cursorPosition")
+
+    // The color picker's eyedropper: the next click on the preview picks a
+    // color from the video and hands it to `callback`. Escape cancels.
+    property var eyedropperCallback: null
+    function startEyedropper(callback) { eyedropperCallback = callback }
 
     function seek(t) {
         playhead = Math.max(0, Math.min(t, backend.duration))
@@ -48,10 +54,17 @@ ApplicationWindow {
             inspector.currentIndex = 2
         } else if (kind === "captions") {
             inspector.currentIndex = 1
+        } else if (kind === "effect") {
+            selectedEffect = index
+            inspector.currentIndex = 5
         }
     }
     function deleteSelection() {
-        if (selectionKind === "overlay" && selectedOverlay >= 0) {
+        if (selectionKind === "effect" && selectedEffect >= 0) {
+            backend.removeEffect(selectedEffect)
+            selectedEffect = -1
+            selectionKind = "none"
+        } else if (selectionKind === "overlay" && selectedOverlay >= 0) {
             backend.removeOverlay(selectedOverlay)
             selectionKind = "none"
         } else if (selectionKind === "captions") {
@@ -69,6 +82,8 @@ ApplicationWindow {
                 win.selectedClip = backend.clips.length - 1
             if (win.selectedOverlay >= backend.overlays.length)
                 win.selectedOverlay = -1
+            if (win.selectedEffect >= backend.effects.length)
+                win.selectedEffect = -1
             if (win.playhead > backend.duration)
                 win.seek(backend.duration)
             else
@@ -76,6 +91,7 @@ ApplicationWindow {
         }
     }
 
+    Shortcut { sequence: "Escape"; enabled: win.eyedropperCallback !== null; context: Qt.ApplicationShortcut; onActivated: win.eyedropperCallback = null }
     Shortcut { sequence: "?"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.helpVisible = !win.helpVisible }
     Shortcut { sequence: "Esc"; context: Qt.ApplicationShortcut; onActivated: { win.helpVisible = false; win.selectionKind = "none"; win.contentItem.forceActiveFocus() } }
     Shortcut { sequence: "Q"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.close() }
@@ -187,6 +203,7 @@ ApplicationWindow {
 
                 Preview {
                     id: preview
+                    objectName: "preview"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     time: win.playhead
@@ -198,12 +215,17 @@ ApplicationWindow {
 
                 Inspector {
                     id: inspector
+                    objectName: "inspector"
                     Layout.preferredWidth: 440
                     Layout.fillHeight: true
                     selectedClip: win.selectedClip
                     selectedOverlay: win.selectedOverlay
+                    selectedEffect: win.selectedEffect
+                    textSelected: win.selectionKind === "overlay" && win.selectedOverlay >= 0
+                                  && win.selectedOverlay < backend.overlays.length
                     playhead: win.playhead
                     onOverlaySelected: function(i) { win.select("overlay", i) }
+                    onEffectSelected: function(i) { win.select("effect", i) }
                     onSeekRequested: function(t) { win.seek(t) }
                 }
             }
@@ -213,13 +235,15 @@ ApplicationWindow {
             ReelTimeline {
                 id: timeline
                 Layout.fillWidth: true
-                Layout.preferredHeight: 220
+                Layout.preferredHeight: 254
                 playhead: win.playhead
                 selectedClip: win.selectedClip
                 selectedOverlay: win.selectedOverlay
+                selectedEffect: win.selectionKind === "effect" ? win.selectedEffect : -1
                 onSeekRequested: function(t) { preview.pause(); win.seek(t) }
                 onClipSelected: function(i) { win.select("clip", i) }
                 onOverlaySelected: function(i) { win.select("overlay", i) }
+                onEffectSelected: function(i) { win.select("effect", i) }
                 onCaptionsSelected: win.select("captions", -1)
                 onMusicSelected: inspector.currentIndex = 4
             }

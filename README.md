@@ -8,11 +8,14 @@ Make vertical reels for Instagram and TikTok on Omarchy: cut your clips, caption
 
 - **Photos and slideshows**: drop in photos (JPG, PNG, WebP, HEIC) and they become slides with a duration and an optional slow zoom or pan. Export the slideshow as a video, or as a **photo set** for TikTok photo posts: one 1080×1920 JPG per slide with the text and look drawn in, numbered in order. Post the set in TikTok's photo mode and pick the sound in the app (TikTok's library sounds can only be added there).
 - **Cut**: drop in videos, split at the playhead, trim with the handles, reorder, change speed from 0.25× to 4×.
+- **Transitions**: 15 transitions between clips (dissolve, dip to black, flash, wipes, slides, iris, clock, zoom, pixelate, blur and more), with a live preview. [How they work](docs/effects.md#2-transitions-two-pictures-and-a-progress-value).
 - **Frame**: every clip fills the 9:16 frame; zoom and pan landscape footage to pick what shows.
 - **Cut silences**: one click removes the pauses from a talking clip.
+- **Body effects**: background blur, color pop, spotlight, neon outline or a solid backdrop behind the person in a clip. A small segmentation model (OpenCV, downloaded once, about 6 MB) finds the person on your computer. [How they work](docs/effects.md#4-body-effects-a-mask-from-a-segmentation-model).
 - **Captions**: transcribed on your computer with whisper.cpp, word by word, in four styles (highlight the spoken word, pop one word at a time, bold, or on a box). Click any word to fix it.
 - **Text**: hook titles that pop, fade or slide in.
-- **Look**: exposure, contrast, saturation and temperature, six presets, and any `.cube` LUT (including ones from DaVinci Resolve).
+- **Effects**: 13 video effects on their own track (shake, zoom pulse, strobe, VHS, RGB split, glitch, vignette, blur, film grain, mono flicker, invert, mirror, light trails), each with intensity and speed. [How they work](docs/effects.md#3-video-effects-a-track-of-timed-filters).
+- **Look**: a library of 20 filters with a strength slider, exposure, contrast, saturation and temperature, six presets, and any `.cube` LUT (including ones from DaVinci Resolve). [How the filters work](docs/effects.md).
 - **Music**: a music track that ducks under speech, and loudness leveled to -14 LUFS.
 - **Export**: 1080×1920, 30 fps, H.264 and AAC, on the GPU with NVENC when there is one. The preview shows each platform's safe zones so captions don't end up under the buttons.
 

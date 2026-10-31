@@ -1,0 +1,12 @@
+#!/bin/sh
+# Compiles the preview shaders in src/shaders to Qt's .qsb format.
+# Run after editing a .frag or .vert; the .qsb files are committed.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+QSB="${QSB:-/usr/lib/qt6/bin/qsb}"
+for src in "$ROOT"/src/shaders/*.frag "$ROOT"/src/shaders/*.vert; do
+    [ -e "$src" ] || continue
+    "$QSB" --glsl "100 es,120,150" --hlsl 50 --msl 12 -o "$src.qsb" "$src"
+    echo "Compiled ${src#$ROOT/}.qsb"
+done

@@ -74,6 +74,8 @@ ToolResult runTool(const QString &program, const QStringList &args, const QStrin
 // Blocking versions of the window's background jobs. Each returns false (or
 // nothing) and sets *error when it fails.
 bool downloadWhisperModel(QString *error);
+// Downloads `url` to `path` (via a .part file); `what` names it in errors.
+bool downloadFile(const QString &url, const QString &path, const QString &what, QString *error);
 QVector<Word> transcribeProject(const Project &project, QString *error);
 bool cutSilences(Project &project, int index, double thresholdDb, double minSilence, double *removed, QString *error);
 bool exportProject(const Project &project, const QString &accent, const QString &output, QString *encoder,

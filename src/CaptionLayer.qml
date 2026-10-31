@@ -133,30 +133,107 @@ Item {
             required property int index
             readonly property real age: root.time - modelData.start
             readonly property real entrance: root.animate ? Math.min(1, Math.max(0, age / 0.25)) : 1
+            // Fisheye text is drawn flat, then seen through a lens (src/fisheyetext.h).
+            readonly property bool fisheye: modelData.style === "fisheye"
             visible: root.time >= modelData.start && root.time < modelData.end && modelData.text.length > 0
+            // Colors, with the style's defaults filled in (Overlay::colorOf).
+            readonly property color fillColor: modelData.fillColor || "white"
+            readonly property color outlineColor: modelData.outlineColor || "black"
+            readonly property color shadowColor: modelData.shadowColor || "transparent"
+            readonly property color boxColor: modelData.boxColor || "transparent"
+            readonly property bool hasBox: boxColor.a > 0
+            // The box reaches this far past the text (TextBoxPadding, FisheyeText::BoxPadding).
+            readonly property real pad: hasBox ? 18 * root.scaleFactor : 0
             width: label.width
             height: label.height
             x: modelData.x * root.width - width / 2
             y: modelData.y * root.height - height / 2
 
-            Text {
-                id: label
-                objectName: "overlayText" + overlay.index
-                width: Math.min(implicitWidth, root.width * 0.94)
-                text: overlay.modelData.text
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.Wrap
-                font.family: backend.captionFont
-                font.bold: true
-                font.pixelSize: Math.max(1, Math.round(overlay.modelData.size * root.fontScale))
-                color: "white"
-                style: Text.Outline
-                styleColor: "black"
+            // The text, its box and (plain text) its hard shadow, animated together.
+            Item {
+                id: block
+                width: label.width
+                height: label.height
+                transform: Translate {
+                    y: !overlay.fisheye && overlay.modelData.animation === "slide" ? (1 - overlay.entrance) * 160 * root.scaleFactor : 0
+                }
+                opacity: !overlay.fisheye && (overlay.modelData.animation === "fade" || overlay.modelData.animation === "slide") ? overlay.entrance : 1
+                scale: !overlay.fisheye && overlay.modelData.animation === "pop" && root.animate ? 0.4 + 0.6 * Math.min(1, overlay.age / 0.18) : 1
+
+                Rectangle {
+                    objectName: "overlayBackground" + overlay.index
+                    visible: overlay.hasBox
+                    x: -overlay.pad
+                    y: -overlay.pad
+                    width: label.width + 2 * overlay.pad
+                    height: label.height + 2 * overlay.pad
+                    radius: overlay.fisheye ? 12 * root.scaleFactor : 0
+                    color: overlay.boxColor
+                }
+                Text {
+                    // ASS draws a hard shadow 5 px down and right (TextShadowOffset).
+                    visible: !overlay.fisheye && overlay.shadowColor.a > 0
+                    x: 5 * root.scaleFactor
+                    y: 5 * root.scaleFactor
+                    width: label.width
+                    text: label.text
+                    horizontalAlignment: label.horizontalAlignment
+                    wrapMode: label.wrapMode
+                    font: label.font
+                    color: overlay.shadowColor
+                    style: label.style
+                    styleColor: overlay.shadowColor
+                }
+                Text {
+                    id: label
+                    objectName: "overlayText" + overlay.index
+                    width: Math.min(implicitWidth, root.width * 0.94)
+                    text: overlay.modelData.text
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    font.family: overlay.fisheye ? "Liberation Serif" : backend.captionFont
+                    font.bold: !overlay.fisheye
+                    // Fisheye text is an image at true pixel size in the export, so no caption scale.
+                    font.pixelSize: Math.max(1, Math.round(overlay.modelData.size
+                                                           * (overlay.fisheye ? root.scaleFactor : root.fontScale)))
+                    color: overlay.fillColor
+                    // A box replaces the outline, as BorderStyle 3 does in the .ass file.
+                    style: overlay.outlineColor.a > 0 && !(overlay.hasBox && !overlay.fisheye) ? Text.Outline : Text.Normal
+                    styleColor: overlay.outlineColor
+                }
+            }
+
+            // The lens: the flat text with room around it, bulged by the shader.
+            ShaderEffectSource {
+                id: flatText
+                sourceItem: overlay.fisheye ? block : null
+                hideSource: overlay.fisheye
+                live: true
+                visible: false
+                sourceRect: Qt.rect(-(lens.width - label.width) / 2, -(lens.height - label.height) / 2,
+                                    lens.width, lens.height)
+            }
+            ShaderEffect {
+                id: lens
+                objectName: "overlayLens" + overlay.index
+                visible: overlay.fisheye
+                width: Math.ceil((label.width + 2 * overlay.pad) * 1.45)    // FisheyeText::Padding
+                height: Math.ceil((label.height + 2 * overlay.pad) * 1.45)
+                x: (label.width - width) / 2
+                y: (label.height - height) / 2
+                property variant source: flatText
+                property real k: 0.6 * (overlay.modelData.bulge === undefined ? 0.6 : overlay.modelData.bulge)
+                property point shadow: Qt.point(4 * root.scaleFactor / Math.max(1, width), 6 * root.scaleFactor / Math.max(1, height))
+                property point blur: Qt.point(5 * root.scaleFactor / Math.max(1, width), 5 * root.scaleFactor / Math.max(1, height))
+                property vector4d shadowColor: Qt.vector4d(overlay.shadowColor.r, overlay.shadowColor.g,
+                                                           overlay.shadowColor.b, overlay.shadowColor.a)
+                fragmentShader: "qrc:/shaders/fisheye.frag.qsb"
+                // Images can't pop or slide in the export, so every entrance is a fade
+                // (and slide also rises).
+                opacity: overlay.modelData.animation === "none" ? 1 : overlay.entrance
                 transform: Translate {
                     y: overlay.modelData.animation === "slide" ? (1 - overlay.entrance) * 160 * root.scaleFactor : 0
                 }
-                opacity: overlay.modelData.animation === "fade" || overlay.modelData.animation === "slide" ? overlay.entrance : 1
-                scale: overlay.modelData.animation === "pop" && root.animate ? 0.4 + 0.6 * Math.min(1, overlay.age / 0.18) : 1
             }
 
             EditBox {

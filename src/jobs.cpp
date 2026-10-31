@@ -1,5 +1,10 @@
 #include "jobs.h"
 
+#include "colorgrade.h"
+#include "filters.h"
+#include "fisheyetext.h"
+#include "segment.h"
+
 #include <QDir>
 #include <QEventLoop>
 #include <QFileInfo>
@@ -98,6 +103,49 @@ ExportOptions prepareExport(const Project &project, const QString &accent, const
         }
         options.lutFile = "look.cube";
     }
+    if (const Filters::Look *filter = Filters::find(project.look.filter);
+        filter && project.look.filterAmount > 0.0) {
+        if (!Filters::writeCube(*filter, project.look.filterAmount, QDir(workDir).filePath("filter.cube"))) {
+            *error = QObject::tr("Could not write the filter.");
+            return {};
+        }
+        options.filterFile = "filter.cube";
+    }
+    // Color wheels, each baked into a 3D LUT.
+    if (!project.look.grade.isNeutral()) {
+        if (!ColorGrade::writeCube(project.look.grade, QDir(workDir).filePath("grade.cube"))) {
+            *error = QObject::tr("Could not write the color wheels.");
+            return {};
+        }
+        options.gradeFile = "grade.cube";
+    }
+    for (int i = 0; i < project.clips.size(); ++i) {
+        QString file;
+        if (!project.clips[i].grade.isNeutral()) {
+            file = QString("grade%1.cube").arg(i);
+            if (!ColorGrade::writeCube(project.clips[i].grade, QDir(workDir).filePath(file))) {
+                *error = QObject::tr("Could not write the color wheels.");
+                return {};
+            }
+        }
+        options.clipGrades << file;
+    }
+    // Fisheye text can't be drawn by the .ass file; each becomes an image.
+    for (int i = 0; i < project.overlays.size(); ++i) {
+        const Overlay &o = project.overlays[i];
+        QString image;
+        if (o.style == "fisheye" && !o.text.trimmed().isEmpty() && o.end > o.start) {
+            image = QDir(workDir).absoluteFilePath(QString("text%1.png").arg(i));
+            if (!FisheyeText::render(o).save(image)) {
+                *error = QObject::tr("Could not draw the fisheye text.");
+                return {};
+            }
+        }
+        options.textImages << image;
+    }
+    // Body effects use their clip's person mask once it has been made.
+    for (const Clip &clip : project.clips)
+        options.masks << (!clip.body.isEmpty() && Segment::hasMask(clip) ? Segment::maskPath(clip) : QString());
     return options;
 }
 
@@ -158,8 +206,7 @@ ToolResult runTool(const QString &program, const QStringList &args, const QStrin
     return result;
 }
 
-bool downloadWhisperModel(QString *error) {
-    const QString path = whisperModelPath();
+bool downloadFile(const QString &url, const QString &path, const QString &what, QString *error) {
     QDir().mkpath(QFileInfo(path).absolutePath());
     QFile part(path + ".part");
     if (!part.open(QIODevice::WriteOnly)) {
@@ -167,7 +214,7 @@ bool downloadWhisperModel(QString *error) {
         return false;
     }
     QNetworkAccessManager network;
-    QNetworkRequest request{QUrl(whisperModelUrl())};
+    QNetworkRequest request{QUrl(url)};
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply *reply = network.get(request);
     QEventLoop loop;
@@ -178,7 +225,7 @@ bool downloadWhisperModel(QString *error) {
     part.close();
     const bool ok = reply->error() == QNetworkReply::NoError;
     if (!ok)
-        *error = QObject::tr("Downloading the speech model failed: %1").arg(reply->errorString());
+        *error = QObject::tr("Downloading %1 failed: %2").arg(what, reply->errorString());
     reply->deleteLater();
     if (!ok) {
         part.remove();
@@ -186,6 +233,10 @@ bool downloadWhisperModel(QString *error) {
     }
     QFile::remove(path);
     return part.rename(path);
+}
+
+bool downloadWhisperModel(QString *error) {
+    return downloadFile(whisperModelUrl(), whisperModelPath(), QObject::tr("the speech model"), error);
 }
 
 QVector<Word> transcribeProject(const Project &project, QString *error) {
@@ -250,6 +301,8 @@ bool exportProject(const Project &project, const QString &accent, const QString 
             return false;
         }
     }
+    if (!Segment::ensureMasks(project, {}, error))
+        return false;
     QTemporaryDir work;
     ExportOptions options = prepareExport(project, accent, work.path(), output, error);
     if (!error->isEmpty())
@@ -276,6 +329,8 @@ QByteArray renderFrame(const Project &project, const QString &accent, double tim
         *error = QObject::tr("The project has no clips.");
         return {};
     }
+    if (!Segment::ensureMasks(project, {}, error))
+        return {};
     QTemporaryDir work;
     const ExportOptions options = prepareExport(project, accent, work.path(), {}, error);
     if (!error->isEmpty())

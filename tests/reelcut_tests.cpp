@@ -15,14 +15,22 @@
 
 #include "backend.h"
 #include "captions.h"
+#include "colorgrade.h"
+#include "bodyeffects.h"
+#include "effects.h"
 #include "exportgraph.h"
+#include "segment.h"
 #include "filepicker.h"
+#include "filters.h"
+#include "fisheyetext.h"
+#include "jobs.h"
 #include "mcpserver.h"
 #include "media.h"
 #include "project.h"
 #include "silence.h"
 #include "theme.h"
 #include "transcript.h"
+#include "transitions.h"
 #include "translator.h"
 
 namespace {
@@ -299,6 +307,490 @@ private slots:
         QVERIFY(!plainGraph.contains("sidechaincompress"));
         QVERIFY(plainGraph.contains("[acat][mus]amix"));
         QVERIFY(plainGraph.contains("eq=brightness=0:contrast=1:saturation=1.5"));
+    }
+
+    // Filter library: every look is a real change, amount 0 is untouched,
+    // and colors stay in range.
+    void filterLooksGradeWithinRange()
+    {
+        QVERIFY(Filters::looks().size() >= 20);
+        QCOMPARE(Filters::ids().removeDuplicates(), 0);
+        const Filters::Rgb samples[] = {{0, 0, 0}, {1, 1, 1}, {0.5, 0.5, 0.5}, {0.9, 0.2, 0.1}, {0.1, 0.4, 0.8}};
+        for (const Filters::Look &look : Filters::looks()) {
+            double change = 0.0;
+            for (const Filters::Rgb &s : samples) {
+                const Filters::Rgb full = Filters::apply(look, s, 1.0);
+                for (double v : {full.r, full.g, full.b})
+                    QVERIFY2(v >= 0.0 && v <= 1.0, qPrintable(look.id));
+                change += qAbs(full.r - s.r) + qAbs(full.g - s.g) + qAbs(full.b - s.b);
+                const Filters::Rgb none = Filters::apply(look, s, 0.0);
+                QCOMPARE(none.r, s.r);
+                QCOMPARE(none.b, s.b);
+            }
+            QVERIFY2(change > 0.05, qPrintable(look.id + " barely changes anything"));
+        }
+        QVERIFY(Filters::find("GOLDEN-HOUR"));
+        QVERIFY(!Filters::find("nope"));
+    }
+
+    // The .cube is what ffmpeg's lut3d reads: a size header, then size^3 rows,
+    // red changing fastest.
+    void filterCubeIsWellFormed()
+    {
+        const Filters::Look *look = Filters::find("silver");
+        QVERIFY(look);
+        const QStringList lines = Filters::cubeText(*look, 1.0, 5).split('\n', Qt::SkipEmptyParts);
+        QVERIFY(lines.contains("LUT_3D_SIZE 5"));
+        const QStringList rows = lines.filter(QRegularExpression("^[0-9.]+ [0-9.]+ [0-9.]+$"));
+        QCOMPARE(rows.size(), 125);
+        // Silver is monochrome: every row is grey.
+        for (const QString &row : rows) {
+            const QStringList v = row.split(' ');
+            QVERIFY(qAbs(v[0].toDouble() - v[2].toDouble()) < 1e-6);
+        }
+        // Amount 0 is the identity table; row 1 is red at its second step.
+        const QStringList identity = Filters::cubeText(*look, 0.0, 5).split('\n').filter(QRegularExpression("^[0-9.]+ "));
+        QCOMPARE(identity.at(1), QString("0.250000 0.000000 0.000000"));
+
+        const QImage strip = Filters::stripImage(*look);
+        QCOMPARE(strip.size(), QSize(512, 512));
+        const QColor white = strip.pixelColor(7 * 64 + 63, 7 * 64 + 63);  // last tile, last cell
+        QVERIFY(white.red() > 200 && white.red() == white.blue());
+    }
+
+    void filterSavesAndExports()
+    {
+        Project p;
+        p.clips = {clip(0, 2)};
+        QVERIFY(!p.setFilter("does-not-exist"));
+        QVERIFY(p.setFilter("Harbor"));
+        QCOMPARE(p.look.filter, QString("harbor"));
+        QVERIFY(p.setLookValue("filterAmount", 1.7));
+        QCOMPARE(p.look.filterAmount, 1.0);
+        QVERIFY(p.setLookValue("filterAmount", 0.4));
+
+        const Project back = Project::fromJson(p.toJson());
+        QCOMPARE(back.look.filter, QString("harbor"));
+        QCOMPARE(back.look.filterAmount, 0.4);
+        QJsonObject unknown = p.toJson();
+        QJsonObject look = unknown.value("look").toObject();
+        look.insert("filter", "from-the-future");
+        unknown.insert("look", look);
+        QVERIFY(Project::fromJson(unknown).look.filter.isEmpty());
+
+        // The filter goes after the sliders and before the user's own LUT.
+        p.look.lut = "/luts/mine.cube";
+        ExportOptions options{"/out/reel.mp4", {}, "look.cube", "libx264", "filter.cube"};
+        const QStringList args = exportArgs(p, options);
+        const QString graph = args.at(args.indexOf("-filter_complex") + 1);
+        QVERIFY(graph.contains("[vcat]lut3d=file=filter.cube:interp=tetrahedral,lut3d=file=look.cube[vout]"));
+
+        QTemporaryDir work;
+        QString error;
+        const ExportOptions prepared = prepareExport(p, "#FFD60A", work.path(), "/out/reel.mp4", &error);
+        QVERIFY2(error.isEmpty() || error.contains("LUT"), qPrintable(error));  // mine.cube doesn't exist
+        p.look.lut.clear();
+        const ExportOptions ready = prepareExport(p, "#FFD60A", work.path(), "/out/reel.mp4", &error);
+        QCOMPARE(ready.filterFile, QString("filter.cube"));
+        QVERIFY(QFileInfo(work.filePath("filter.cube")).size() > 100000);
+        p.look.filterAmount = 0.0;
+        QVERIFY(prepareExport(p, "#FFD60A", work.path(), "/out/reel.mp4", &error).filterFile.isEmpty());
+    }
+
+    // End to end: a mono filter really turns ffmpeg's output grey.
+    void filterRendersThroughFfmpeg()
+    {
+        QTemporaryDir dir;
+        const QString source = dir.filePath("source.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=320x240:rate=30:duration=2", "-c:v", "libx264", source}));
+        Project p;
+        Clip c;
+        c.path = source;
+        c.out = 2.0;
+        c.width = 320;
+        c.height = 240;
+        c.audio = false;
+        p.clips = {c};
+        QVERIFY(p.setFilter("silver"));
+        QString error;
+        const ExportOptions options = prepareExport(p, "#FFD60A", dir.path(), {}, &error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QProcess proc;
+        proc.setWorkingDirectory(dir.path());
+        proc.start("ffmpeg", frameArgs(p, options, 1.0, dir.filePath("frame.png"), 270));
+        QVERIFY(proc.waitForFinished(60000));
+        QVERIFY2(proc.exitCode() == 0, proc.readAllStandardError().right(1500).constData());
+        const QImage frame(dir.filePath("frame.png"));
+        QVERIFY(!frame.isNull());
+        int colorful = 0;
+        for (int y = 0; y < frame.height(); y += 8)
+            for (int x = 0; x < frame.width(); x += 8) {
+                const QColor px = frame.pixelColor(x, y);
+                if (qMax(qAbs(px.red() - px.green()), qAbs(px.green() - px.blue())) > 12)
+                    ++colorful;
+            }
+        QVERIFY2(colorful < 5, qPrintable(QString("%1 colored samples left").arg(colorful)));
+    }
+
+    void mcpSetsAFilter()
+    {
+        QTemporaryDir dir;
+        QTemporaryDir state;
+        const QString source = dir.filePath("source.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=320x240:rate=30:duration=1", "-c:v", "libx264", source}));
+        McpServer server(state.path());
+        QJsonObject r = call(server, "create_project", {{"path", dir.filePath("f")}, {"clips", QJsonArray{source}}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+
+        r = call(server, "set_look", {{"filter", "night-city"}, {"filter_amount", 0.5}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+        const Project saved = Project::fromJson(QJsonDocument::fromJson(readAll(dir.filePath("f.reel"))).object(), dir.path());
+        QCOMPARE(saved.look.filter, QString("night-city"));
+        QCOMPARE(saved.look.filterAmount, 0.5);
+        QVERIFY(call(server, "set_look", {{"filter", "bogus"}}).value("isError").toBool());
+    }
+
+    // Transitions overlap clips: the next clip starts early by the overlap,
+    // which never exceeds half of either clip.
+    void transitionsOverlapClips()
+    {
+        Project p;
+        p.clips = {clip(0, 4), clip(0, 2), clip(0, 3)};
+        QCOMPARE(p.duration(), 9.0);
+        QVERIFY(!p.setClipTransition(0, "nope"));
+        QVERIFY(p.setClipTransition(0, "Dissolve"));
+        QCOMPARE(p.clips[0].transition, QString("dissolve"));
+        QCOMPARE(p.overlap(0), 0.5);
+        QCOMPARE(p.duration(), 8.5);
+        QCOMPARE(p.clipStart(1), 3.5);
+        QCOMPARE(p.clipStart(2), 5.5);
+        // During the overlap the outgoing clip owns the time.
+        QCOMPARE(p.locate(3.75).index, 0);
+        QCOMPARE(p.locate(4.1).index, 1);
+        QCOMPARE(p.locate(4.1).source, 0.6);
+
+        // Limited by the shorter clip (2 s → at most 1 s).
+        QVERIFY(p.setClipValue(0, "transitionSeconds", 5.0));
+        QCOMPARE(p.clips[0].transitionSeconds, 2.0);
+        QCOMPARE(p.overlap(0), 1.0);
+        // The last clip has nothing to transition into.
+        QVERIFY(p.setClipTransition(2, "zoom"));
+        QCOMPARE(p.overlap(2), 0.0);
+
+        // Splitting keeps the transition on the piece that ends where the clip did.
+        QVERIFY(p.split(1.0));
+        QVERIFY(p.clips[0].transition.isEmpty());
+        QCOMPARE(p.clips[1].transition, QString("dissolve"));
+
+        const Project back = Project::fromJson(p.toJson());
+        QCOMPARE(back.clips[1].transition, QString("dissolve"));
+        QCOMPARE(back.clips[1].transitionSeconds, 2.0);
+        QCOMPARE(back.duration(), p.duration());
+    }
+
+    void transitionGraphChainsXfade()
+    {
+        Project p;
+        p.clips = {clip(0, 4), clip(0, 2), clip(0, 3)};
+        p.setClipTransition(0, "iris");
+        const QStringList args = exportArgs(p, {"/out/reel.mp4", {}, {}, "libx264"});
+        const QString graph = args.at(args.indexOf("-filter_complex") + 1);
+        QVERIFY2(graph.contains("[v0][v1]xfade=transition=circleopen:duration=0.5:offset=3.5[vj1]"), qPrintable(graph));
+        QVERIFY(graph.contains("[a0][a1]acrossfade=d=0.5:c1=tri:c2=tri[aj1]"));
+        QVERIFY(graph.contains("[vj1][v2]concat=n=2:v=1:a=0[vcat]"));
+        QVERIFY(graph.contains("[aj1][a2]concat=n=2:v=0:a=1[acat]"));
+        QCOMPARE(args.at(args.indexOf("-t") + 1), QString("8.5"));
+        // The transcription audio follows the same timeline.
+        const QStringList audio = timelineAudioArgs(p, "/tmp/a.wav");
+        QVERIFY(audio.join(' ').contains("acrossfade=d=0.5"));
+        // No transitions: one plain concat as before.
+        p.setClipTransition(0, {});
+        const QStringList plain = exportArgs(p, {"/out/reel.mp4", {}, {}, "libx264"});
+        QVERIFY(plain.at(plain.indexOf("-filter_complex") + 1).contains("[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vcat][acat]"));
+    }
+
+    // End to end: every transition renders, and the reel is shorter by the overlap.
+    void transitionsRenderThroughFfmpeg()
+    {
+        QTemporaryDir dir;
+        const QString source = dir.filePath("source.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=320x240:rate=30:duration=3", "-f", "lavfi", "-i",
+                           "sine=frequency=440:duration=3", "-shortest", "-c:v", "libx264", "-c:a", "aac", source}));
+        Project p;
+        for (const QString &id : Transitions::ids()) {
+            Clip c;
+            c.path = source;
+            c.out = 1.0;
+            c.width = 320;
+            c.height = 240;
+            c.sourceDuration = 3.0;
+            c.transition = id;
+            c.transitionSeconds = 0.3;
+            p.clips << c;
+        }
+        const double expected = p.clips.size() * 1.0 - (p.clips.size() - 1) * 0.3;
+        QCOMPARE(p.duration(), expected);
+        QProcess proc;
+        proc.setWorkingDirectory(dir.path());
+        proc.start("ffmpeg", exportArgs(p, {dir.filePath("reel.mp4"), {}, {}, "libx264"}));
+        QVERIFY(proc.waitForFinished(300000));
+        QVERIFY2(proc.exitCode() == 0, proc.readAllStandardError().right(2000).constData());
+        const media::VideoInfo out = media::probe(dir.filePath("reel.mp4"));
+        QVERIFY2(out.ok, qPrintable(out.error));
+        QVERIFY2(qAbs(out.duration - expected) < 0.15, qPrintable(QString::number(out.duration)));
+
+        // Clips without sound: crossfaded silence must still encode.
+        Project silent;
+        silent.clips = {p.clips[0], p.clips[1]};
+        for (Clip &c : silent.clips)
+            c.audio = false;
+        QVERIFY(!exportArgs(silent, {dir.filePath("silent.mp4"), {}, {}, "libx264"}).join(' ').contains("loudnorm"));
+        QProcess quiet;
+        quiet.setWorkingDirectory(dir.path());
+        quiet.start("ffmpeg", exportArgs(silent, {dir.filePath("silent.mp4"), {}, {}, "libx264"}));
+        QVERIFY(quiet.waitForFinished(120000));
+        QVERIFY2(quiet.exitCode() == 0, quiet.readAllStandardError().right(1500).constData());
+    }
+
+    void effectsSaveAndClamp()
+    {
+        Project p;
+        p.clips = {clip(0, 4)};
+        QCOMPARE(p.addEffect("nope", 1.0), -1);
+        const int i = p.addEffect("VHS", 1.0);
+        QCOMPARE(i, 0);
+        QCOMPARE(p.effects[0].kind, QString("vhs"));
+        QCOMPARE(p.effects[0].end, 1.0 + Effects::DefaultSeconds);
+        QVERIFY(p.setEffectValue(0, "intensity", 3.0));
+        QCOMPARE(p.effects[0].intensity, 1.0);
+        QVERIFY(p.setEffectValue(0, "start", 9.0));  // can't pass the end
+        QVERIFY(p.effects[0].start < p.effects[0].end);
+        QVERIFY(!p.setEffectValue(0, "colour", 1.0));
+        QVERIFY(!p.setEffectValue(4, "speed", 1.0));
+
+        QJsonObject json = p.toJson();
+        QJsonArray list = json.value("effects").toArray();
+        list.append(QJsonObject{{"kind", "from-the-future"}, {"start", 0}, {"end", 1}});
+        json.insert("effects", list);
+        const Project back = Project::fromJson(json);
+        QCOMPARE(back.effects.size(), 1);
+        QCOMPARE(back.effects[0].kind, QString("vhs"));
+        QCOMPARE(back.effects[0].intensity, 1.0);
+    }
+
+    // Each effect is laid over the picture only while it's active.
+    void effectGraphUsesEnable()
+    {
+        Project p;
+        p.clips = {clip(0, 4)};
+        p.addEffect("blur", 1.0, 2.0);
+        p.addEffect("mono-flicker", 0.5, 3.0);
+        const QStringList args = exportArgs(p, {"/out/reel.mp4", {}, {}, "libx264"});
+        const QString graph = args.at(args.indexOf("-filter_complex") + 1);
+        QVERIFY2(graph.contains("[vcat]split[fxb0][fxw0]"), qPrintable(graph));
+        QVERIFY(graph.contains("[fxb0][fxd0]overlay=enable='between(t,1,2)'[vfx0]"));
+        QVERIFY(graph.contains("[vfx0]split[fxb1][fxw1]"));
+        // Mono flicker switches itself on and off in the enable expression.
+        QVERIFY(graph.contains("overlay=enable='between(t,0.5,3)*lt(mod((t-0.5)*"));
+        QVERIFY(graph.contains("[vfx]null[vout]"));
+    }
+
+    // End to end: every effect renders through ffmpeg, and changes the
+    // picture only inside its time range.
+    void effectsRenderThroughFfmpeg()
+    {
+        QTemporaryDir dir;
+        const QString source = dir.filePath("source.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=640x360:rate=30:duration=3", "-c:v", "libx264", source}));
+        for (const QString &kind : Effects::ids()) {
+            Project p;
+            Clip c;
+            c.path = source;
+            c.out = 3.0;
+            c.width = 640;
+            c.height = 360;
+            c.audio = false;
+            c.sourceDuration = 3.0;
+            p.clips = {c};
+            p.addEffect(kind, 1.0, 2.0);
+            p.effects[0].intensity = 1.0;
+            QImage frames[2];
+            for (int k = 0; k < 2; ++k) {
+                const QString png = dir.filePath(QString("%1-%2.png").arg(kind).arg(k));
+                QProcess proc;
+                proc.setWorkingDirectory(dir.path());
+                Project shown = p;
+                if (k == 0)
+                    shown.effects.clear();
+                // 1.25 s: 0.25 s into the effect, an "on" moment for Mono Flicker too.
+                proc.start("ffmpeg", frameArgs(shown, {}, 1.25, png, 270));
+                QVERIFY(proc.waitForFinished(60000));
+                QVERIFY2(proc.exitCode() == 0, qPrintable(kind + ": " + proc.readAllStandardError().right(1500)));
+                frames[k] = QImage(png).convertToFormat(QImage::Format_RGB32);
+            }
+            // Different from the plain picture at that moment.
+            qint64 diff = 0;
+            for (int y = 0; y < frames[0].height(); y += 4)
+                for (int x = 0; x < frames[0].width(); x += 4)
+                    diff += qAbs(qGray(frames[0].pixel(x, y)) - qGray(frames[1].pixel(x, y)))
+                            + qAbs(qRed(frames[0].pixel(x, y)) - qRed(frames[1].pixel(x, y)));
+            QVERIFY2(diff > 2000, qPrintable(QString("%1 barely changed the picture (%2)").arg(kind).arg(diff)));
+        }
+    }
+
+    void bodyEffectGraph()
+    {
+        Project p;
+        p.clips = {clip(0, 2), clip(0, 2)};
+        QVERIFY(!p.setClipBody(0, "nope"));
+        QVERIFY(p.setClipBody(1, "Color-Pop"));
+        QCOMPARE(p.clips[1].body, QString("color-pop"));
+        QCOMPARE(Project::fromJson(p.toJson()).clips[1].body, QString("color-pop"));
+        p.music.path = "/music/song.mp3";
+
+        // Without a mask the clip renders plainly.
+        QString graph = exportArgs(p, {"/out/reel.mp4", {}, {}, "libx264"}).join(' ');
+        QVERIFY(!graph.contains("maskedmerge"));
+
+        // With one, it's input 3 (after two clips and the music).
+        ExportOptions options{"/out/reel.mp4", {}, {}, "libx264"};
+        options.masks = {QString(), "/cache/mask.mp4"};
+        const QStringList args = exportArgs(p, options);
+        QCOMPARE(args.at(args.indexOf("/cache/mask.mp4") - 1), QString("-i"));
+        graph = args.at(args.indexOf("-filter_complex") + 1);
+        QVERIFY2(graph.contains("[3:v]setpts=PTS-STARTPTS,fps=30,settb=1/30,scale=1080:1920:flags=bicubic,format=gbrp[bmask1]"), qPrintable(graph));
+        QVERIFY(graph.contains("[bback1]hue=s=0.2,format=gbrp[bbg1]"));
+        QVERIFY(graph.contains("[bbg1][bpic1][bmask1]maskedmerge,format=yuv420p,fps=30,settb=1/30[v1]"));
+        QVERIFY(graph.contains("[v0]"));
+
+        // The mask cache key follows the frames: change the trim, new mask.
+        Clip a = clip(0, 2), b = clip(0, 2);
+        QCOMPARE(Segment::maskPath(a), Segment::maskPath(b));
+        b.out = 1.5;
+        QVERIFY(Segment::maskPath(a) != Segment::maskPath(b));
+    }
+
+    // End to end with a fake model that calls the left half "the person":
+    // the mask video lines up with the clip, and Color Pop greys only the right.
+    void bodyEffectMaskRendersThroughFfmpeg()
+    {
+        QTemporaryDir dir;
+        const QString source = dir.filePath("source.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=1080x1920:rate=30:duration=2", "-c:v", "libx264", source}));
+        Clip c;
+        c.path = source;
+        c.out = 2.0;
+        c.width = 1080;
+        c.height = 1920;
+        c.audio = false;
+        c.sourceDuration = 2.0;
+        c.body = "color-pop";
+        c.bodyAmount = 1.0;
+
+        const Segment::MaskFn leftHalf = [](const unsigned char *, unsigned char *mask) {
+            for (int y = 0; y < Segment::ModelSize; ++y)
+                for (int x = 0; x < Segment::ModelSize; ++x)
+                    mask[y * Segment::ModelSize + x] = x < Segment::ModelSize / 2 ? 255 : 0;
+        };
+        const QString mask = dir.filePath("mask.mp4");
+        int calls = 0;
+        QString error;
+        QVERIFY2(Segment::makeMask(c, leftHalf, mask, [&](double) { ++calls; return true; }, &error), qPrintable(error));
+        QCOMPARE(calls, 60);  // one model run per frame: 2 s at 30 fps
+        const media::VideoInfo info = media::probe(mask);
+        QVERIFY2(info.ok, qPrintable(info.error));
+        QCOMPARE(info.width, Segment::MaskWidth);
+        QCOMPARE(info.height, Segment::MaskHeight);
+        QVERIFY(qAbs(info.duration - 2.0) < 0.1);
+
+        Project p;
+        p.clips = {c};
+        ExportOptions options{{}, {}, {}, "libx264"};
+        options.masks = {mask};
+        const QString png = dir.filePath("frame.png");
+        QProcess proc;
+        proc.start("ffmpeg", frameArgs(p, options, 1.0, png, 540));
+        QVERIFY(proc.waitForFinished(60000));
+        QVERIFY2(proc.exitCode() == 0, proc.readAllStandardError().right(1500).constData());
+        const QImage frame = QImage(png).convertToFormat(QImage::Format_RGB32);
+        auto colorful = [&](int x0, int x1) {
+            int n = 0;
+            for (int y = 40; y < frame.height() - 40; y += 8)
+                for (int x = x0; x < x1; x += 8) {
+                    const QColor px = frame.pixelColor(x, y);
+                    if (qMax(qAbs(px.red() - px.green()), qAbs(px.green() - px.blue())) > 24)
+                        ++n;
+                }
+            return n;
+        };
+        const int left = colorful(20, frame.width() / 2 - 30);
+        const int right = colorful(frame.width() / 2 + 30, frame.width() - 20);
+        QVERIFY2(left > 100 && right < 10, qPrintable(QString("left %1, right %2").arg(left).arg(right)));
+
+        // A body effect next to a transition: the merged clip must be on the
+        // same clock as the others, or xfade refuses it.
+        {
+            Project both = p;
+            Clip next = c;
+            next.body.clear();
+            both.clips[0].transition = "dissolve";
+            both.clips << next;
+            ExportOptions withMask = options;
+            withMask.masks = {mask, QString()};
+            QProcess joined;
+            joined.start("ffmpeg", frameArgs(both, withMask, 1.9, dir.filePath("joined.png"), 270));
+            QVERIFY(joined.waitForFinished(60000));
+            QVERIFY2(joined.exitCode() == 0, joined.readAllStandardError().right(1500).constData());
+        }
+
+        // Every body effect renders with the same mask.
+        for (const QString &kind : Body::ids()) {
+            p.clips[0].body = kind;
+            QProcess each;
+            each.start("ffmpeg", frameArgs(p, options, 1.0, dir.filePath(kind + ".png"), 270));
+            QVERIFY(each.waitForFinished(60000));
+            QVERIFY2(each.exitCode() == 0, qPrintable(kind + ": " + each.readAllStandardError().right(1500)));
+        }
+    }
+
+    // The real model, when it has been downloaded: it loads and answers in range.
+    void personModelRuns()
+    {
+        if (!QFileInfo::exists(Segment::modelPath()))
+            QSKIP("The person model isn't downloaded on this machine.");
+        QString error;
+        const Segment::MaskFn fn = Segment::loadModel(Segment::modelPath(), &error);
+        QVERIFY2(fn, qPrintable(error));
+        QByteArray rgb(Segment::ModelSize * Segment::ModelSize * 3, char(128));
+        QByteArray mask(Segment::ModelSize * Segment::ModelSize, '\0');
+        fn(reinterpret_cast<const unsigned char *>(rgb.constData()), reinterpret_cast<unsigned char *>(mask.data()));
+        // A flat grey square has no person in it.
+        int person = 0;
+        for (char v : mask)
+            person += uchar(v) > 128;
+        QVERIFY2(person < mask.size() / 4, qPrintable(QString::number(person)));
+    }
+
+    void mcpSetsABodyEffect()
+    {
+        QTemporaryDir dir, state;
+        const QString source = dir.filePath("source.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=320x240:rate=30:duration=2", "-c:v", "libx264", source}));
+        McpServer server(state.path());
+        QJsonObject r = call(server, "create_project", {{"path", dir.filePath("b")}, {"clips", QJsonArray{source}}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+        r = call(server, "edit_clip", {{"index", 0}, {"body", "spotlight"}, {"body_amount", 0.4}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+        const Project saved = Project::fromJson(QJsonDocument::fromJson(readAll(dir.filePath("b.reel"))).object(), dir.path());
+        QCOMPARE(saved.clips[0].body, QString("spotlight"));
+        QCOMPARE(saved.clips[0].bodyAmount, 0.4);
+        QVERIFY(call(server, "edit_clip", {{"index", 0}, {"body", "x-ray"}}).value("isError").toBool());
     }
 
     // End to end: ffmpeg renders a real reel from a generated landscape clip.
@@ -797,7 +1289,607 @@ private slots:
         QTRY_COMPARE(backend.project().clips[0].duration(), 4.0);
     }
 
+    // The preview runs a transition: both slots hold their clips and the
+    // shader shows only inside the overlap.
+    void previewShowsTransitions()
+    {
+        QTemporaryDir dir, state, themeDir;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1600x1200",
+                           "-frames:v", "1", dir.filePath("photo.jpg")}));
+        Project p;
+        for (int i = 0; i < 3; ++i)
+            p.clips.append(media::clipFor(media::probe(dir.filePath("photo.jpg")), 2.0));
+        QVERIFY(p.setClipTransition(0, "iris"));
+        p.clips[0].transitionSeconds = 1.0;  // clip 1 starts at 1.0
+        write(dir.filePath("t.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+
+        QQuickStyle::setStyle("Material");
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("t.reel")));
+        QCOMPARE(backend.duration(), 5.0);
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.load(QUrl("qrc:/Main.qml"));
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360, 860);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *effect = findItem(window->contentItem(), "transitionEffect");
+        auto *even = findItem(window->contentItem(), "slotEven");
+        auto *odd = findItem(window->contentItem(), "slotOdd");
+        QVERIFY(effect && even && odd);
+
+        QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, 0.5));
+        QTRY_COMPARE(even->property("index").toInt(), 0);
+        QCOMPARE(odd->property("index").toInt(), 1);  // preloaded
+        QVERIFY(!effect->isVisible());
+
+        QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, 1.5));
+        QTRY_VERIFY(effect->isVisible());
+        QCOMPARE(effect->property("progress").toDouble(), 0.5);
+        QCOMPARE(effect->property("mode").toDouble(), double(Transitions::find("iris")->previewMode));
+
+        // Past the overlap the second clip shows alone, and the third waits in the freed slot.
+        QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, 2.5));
+        QTRY_VERIFY(!effect->isVisible());
+        QCOMPARE(odd->property("index").toInt(), 1);
+        QCOMPARE(even->property("index").toInt(), 2);
+    }
+
+    void mcpSetsATransition()
+    {
+        QTemporaryDir dir, state;
+        const QString source = dir.filePath("source.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=320x240:rate=30:duration=4", "-c:v", "libx264", source}));
+        McpServer server(state.path());
+        QJsonObject r = call(server, "create_project", {{"path", dir.filePath("t")}, {"clips", QJsonArray{source}}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+        QVERIFY(!call(server, "split", {{"time", 2.0}}).value("isError").toBool());
+        r = call(server, "edit_clip", {{"index", 0}, {"transition", "flash"}, {"transition_seconds", 0.8}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+        const Project saved = Project::fromJson(QJsonDocument::fromJson(readAll(dir.filePath("t.reel"))).object(), dir.path());
+        QCOMPARE(saved.clips[0].transition, QString("flash"));
+        QCOMPARE(saved.overlap(0), 0.8);
+        QVERIFY(textOf(r).contains("\"overlap\": 0.8"));
+        QVERIFY(call(server, "edit_clip", {{"index", 0}, {"transition", "spin"}}).value("isError").toBool());
+    }
+
+    // The Effects tab adds an effect at the playhead; it shows in the lane,
+    // selects, drives the preview shader, and Delete removes it.
+    void effectsWorkInTheEditor()
+    {
+        QTemporaryDir dir, state, themeDir;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1600x1200",
+                           "-frames:v", "1", dir.filePath("photo.jpg")}));
+        Project p;
+        p.clips = {media::clipFor(media::probe(dir.filePath("photo.jpg")), 4.0)};
+        write(dir.filePath("e.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+
+        QQuickStyle::setStyle("Material");
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("e.reel")));
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.load(QUrl("qrc:/Main.qml"));
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360, 900);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, 1.0));
+        auto *add = findItem(window->contentItem(), "addEffect-glitch");
+        QVERIFY(add);
+        QMetaObject::invokeMethod(add, "clicked");
+        QTRY_COMPARE(backend.project().effects.size(), 1);
+        QCOMPARE(backend.project().effects[0].kind, QString("glitch"));
+        QCOMPARE(backend.project().effects[0].start, 1.0);
+        QCOMPARE(window->property("selectionKind").toString(), QString("effect"));
+        QTRY_VERIFY(findItem(window->contentItem(), "effectBar0"));
+        QVERIFY(findItem(window->contentItem(), "effectBar0")->isVisible());
+
+        // The preview is inside the effect, so the effect layer is on.
+        QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, 1.5));
+        QQuickItem *preview = findItem(window->contentItem(), "preview");
+        QVERIFY(preview);
+        QTRY_COMPARE(preview->property("activeEffect").toMap().value("kind").toString(), QString("glitch"));
+        QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, 3.5));
+        QTRY_VERIFY(!preview->property("activeEffect").toMap().contains("kind"));
+
+        // Delete removes the selected effect; undo brings it back.
+        window->contentItem()->forceActiveFocus();
+        QTest::keyClick(window, Qt::Key_Delete);
+        QTRY_COMPARE(backend.project().effects.size(), 0);
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+        QTRY_COMPARE(backend.project().effects.size(), 1);
+    }
+
+    // ---- Fisheye text ----
+
+    void fisheyeTextSavesAndLeavesTheAssFile()
+    {
+        Project p;
+        p.clips = {clip(0, 4)};
+        p.addOverlay("plain words", 0, 2);
+        const int i = p.addOverlay("bent words", 0, 2);
+        QVERIFY(p.setOverlayValue(i, "style", "fisheye"));
+        QVERIFY(p.setOverlayValue(i, "bulge", 1.7));
+        QVERIFY(!p.setOverlayValue(i, "style", "wobbly"));
+        QCOMPARE(p.overlays[i].bulge, 1.0);
+
+        const Project back = Project::fromJson(p.toJson(QDir::tempPath()), QDir::tempPath());
+        QCOMPARE(back.overlays[0].style, QString("plain"));
+        QCOMPARE(back.overlays[i].style, QString("fisheye"));
+        QCOMPARE(back.overlays[i].bulge, 1.0);
+
+        // The .ass file draws the plain overlay only; the fisheye one is an image.
+        const QString ass = assDocument(p, "#FF0000");
+        QVERIFY(ass.contains("plain words"));
+        QVERIFY(!ass.contains("bent words"));
+    }
+
+    void fisheyeTextBulgesTheMiddle()
+    {
+        Overlay o;
+        o.text = "WIDE\nWIDE\nWIDE";
+        o.size = 100;
+        o.x = 0.5;
+        o.y = 0.5;
+        o.style = "fisheye";
+        // Width of the text on one row of the frame.
+        auto span = [](const QImage &img, int y) {
+            int left = img.width(), right = -1;
+            for (int x = 0; x < img.width(); ++x)
+                if (qAlpha(img.pixel(x, y)) > 200 && qRed(img.pixel(x, y)) > 200) {
+                    left = qMin(left, x);
+                    right = qMax(right, x);
+                }
+            return right - left;
+        };
+        o.bulge = 0.0;
+        const QImage flat = FisheyeText::render(o);
+        o.bulge = 1.0;
+        const QImage bent = FisheyeText::render(o);
+        QCOMPARE(bent.size(), QSize(1080, 1920));
+        // The middle line grows, a lot more than the outer lines do.
+        const int mid = 960;
+        QVERIFY2(span(bent, mid) > span(flat, mid) * 1.3,
+                 qPrintable(QString("middle %1 vs %2").arg(span(bent, mid)).arg(span(flat, mid))));
+        // Nothing is drawn far from where the overlay sits.
+        QCOMPARE(qAlpha(bent.pixel(540, 100)), 0);
+        QCOMPARE(qAlpha(bent.pixel(540, 1800)), 0);
+    }
+
+    void fisheyeTextRendersThroughFfmpeg()
+    {
+        QTemporaryDir dir;
+        const QString source = dir.filePath("source.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "color=c=0x202020:size=640x360:rate=30:duration=3", "-c:v", "libx264", source}));
+        Project p;
+        Clip c;
+        c.path = source;
+        c.out = 3.0;
+        c.width = 640;
+        c.height = 360;
+        c.audio = false;
+        c.sourceDuration = 3.0;
+        p.clips = {c};
+        const int i = p.addOverlay("FISHEYE", 1.0, 2.0);
+        p.setOverlayValue(i, "style", "fisheye");
+        p.setOverlayValue(i, "animation", "none");
+        p.setOverlayValue(i, "y", 0.5);
+        p.setOverlayValue(i, "size", 160);
+        QString error;
+        const ExportOptions options = prepareExport(p, "#FFD60A", dir.path(), dir.filePath("out.mp4"), &error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        if (!options.assFile.isEmpty()) {
+            QFile ass(dir.filePath(options.assFile));
+            QVERIFY(ass.open(QIODevice::ReadOnly));
+            QVERIFY(!ass.readAll().contains("FISHEYE"));
+        }
+        QCOMPARE(options.textImages.size(), 1);
+        QVERIFY(QFileInfo::exists(options.textImages[0]));
+
+        // Yellow pixels in the middle while it's on, none before it starts.
+        auto yellow = [&](double t) {
+            const QString png = dir.filePath(QString("f%1.png").arg(t));
+            QProcess proc;
+            proc.setWorkingDirectory(dir.path());
+            proc.start("ffmpeg", frameArgs(p, options, t, png, 540));
+            if (!proc.waitForFinished(60000) || proc.exitCode() != 0) {
+                qWarning() << proc.readAllStandardError().right(1500);
+                return -1;
+            }
+            const QImage img = QImage(png).convertToFormat(QImage::Format_RGB32);
+            int count = 0;
+            for (int y = 380; y < 580; ++y)
+                for (int x = 0; x < img.width(); ++x) {
+                    const QRgb px = img.pixel(x, y);
+                    count += qRed(px) > 180 && qGreen(px) > 180 && qBlue(px) < 90;
+                }
+            return count;
+        };
+        const int before = yellow(0.5), during = yellow(1.5);
+        QVERIFY(before >= 0 && during >= 0);
+        QCOMPARE(before, 0);
+        QVERIFY2(during > 500, qPrintable(QString("only %1 yellow pixels").arg(during)));
+
+        // And the full export runs with it.
+        QProcess proc;
+        proc.setWorkingDirectory(dir.path());
+        ExportOptions full = options;
+        full.encoder = "libx264";
+        proc.start("ffmpeg", exportArgs(p, full));
+        QVERIFY(proc.waitForFinished(180000));
+        QVERIFY2(proc.exitCode() == 0, proc.readAllStandardError().right(2000).constData());
+        QVERIFY(qAbs(media::probe(dir.filePath("out.mp4")).duration - 3.0) < 0.15);
+    }
+
+    void fisheyePresetWorksInTheEditor()
+    {
+        QTemporaryDir dir, state, themeDir;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1600x1200",
+                           "-frames:v", "1", dir.filePath("photo.jpg")}));
+        Project p;
+        p.clips = {media::clipFor(media::probe(dir.filePath("photo.jpg")), 4.0)};
+        write(dir.filePath("e.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+
+        QQuickStyle::setStyle("Material");
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("e.reel")));
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.load(QUrl("qrc:/Main.qml"));
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360, 900);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, 1.0));
+        auto *add = findItem(window->contentItem(), "addFisheyeText");
+        QVERIFY(add);
+        QMetaObject::invokeMethod(add, "clicked");
+        QTRY_COMPARE(backend.project().overlays.size(), 1);
+        QCOMPARE(backend.project().overlays[0].style, QString("fisheye"));
+        QCOMPARE(backend.project().overlays[0].start, 1.0);
+        // It's an ordinary text overlay: selected, and in the Text tab.
+        QCOMPARE(window->property("selectionKind").toString(), QString("overlay"));
+        QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, 1.5));
+        QTRY_VERIFY(findItem(window->contentItem(), "overlayLens0"));
+        QTRY_VERIFY(findItem(window->contentItem(), "overlayLens0")->isVisible());
+        QVERIFY(findItem(window->contentItem(), "overlayBox0"));
+
+        // Enter in the text box starts a new line of the overlay.
+        {
+            auto *field = findItem(window->contentItem(), "overlayTextField0");
+            QVERIFY(field);
+            field->setProperty("text", "");
+            field->forceActiveFocus();
+            for (char ch : QByteArray("one"))
+                QTest::keyClick(window, ch);
+            QTest::keyClick(window, Qt::Key_Return);
+            for (char ch : QByteArray("two"))
+                QTest::keyClick(window, ch);
+            QTRY_COMPARE(backend.project().overlays[0].text, QString("one\ntwo"));
+            QCOMPARE(backend.project().overlays.size(), 1);  // Enter didn't trigger anything else
+        }
+
+        // Switching it to plain drops the lens.
+        backend.setOverlayValue(0, "style", "plain");
+        QTRY_VERIFY(!findItem(window->contentItem(), "overlayLens0")->isVisible());
+
+        // With that text selected, the preset bends it instead of adding another.
+        QMetaObject::invokeMethod(window, "select", Q_ARG(QVariant, "overlay"), Q_ARG(QVariant, 0));
+        QMetaObject::invokeMethod(add, "clicked");
+        QTRY_COMPARE(backend.project().overlays[0].style, QString("fisheye"));
+        QCOMPARE(backend.project().overlays.size(), 1);
+        QCOMPARE(backend.project().overlays[0].text, QString("one\ntwo"));
+        // Undo puts the plain style back.
+        backend.undo();
+        QCOMPARE(backend.project().overlays[0].style, QString("plain"));
+
+        // With something else selected, it adds new text again.
+        QMetaObject::invokeMethod(window, "select", Q_ARG(QVariant, "clip"), Q_ARG(QVariant, 0));
+        QMetaObject::invokeMethod(add, "clicked");
+        QTRY_COMPARE(backend.project().overlays.size(), 2);
+    }
+
+    // ---- Color wheels ----
+
+    void gradeMathFollowsTheWheels()
+    {
+        using namespace ColorGrade;
+        auto run = [](const Grade &g, double r, double gr, double b) { return apply(params(g), {r, gr, b}); };
+        auto near = [](double a, double b) { return qAbs(a - b) < 1e-6; };
+        // Untouched wheels change nothing.
+        const Grade neutral;
+        QVERIFY(neutral.isNeutral());
+        for (double v : {0.0, 0.25, 0.5, 1.0}) {
+            const auto out = run(neutral, v, v * 0.5, 1 - v);
+            QVERIFY(near(out[0], v) && near(out[1], v * 0.5) && near(out[2], 1 - v));
+        }
+        // Lift raises black but leaves white; gain moves white but leaves black.
+        Grade lift;
+        QVERIFY(lift.set("lift.master", 0.4));
+        QVERIFY(run(lift, 0, 0, 0)[0] > 0.15);
+        QVERIFY(near(run(lift, 1, 1, 1)[0], 1.0));
+        Grade gain;
+        QVERIFY(gain.set("gain.master", -0.5));
+        QVERIFY(near(run(gain, 0, 0, 0)[0], 0.0));
+        QVERIFY(run(gain, 1, 1, 1)[0] < 0.6);
+        // Gamma brightens the middle, keeping both ends.
+        Grade gamma;
+        QVERIFY(gamma.set("gamma.master", 0.5));
+        QVERIFY(run(gamma, 0.5, 0.5, 0.5)[1] > 0.6);
+        QVERIFY(near(run(gamma, 1, 1, 1)[1], 1.0));
+        // The puck at the top of the wheel pushes red; lower right, green; lower left, blue.
+        auto push = [&](double x, double y) {
+            Grade g;
+            g.set("offset.x", x);
+            g.set("offset.y", y);
+            return run(g, 0.5, 0.5, 0.5);
+        };
+        auto top = push(0, 1), right = push(0.866, -0.5), left = push(-0.866, -0.5);
+        QVERIFY(top[0] > top[1] && top[0] > top[2]);
+        QVERIFY(right[1] > right[0] && right[1] > right[2]);
+        QVERIFY(left[2] > left[0] && left[2] > left[1]);
+        // Saturation 0 is grey; the puck stays in its disc; unknown keys fail.
+        Grade grey;
+        grey.set("saturation", 0);
+        const auto g = run(grey, 1, 0, 0);
+        QVERIFY(near(g[0], g[1]) && near(g[1], g[2]));
+        Grade far;
+        far.set("lift.x", 1);
+        far.set("lift.y", 1);
+        QVERIFY(qAbs(std::hypot(far.lift.x, far.lift.y) - 1.0) < 1e-9);
+        QVERIFY(!far.set("lift.z", 1));
+        QVERIFY(!far.set("sparkle", 1));
+        QVERIFY(far.set("reset.lift", 0));
+        QVERIFY(far.lift.isNeutral());
+
+        // Saved and loaded with the project, per clip and for the reel.
+        Project p;
+        p.clips = {clip(0, 2)};
+        QVERIFY(p.setGrade(0, "gain.x", 0.3));
+        QVERIFY(p.setGrade(-1, "contrast", 1.4));
+        QVERIFY(!p.setGrade(3, "contrast", 1.4));
+        const Project back = Project::fromJson(p.toJson(QDir::tempPath()), QDir::tempPath());
+        QCOMPARE(back.clips[0].grade.gain.x, 0.3);
+        QCOMPARE(back.look.grade.contrast, 1.4);
+        // A split keeps the grade on both pieces.
+        Project two = p;
+        two.clips[0] = clip(0, 4);
+        two.clips[0].grade = p.clips[0].grade;
+        QVERIFY(two.split(1.0));
+        QCOMPARE(two.clips[1].grade.gain.x, 0.3);
+
+        // The LUT of an untouched grade is the identity.
+        const QStringList lines = cubeText(neutral, 2).split('\n', Qt::SkipEmptyParts);
+        QCOMPARE(lines.last(), QString("1.000000 1.000000 1.000000"));
+        QCOMPARE(lines[2], QString("0.000000 0.000000 0.000000"));
+        QCOMPARE(lines[3], QString("1.000000 0.000000 0.000000"));
+    }
+
+    void gradesRenderThroughFfmpeg()
+    {
+        QTemporaryDir dir;
+        const QString source = dir.filePath("grey.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "color=c=0x808080:size=640x360:rate=30:duration=2", "-c:v", "libx264", source}));
+        auto frame = [&](const Project &p, const QString &name) {
+            QString error;
+            const ExportOptions options = prepareExport(p, "#FFD60A", dir.path(), dir.filePath("o.mp4"), &error);
+            if (!error.isEmpty())
+                qWarning() << error;
+            QProcess proc;
+            proc.setWorkingDirectory(dir.path());
+            proc.start("ffmpeg", frameArgs(p, options, 1.0, dir.filePath(name), 270));
+            if (!proc.waitForFinished(60000) || proc.exitCode() != 0)
+                qWarning() << proc.readAllStandardError().right(1500);
+            return QImage(dir.filePath(name)).pixel(135, 240);
+        };
+        Project p;
+        Clip c;
+        c.path = source;
+        c.out = 2.0;
+        c.width = 640;
+        c.height = 360;
+        c.audio = false;
+        c.sourceDuration = 2.0;
+        p.clips = {c};
+        const QRgb plain = frame(p, "plain.png");
+        // The clip's wheels: the offset puck at the top pushes red.
+        p.setGrade(0, "offset.y", 1.0);
+        const QRgb clipGraded = frame(p, "clip.png");
+        QVERIFY2(qRed(clipGraded) > qRed(plain) + 20 && qBlue(clipGraded) < qBlue(plain) - 10,
+                 qPrintable(QString("plain %1 graded %2").arg(QColor(plain).name(), QColor(clipGraded).name())));
+        // The reel's wheels on top: gain down darkens everything.
+        p.setGrade(-1, "gain.master", -0.5);
+        const QRgb both = frame(p, "both.png");
+        QVERIFY(qGray(both) < qGray(clipGraded) - 25);
+        QVERIFY(QFileInfo::exists(dir.filePath("grade0.cube")));
+        QVERIFY(QFileInfo::exists(dir.filePath("grade.cube")));
+    }
+
+    // ---- Text colors ----
+
+    void textColorsSaveAndExport()
+    {
+        Overlay o;
+        QCOMPARE(o.colorOf("fill"), QString("#ffffffff"));
+        QCOMPARE(o.colorOf("outline"), QString("#ff000000"));
+        QCOMPARE(o.colorOf("box"), QString("#00000000"));
+        QVERIFY(o.setColor("fill", "#f00"));
+        QCOMPARE(o.fill, QString("#ffff0000"));
+        QVERIFY(o.setColor("outline", "transparent"));
+        QCOMPARE(o.colorOf("outline"), QString("#00000000"));
+        QVERIFY(o.setColor("box", "#80112233"));
+        QVERIFY(!o.setColor("fill", "not a color"));
+        QVERIFY(o.setColor("fill", "default"));
+        QCOMPARE(o.colorOf("fill"), QString("#ffffffff"));
+        o.style = "fisheye";
+        QCOMPARE(o.colorOf("fill"), QString("#ffffee00"));
+
+        Project p;
+        p.clips = {clip(0, 4)};
+        const int i = p.addOverlay("colored", 0, 2);
+        QVERIFY(p.setOverlayValue(i, "fill", "#ff00ff00"));
+        QVERIFY(p.setOverlayValue(i, "shadow", "#80000000"));
+        const int j = p.addOverlay("boxed", 0, 2);
+        QVERIFY(p.setOverlayValue(j, "box", "#ffffee00"));
+        const Project back = Project::fromJson(p.toJson(QDir::tempPath()), QDir::tempPath());
+        QCOMPARE(back.overlays[i].fill, QString("#ff00ff00"));
+        QCOMPARE(back.overlays[j].box, QString("#ffffee00"));
+
+        // ASS: \\1c is &HBBGGRR&, alpha counts up to transparent; a box uses HookBox.
+        const QString ass = assDocument(p, "#FF0000");
+        QVERIFY(ass.contains("\\1c&H00FF00&\\1a&H00&"));
+        QVERIFY(ass.contains("\\4c&H000000&\\4a&H7F&\\shad5"));
+        QVERIFY(ass.contains("HookBox,"));
+        QVERIFY(ass.contains(",HookBox,"));
+        QVERIFY(ass.contains("\\3c&H00EEFF&"));
+
+        // Fisheye text draws in its fill color.
+        Overlay f;
+        f.text = "RED";
+        f.style = "fisheye";
+        f.size = 150;
+        f.y = 0.5;
+        f.setColor("fill", "#ffff0000");
+        f.setColor("shadow", "transparent");
+        const QImage img = FisheyeText::render(f);
+        int red = 0, other = 0;
+        for (int y = 860; y < 1060; y += 2)
+            for (int x = 300; x < 780; x += 2) {
+                const QRgb px = img.pixel(x, y);
+                if (qAlpha(px) > 240)
+                    (qRed(px) > 230 && qGreen(px) < 30 ? red : other)++;
+            }
+        QVERIFY2(red > 200 && other < red / 10, qPrintable(QString("red %1 other %2").arg(red).arg(other)));
+    }
+
+    void colorsWorkInTheEditor()
+    {
+        QTemporaryDir dir, state, themeDir;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1600x1200",
+                           "-frames:v", "1", dir.filePath("photo.jpg")}));
+        Project p;
+        p.clips = {media::clipFor(media::probe(dir.filePath("photo.jpg")), 4.0)};
+        p.addOverlay("hello", 0, 3);
+        write(dir.filePath("e.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+
+        QQuickStyle::setStyle("Material");
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("e.reel")));
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.load(QUrl("qrc:/Main.qml"));
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360, 900);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        // The clip's wheels are in the Clip tab, the reel's in the Look tab.
+        QMetaObject::invokeMethod(window, "select", Q_ARG(QVariant, "clip"), Q_ARG(QVariant, 0));
+        QTRY_VERIFY(findItem(window->contentItem(), "clipGrade"));
+        QVERIFY(findItem(window->contentItem(), "lookGrade"));
+        QVERIFY(findItem(window->contentItem(), "wheel-Lift"));
+        backend.setGrade(0, "gain.master", 0.3);
+        QCOMPARE(backend.project().clips[0].grade.gain.master, 0.3);
+        QCOMPARE(backend.clips()[0].toMap().value("grade").toMap().value("neutral").toBool(), false);
+        // Reset All is one undoable step.
+        backend.setGrade(0, "reset", 0);
+        QVERIFY(backend.project().clips[0].grade.isNeutral());
+        backend.undo();
+        QCOMPARE(backend.project().clips[0].grade.gain.master, 0.3);
+
+        // A text's Fill swatch opens the picker; the hex field sets the color.
+        QMetaObject::invokeMethod(window, "select", Q_ARG(QVariant, "overlay"), Q_ARG(QVariant, 0));
+        auto *swatch = findItem(window->contentItem(), "colorSwatch-Fill");
+        QTRY_VERIFY(swatch);
+        QMetaObject::invokeMethod(swatch, "clicked");
+        QQuickItem *hex = nullptr;
+        QTRY_VERIFY((hex = findItem(window->contentItem(), "hexField")) != nullptr);
+        hex->setProperty("text", "#3366FF");
+        QMetaObject::invokeMethod(hex, "editingFinished");
+        QTRY_COMPARE(backend.project().overlays[0].fill, QString("#ff3366ff"));
+        // The preview's text takes the color.
+        QQuickItem *label = findItem(window->contentItem(), "overlayText0");
+        QVERIFY(label);
+        QCOMPARE(label->property("color").value<QColor>(), QColor("#3366ff"));
+    }
+
+    void mcpSetsColors()
+    {
+        QTemporaryDir dir, state;
+        const QString source = dir.filePath("source.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=320x240:rate=30:duration=2", "-c:v", "libx264", source}));
+        McpServer server(state.path());
+        QJsonObject r = call(server, "create_project", {{"path", dir.filePath("t")}, {"clips", QJsonArray{source}}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+        r = call(server, "edit_clip", {{"index", 0}, {"color_wheels", QJsonObject{{"lift.master", -0.2}, {"gain.x", 0.4}}}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+        r = call(server, "set_look", {{"color_wheels", QJsonObject{{"saturation", 1.3}}}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+        r = call(server, "add_text", {{"text", "hi"}, {"fill", "#ff0000"}, {"box", "#cc000000"}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+        const Project saved = Project::fromJson(QJsonDocument::fromJson(readAll(dir.filePath("t.reel"))).object(), dir.path());
+        QCOMPARE(saved.clips[0].grade.lift.master, -0.2);
+        QCOMPARE(saved.clips[0].grade.gain.x, 0.4);
+        QCOMPARE(saved.look.grade.saturation, 1.3);
+        QCOMPARE(saved.overlays[0].fill, QString("#ffff0000"));
+        QCOMPARE(saved.overlays[0].box, QString("#cc000000"));
+        QVERIFY(call(server, "edit_clip", {{"index", 0}, {"color_wheels", QJsonObject{{"glow", 1}}}}).value("isError").toBool());
+        QVERIFY(call(server, "edit_text", {{"index", 0}, {"fill", "nope"}}).value("isError").toBool());
+    }
+
+    void mcpManagesEffects()
+    {
+        QTemporaryDir dir, state;
+        const QString source = dir.filePath("source.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=320x240:rate=30:duration=3", "-c:v", "libx264", source}));
+        McpServer server(state.path());
+        QJsonObject r = call(server, "create_project", {{"path", dir.filePath("e")}, {"clips", QJsonArray{source}}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+        r = call(server, "add_effect", {{"kind", "shake"}, {"start", 0.5}, {"end", 2.0}, {"intensity", 0.9}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+        QVERIFY(textOf(r).contains("\"kind\": \"shake\""));
+        QVERIFY(!call(server, "edit_effect", {{"index", 0}, {"start", 2.5}, {"end", 2.9}}).value("isError").toBool());
+        Project saved = Project::fromJson(QJsonDocument::fromJson(readAll(dir.filePath("e.reel"))).object(), dir.path());
+        QCOMPARE(saved.effects[0].start, 2.5);
+        QCOMPARE(saved.effects[0].end, 2.9);
+        QCOMPARE(saved.effects[0].intensity, 0.9);
+        QVERIFY(call(server, "add_effect", {{"kind", "explode"}}).value("isError").toBool());
+        QVERIFY(call(server, "edit_effect", {{"index", 3}}).value("isError").toBool());
+        QVERIFY(!call(server, "remove_effect", {{"index", 0}}).value("isError").toBool());
+        saved = Project::fromJson(QJsonDocument::fromJson(readAll(dir.filePath("e.reel"))).object(), dir.path());
+        QVERIFY(saved.effects.isEmpty());
+    }
+
 private:
+    // Repeater delegates aren't QObject children, so walk the visual tree.
+    static QQuickItem *findItem(QQuickItem *item, const QString &name)
+    {
+        if (item->objectName() == name)
+            return item;
+        for (QQuickItem *child : item->childItems())
+            if (QQuickItem *found = findItem(child, name))
+                return found;
+        return nullptr;
+    }
+
     static QJsonObject call(McpServer &server, const QString &tool, const QJsonObject &args)
     {
         return server.handle({{"jsonrpc", "2.0"}, {"id", 9}, {"method", "tools/call"},

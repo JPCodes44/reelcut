@@ -10,10 +10,31 @@ Rectangle {
 
     property int selectedClip: -1
     property int selectedOverlay: -1
+    property int selectedEffect: -1
     property real playhead: 0
+    // A text overlay is selected: text effects apply to it instead of adding new text.
+    property bool textSelected: false
+    property bool clipWheelsOpen: true
+    property bool lookWheelsOpen: true
+
+    // A heading that opens and closes the section under it.
+    component SectionToggle: AbstractButton {
+        id: toggle
+        property bool open: true
+        Layout.fillWidth: true
+        Layout.topMargin: 8
+        implicitHeight: 32
+        contentItem: RowLayout {
+            Label { text: toggle.open ? "▾" : "▸"; color: "#9a9aa2" }
+            Label { text: toggle.text; font.bold: true; Layout.fillWidth: true }
+        }
+        background: Rectangle { color: toggle.hovered ? "#24242a" : "transparent"; radius: 6 }
+    }
     property alias currentIndex: tabs.currentIndex
     readonly property var clipData: selectedClip >= 0 && selectedClip < backend.clips.length ? backend.clips[selectedClip] : null
+    readonly property var effectData: selectedEffect >= 0 && selectedEffect < backend.effects.length ? backend.effects[selectedEffect] : null
     signal overlaySelected(int index)
+    signal effectSelected(int index)
     signal seekRequested(real t)
 
     function seconds(value) { return value.toLocaleString(Qt.locale(), 'f', 2) + " s" }
@@ -31,6 +52,7 @@ Rectangle {
             TabButton { text: qsTr("Text") }
             TabButton { text: qsTr("Look") }
             TabButton { text: qsTr("Audio") }
+            TabButton { text: qsTr("Effects") }
         }
 
         StackLayout {
@@ -101,6 +123,61 @@ Rectangle {
                                 onActivated: backend.setClipMotion(root.selectedClip, currentValue)
                             }
                         }
+                        // The transition from this clip into the next one.
+                        RowLayout {
+                            visible: root.clipData !== null && root.selectedClip < backend.clips.length - 1
+                            Layout.fillWidth: true
+                            Label { text: qsTr("Into next clip"); Layout.fillWidth: true }
+                            ComboBox {
+                                objectName: "transitionBox"
+                                Layout.preferredWidth: 200
+                                textRole: "label"
+                                valueRole: "id"
+                                model: [{ id: "", label: qsTr("Cut") }].concat(backend.transitions)
+                                currentIndex: root.clipData ? Math.max(0, indexOfValue(root.clipData.transition)) : 0
+                                onActivated: backend.setClipTransition(root.selectedClip, currentValue)
+                            }
+                        }
+                        // Body effect: treats the person and the background differently.
+                        RowLayout {
+                            visible: root.clipData !== null
+                            Layout.fillWidth: true
+                            Label { text: qsTr("Body effect"); Layout.fillWidth: true }
+                            ComboBox {
+                                objectName: "bodyBox"
+                                Layout.preferredWidth: 200
+                                textRole: "label"
+                                valueRole: "id"
+                                model: [{ id: "", label: qsTr("None") }].concat(backend.bodyKinds)
+                                currentIndex: root.clipData ? Math.max(0, indexOfValue(root.clipData.body)) : 0
+                                onActivated: backend.setClipBody(root.selectedClip, currentValue)
+                            }
+                        }
+                        ValueSlider {
+                            visible: root.clipData !== null && root.clipData.body.length > 0
+                            label: qsTr("Body effect strength")
+                            from: 0; to: 1; resetValue: 0.8
+                            value: root.clipData ? root.clipData.bodyAmount : 0
+                            onMoved: function(v) { backend.setClipValue(root.selectedClip, "bodyAmount", v) }
+                        }
+                        Label {
+                            visible: root.clipData !== null && root.clipData.body.length > 0 && root.clipData.mask === ""
+                            Layout.fillWidth: true
+                            text: backend.busy ? backend.busyText : qsTr("Not ready yet: Reelcut finds the person before exporting.")
+                            color: "#9a9aa2"
+                            wrapMode: Text.Wrap
+                            font.pixelSize: 12
+                        }
+                        ValueSlider {
+                            visible: root.clipData !== null && root.clipData.transition.length > 0
+                                     && root.selectedClip < backend.clips.length - 1
+                            label: qsTr("Transition length")
+                            from: 0.1; to: 2; resetValue: 0.5; stepSize: 0.05
+                            value: root.clipData ? root.clipData.transitionSeconds : 0.5
+                            // The overlap can be shorter than asked when a clip is short.
+                            valueText: root.clipData ? root.clipData.overlap.toLocaleString(Qt.locale(), 'f', 2) + " s" : ""
+                            onMoved: function(v) { backend.setClipValue(root.selectedClip, "transitionSeconds", v) }
+                        }
                         ValueSlider {
                             visible: root.clipData === null || !root.clipData.still
                             label: qsTr("Speed")
@@ -125,6 +202,20 @@ Rectangle {
                             label: qsTr("Pan up / down")
                             value: root.clipData ? root.clipData.panY : 0
                             onMoved: function(v) { backend.setClipValue(root.selectedClip, "panY", v) }
+                        }
+
+                        // DaVinci-style primaries for this clip only.
+                        SectionToggle {
+                            objectName: "clipWheelsToggle"
+                            text: qsTr("Color wheels (this clip)")
+                            open: root.clipWheelsOpen
+                            onToggled: root.clipWheelsOpen = !root.clipWheelsOpen
+                        }
+                        GradePanel {
+                            objectName: "clipGrade"
+                            visible: root.clipWheelsOpen && root.clipData !== null
+                            index: root.selectedClip
+                            grade: root.clipData ? root.clipData.grade : ({})
                         }
 
                         GridLayout {
@@ -376,12 +467,17 @@ Rectangle {
                                 anchors.fill: parent
                                 anchors.margins: 12
                                 spacing: 8
-                                TextField {
+                                // Multi-line: Enter starts a new line of the text.
+                                TextArea {
+                                    objectName: "overlayTextField" + card.index
                                     Layout.fillWidth: true
-                                    placeholderText: qsTr("Text")
+                                    placeholderText: qsTr("Text (Enter for a new line)")
+                                    wrapMode: TextEdit.Wrap
                                     text: card.modelData.text
                                     onActiveFocusChanged: if (activeFocus) { backend.checkpoint(); root.overlaySelected(card.index) }
-                                    onTextEdited: backend.setOverlayValue(card.index, "text", text)
+                                    // Only typing writes back; the binding above sets the same text again.
+                                    onTextChanged: if (activeFocus && text !== card.modelData.text)
+                                                       backend.setOverlayValue(card.index, "text", text)
                                 }
                                 RowLayout {
                                     Layout.fillWidth: true
@@ -407,6 +503,28 @@ Rectangle {
                                 }
                                 RowLayout {
                                     Layout.fillWidth: true
+                                    Label { text: qsTr("Style") }
+                                    ComboBox {
+                                        objectName: "overlayStyle" + card.index
+                                        Layout.fillWidth: true
+                                        textRole: "label"
+                                        valueRole: "id"
+                                        model: [{ id: "plain", label: qsTr("Plain") }, { id: "fisheye", label: qsTr("Fisheye") }]
+                                        // count: re-run once the model is in, or it stays blank
+                                        currentIndex: count > 0 ? indexOfValue(card.modelData.style) : -1
+                                        onActivated: { backend.checkpoint(); backend.setOverlayValue(card.index, "style", currentValue) }
+                                    }
+                                }
+                                ValueSlider {
+                                    visible: card.modelData.style === "fisheye"
+                                    label: qsTr("Bulge")
+                                    from: 0; to: 1; resetValue: 0.6
+                                    value: card.modelData.bulge === undefined ? 0.6 : card.modelData.bulge
+                                    valueText: Math.round(value * 100) + "%"
+                                    onMoved: function(v) { backend.setOverlayValue(card.index, "bulge", v) }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
                                     Label { text: qsTr("Entrance") }
                                     ComboBox {
                                         Layout.fillWidth: true
@@ -416,6 +534,18 @@ Rectangle {
                                                 { id: "slide", label: qsTr("Slide up") }, { id: "none", label: qsTr("None") }]
                                         Component.onCompleted: currentIndex = indexOfValue(card.modelData.animation)
                                         onActivated: { backend.checkpoint(); backend.setOverlayValue(card.index, "animation", currentValue) }
+                                    }
+                                }
+                                // Colors: each can be the style's default, transparent, or any color.
+                                Repeater {
+                                    model: [["fill", qsTr("Fill")], ["outline", qsTr("Outline")],
+                                            ["shadow", qsTr("Shadow")], ["box", qsTr("Box")]]
+                                    delegate: ColorPicker {
+                                        required property var modelData
+                                        label: modelData[1]
+                                        value: card.modelData[modelData[0]] || ""
+                                        shown: card.modelData[modelData[0] + "Color"] || "#00000000"
+                                        onPicked: function(v) { backend.setOverlayValue(card.index, modelData[0], v) }
                                     }
                                 }
                                 ValueSlider {
@@ -465,7 +595,65 @@ Rectangle {
                         Layout.rightMargin: 18
                         spacing: 12
 
-                        Label { text: qsTr("Presets") }
+                        Label { text: qsTr("Filters") }
+                        GridLayout {
+                            Layout.fillWidth: true
+                            columns: 4
+                            columnSpacing: 6
+                            rowSpacing: 6
+                            Repeater {
+                                model: [{ id: "", label: qsTr("None"), swatch: ["#7a7a80", "#7a7a80", "#7a7a80"] }].concat(backend.filters)
+                                delegate: Rectangle {
+                                    id: tile
+                                    required property var modelData
+                                    readonly property bool chosen: backend.look.filter === modelData.id
+                                    objectName: "filter-" + (modelData.id || "none")
+                                    Layout.fillWidth: true
+                                    implicitHeight: 58
+                                    radius: Math.min(6, theme.radius)
+                                    color: "#18181c"
+                                    border.width: chosen ? 2 : 1
+                                    border.color: chosen ? theme.accent : "#2a2a2f"
+                                    Accessible.role: Accessible.Button
+                                    Accessible.name: modelData.label
+                                    // Skin, sky and foliage, as this look turns them.
+                                    Row {
+                                        x: 6; y: 6
+                                        width: parent.width - 12
+                                        height: 22
+                                        Repeater {
+                                            model: tile.modelData.swatch
+                                            delegate: Rectangle {
+                                                required property var modelData
+                                                width: parent.width / 3
+                                                height: parent.height
+                                                color: modelData
+                                            }
+                                        }
+                                    }
+                                    Label {
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.bottom: parent.bottom
+                                        anchors.margins: 6
+                                        text: tile.modelData.label
+                                        elide: Text.ElideRight
+                                        font.pixelSize: 11
+                                        color: tile.chosen ? "white" : "#c8c8cf"
+                                    }
+                                    TapHandler { onTapped: backend.setFilter(tile.modelData.id) }
+                                }
+                            }
+                        }
+                        ValueSlider {
+                            label: qsTr("Filter strength")
+                            visible: backend.look.filter.length > 0
+                            from: 0; to: 1; resetValue: 1
+                            value: backend.look.filterAmount
+                            onMoved: function(v) { backend.setLookValue("filterAmount", v) }
+                        }
+
+                        Label { text: qsTr("Presets"); Layout.topMargin: 6 }
                         GridLayout {
                             Layout.fillWidth: true
                             columns: 3
@@ -489,6 +677,20 @@ Rectangle {
                         ValueSlider { label: qsTr("Contrast"); value: backend.look.contrast; onMoved: function(v) { backend.setLookValue("contrast", v) } }
                         ValueSlider { label: qsTr("Saturation"); value: backend.look.saturation; onMoved: function(v) { backend.setLookValue("saturation", v) } }
                         ValueSlider { label: qsTr("Temperature"); value: backend.look.temperature; onMoved: function(v) { backend.setLookValue("temperature", v) } }
+
+                        // DaVinci-style primaries over the whole reel, after each clip's own.
+                        SectionToggle {
+                            objectName: "lookWheelsToggle"
+                            text: qsTr("Color wheels (whole reel)")
+                            open: root.lookWheelsOpen
+                            onToggled: root.lookWheelsOpen = !root.lookWheelsOpen
+                        }
+                        GradePanel {
+                            objectName: "lookGrade"
+                            visible: root.lookWheelsOpen
+                            index: -1
+                            grade: backend.look.grade
+                        }
 
                         Label { text: qsTr("LUT"); Layout.topMargin: 6 }
                         Label {
@@ -564,6 +766,123 @@ Rectangle {
                             color: "#9a9aa2"
                             wrapMode: Text.Wrap
                             font.pixelSize: 12
+                        }
+                    }
+                }
+            }
+            // ---- Effects ----
+            ScrollView {
+                contentWidth: availableWidth
+                ColumnLayout {
+                    width: parent.width
+                    spacing: 12
+                    Item { Layout.preferredHeight: 4 }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 18
+                        Layout.rightMargin: 18
+                        spacing: 12
+
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr("Add an effect at the playhead. Drag it in the Effects lane to move or trim it.")
+                            color: "#9a9aa2"
+                            wrapMode: Text.Wrap
+                            font.pixelSize: 12
+                        }
+                        GridLayout {
+                            Layout.fillWidth: true
+                            columns: 3
+                            columnSpacing: 6
+                            rowSpacing: 6
+                            Repeater {
+                                model: backend.effectKinds
+                                delegate: Button {
+                                    required property var modelData
+                                    objectName: "addEffect-" + modelData.id
+                                    Layout.fillWidth: true
+                                    text: modelData.label
+                                    font.pixelSize: 12
+                                    onClicked: {
+                                        const i = backend.addEffect(modelData.id, root.playhead)
+                                        if (i >= 0) root.effectSelected(i)
+                                    }
+                                }
+                            }
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            text: root.textSelected ? qsTr("Text effects: applied to the selected text")
+                                                    : qsTr("Text effects: adds new text at the playhead")
+                            color: "#9a9aa2"
+                            wrapMode: Text.Wrap
+                            font.pixelSize: 12
+                        }
+                        Button {
+                            objectName: "addFisheyeText"
+                            Layout.fillWidth: true
+                            text: qsTr("Fisheye Text")
+                            font.pixelSize: 12
+                            enabled: backend.clips.length > 0
+                            // With text selected, it bends that text; otherwise it adds a new
+                            // fisheye text, an overlay like any other.
+                            onClicked: {
+                                if (root.textSelected) {
+                                    backend.checkpoint()
+                                    backend.setOverlayValue(root.selectedOverlay, "style", "fisheye")
+                                    root.overlaySelected(root.selectedOverlay)
+                                } else {
+                                    root.overlaySelected(backend.addFisheyeText(root.playhead))
+                                }
+                            }
+                        }
+
+                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#2a2a2f"; visible: root.effectData !== null }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            visible: root.effectData !== null
+                            spacing: 10
+                            Label {
+                                text: root.effectData ? root.effectData.label : ""
+                                font.pixelSize: 16
+                                font.bold: true
+                            }
+                            ValueSlider {
+                                label: qsTr("Intensity")
+                                from: 0; to: 1; resetValue: 0.6
+                                value: root.effectData ? root.effectData.intensity : 0
+                                onMoved: function(v) { backend.setEffectValue(root.selectedEffect, "intensity", v) }
+                            }
+                            ValueSlider {
+                                visible: root.effectData !== null && root.effectData.usesSpeed
+                                label: qsTr("Speed")
+                                from: 0; to: 1; resetValue: 0.5
+                                value: root.effectData ? root.effectData.speed : 0
+                                onMoved: function(v) { backend.setEffectValue(root.selectedEffect, "speed", v) }
+                            }
+                            ValueSlider {
+                                label: qsTr("Starts")
+                                from: 0; to: Math.max(1, backend.duration); resetValue: 0
+                                value: root.effectData ? root.effectData.start : 0
+                                valueText: root.seconds(value)
+                                onMoved: function(v) { backend.setEffectValue(root.selectedEffect, "start", v) }
+                            }
+                            ValueSlider {
+                                label: qsTr("Ends")
+                                from: 0; to: Math.max(1, backend.duration); resetValue: 0
+                                value: root.effectData ? root.effectData.end : 0
+                                valueText: root.seconds(value)
+                                onMoved: function(v) { backend.setEffectValue(root.selectedEffect, "end", v) }
+                            }
+                            Button {
+                                Layout.fillWidth: true
+                                text: qsTr("Delete Effect")
+                                flat: true
+                                onClicked: backend.removeEffect(root.selectedEffect)
+                            }
                         }
                     }
                 }

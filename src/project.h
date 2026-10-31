@@ -6,6 +6,8 @@
 #include <QVariant>
 #include <QVector>
 
+#include "colorgrade.h"
+
 // One stretch of a source video on the timeline. Times are in seconds of the
 // source; the clip plays `out - in` of it at `speed`.
 struct Clip {
@@ -26,6 +28,14 @@ struct Clip {
     // none, zoom-in, zoom-out, pan-left, pan-right.
     bool still = false;
     QString motion = "none";
+    // A Transitions id into the next clip, or empty for a cut.
+    QString transition;
+    double transitionSeconds = 0.5;
+    // A body effect (src/bodyeffects.h) over this clip, or empty, and how strong.
+    QString body;
+    double bodyAmount = 0.8;
+    // Color wheels for this clip alone (src/colorgrade.h), before the reel's.
+    ColorGrade::Grade grade;
 
     double duration() const { return (out - in) / speed; }
 
@@ -50,6 +60,29 @@ struct Overlay {
     double y = 0.2;  // center, as a fraction of the frame height
     int size = 96;   // pixels at 1080x1920
     QString animation = "pop";  // none, fade, pop, slide
+    // "plain" (white, outlined, via the .ass file) or "fisheye" (yellow
+    // serif, bulged through a lens; see src/fisheyetext.h).
+    QString style = "plain";
+    double bulge = 0.6;  // fisheye strength, 0..1
+    // Colors, as "#AARRGGBB"; empty means the style's default, alpha 0 is
+    // transparent. Parts: fill, outline, shadow, box (a panel behind it).
+    QString fill, outline, shadow, box;
+
+    static QStringList colorParts();
+    // "" or "default" for the style's default, "transparent", or any color
+    // QColor reads (#rgb, #rrggbb, #aarrggbb, names). False if unreadable.
+    bool setColor(const QString &part, const QString &value);
+    // The color a part actually draws in, defaults filled in: "#AARRGGBB".
+    QString colorOf(const QString &part) const;
+};
+
+// A video effect over a stretch of the timeline (see src/effects.h).
+struct Effect {
+    QString kind;            // an Effects id
+    double start = 0.0;      // timeline seconds
+    double end = 1.5;
+    double intensity = 0.6;  // 0..1
+    double speed = 0.5;      // 0..1, for effects that move
 };
 
 struct Music {
@@ -68,6 +101,9 @@ struct Look {
     double saturation = 0.0;
     double temperature = 0.0;  // positive is warmer
     QString lut;               // path to a .cube file, or empty
+    QString filter;            // a Filters look id, or empty for none
+    double filterAmount = 1.0; // 0..1, how much of the filter shows
+    ColorGrade::Grade grade;   // color wheels over the whole reel
 
     bool isNeutral() const {
         return exposure == 0.0 && contrast == 0.0 && saturation == 0.0 && temperature == 0.0;
@@ -78,6 +114,7 @@ struct Project {
     QVector<Clip> clips;
     Music music;
     QVector<Overlay> overlays;
+    QVector<Effect> effects;
     QVector<Word> words;
     QString captionStyle = "highlight";  // bold, highlight, pop, box
     double captionX = 0.5;
@@ -93,6 +130,10 @@ struct Project {
 
     double duration() const;
     double clipStart(int index) const;
+    // How long clip `index` overlaps the next one: its transition's length,
+    // limited to half of either clip so a transition never swallows a clip.
+    // 0 for a cut and for the last clip.
+    double overlap(int index) const;
 
     // Which clip plays at timeline time t, and where in its source.
     struct Position {
@@ -111,8 +152,16 @@ struct Project {
     // Each returns false for an unknown key or index; values are clamped.
     bool setClipValue(int index, const QString &key, double value);
     bool setClipMotion(int index, const QString &motion);
+    // A transition into the next clip; empty removes it. False if unknown.
+    bool setClipTransition(int index, const QString &id);
+    // A body effect on a clip; empty removes it. False if unknown.
+    bool setClipBody(int index, const QString &id);
     bool setOverlayValue(int index, const QString &key, const QVariant &value);
     bool setLookValue(const QString &key, double value);
+    // Color wheels: index -1 is the whole reel. Keys as ColorGrade::Grade::set.
+    bool setGrade(int index, const QString &key, double value);
+    // A look from the filter library by id; empty removes it. False if unknown.
+    bool setFilter(const QString &id);
     // x, y (fractions of the frame) or scale.
     bool setCaptionValue(const QString &key, double value);
     bool setMusicValue(const QString &key, const QVariant &value);
@@ -122,6 +171,10 @@ struct Project {
     bool applyPreset(const QString &name);
     static QStringList presets();
     int addOverlay(const QString &text, double start, double end = -1.0);
+    // An effect from the library at `start`; -1 if the kind is unknown.
+    int addEffect(const QString &kind, double start, double end = -1.0);
+    // start, end, intensity, speed; values are clamped.
+    bool setEffectValue(int index, const QString &key, double value);
 
     // Paths are stored relative to the project file's folder, so a project
     // moved with its media still opens.
