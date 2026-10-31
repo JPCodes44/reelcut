@@ -73,18 +73,11 @@ QString absolute(const QString &path) {
     return QFileInfo(path).absoluteFilePath();
 }
 
-Clip clipFromFile(const QString &path) {
+Clip clipFromFile(const QString &path, double photoSeconds = Clip::PhotoSeconds) {
     const media::VideoInfo info = media::probe(path);
     if (!info.ok)
         throw ToolError{QString("%1: %2").arg(path, info.error)};
-    Clip clip;
-    clip.path = path;
-    clip.out = info.duration;
-    clip.sourceDuration = info.duration;
-    clip.width = info.width;
-    clip.height = info.height;
-    clip.audio = info.audio;
-    return clip;
+    return media::clipFor(info, photoSeconds);
 }
 
 QString accent() {
@@ -154,7 +147,7 @@ QJsonObject McpServer::handle(const QJsonObject &request) {
         const QString version = request.value("params").toObject().value("protocolVersion").toString("2025-06-18");
         return reply({{"protocolVersion", version},
                       {"capabilities", QJsonObject{{"tools", QJsonObject{}}}},
-                      {"serverInfo", QJsonObject{{"name", "reelcut"}, {"version", "0.2.0"}}},
+                      {"serverInfo", QJsonObject{{"name", "reelcut"}, {"version", "0.3.0"}}},
                       {"instructions", kInstructions}});
     }
     if (method == "ping")
@@ -229,6 +222,7 @@ QJsonObject McpServer::summary(const Call &call, bool withWords) const {
             {"source_in", c.in}, {"source_out", c.out}, {"source_duration", c.sourceDuration},
             {"speed", c.speed}, {"zoom", c.zoom}, {"pan_x", c.panX}, {"pan_y", c.panY},
             {"size", QString("%1x%2").arg(c.width).arg(c.height)}, {"has_audio", c.audio},
+            {"photo", c.still}, {"motion", c.motion},
             {"missing", !QFileInfo::exists(c.path)},
         });
         start += c.duration();
@@ -374,8 +368,8 @@ void McpServer::defineTools() {
                 const media::VideoInfo info = media::probe(absolute(call.args.value("file").toString()));
                 if (!info.ok)
                     throw ToolError{info.error};
-                return json({{"file", info.path}, {"duration", info.duration}, {"width", info.width},
-                             {"height", info.height}, {"has_audio", info.audio}});
+                return json({{"file", info.path}, {"photo", info.still}, {"duration", info.duration},
+                             {"width", info.width}, {"height", info.height}, {"has_audio", info.audio}});
             }, false);
 
     addTool("set_platform", "Design for Instagram Reels or TikTok (changes the safe zones shown and the file name).",
@@ -386,15 +380,27 @@ void McpServer::defineTools() {
 
     // Clips
 
-    addTool("add_clips", "Add video files to the timeline, at the end or at a position.",
+    addTool("add_clips",
+            "Add videos and/or photos to the timeline, at the end or at a position. Photos (jpg, png, webp, heic) "
+            "become slides that show for photo_seconds with a slow zoom; a slideshow is just a timeline of photos.",
             {{"files", QJsonObject{{"type", "array"}, {"items", QJsonObject{{"type", "string"}}},
-                                   {"description", "Video files, in order."}}},
-             {"at", prop("integer", "Clip index to insert before. Default: the end.")}},
+                                   {"description", "Video or photo files, in order."}}},
+             {"at", prop("integer", "Clip index to insert before. Default: the end.")},
+             {"photo_seconds", prop("number", "How long each photo shows. Default 2.5.")},
+             {"motion", enumProp(Clip::motions(), "Movement for the photos added. Default zoom-in.")}},
             {"files"}, true, [this](Call &call) {
                 int at = call.args.contains("at") ? qBound(0, call.args.value("at").toInt(), int(call.project.clips.size()))
                                                   : int(call.project.clips.size());
-                for (const QJsonValue &file : call.args.value("files").toArray())
-                    call.project.clips.insert(at++, clipFromFile(absolute(file.toString())));
+                const double seconds = call.args.value("photo_seconds").toDouble(Clip::PhotoSeconds);
+                for (const QJsonValue &file : call.args.value("files").toArray()) {
+                    Clip clip = clipFromFile(absolute(file.toString()), seconds);
+                    if (clip.still && call.args.contains("motion")) {
+                        if (!Clip::motions().contains(call.args.value("motion").toString()))
+                            throw ToolError{"Unknown motion. Use one of: " + Clip::motions().join(", ")};
+                        clip.motion = call.args.value("motion").toString();
+                    }
+                    call.project.clips.insert(at++, clip);
+                }
                 return json(summary(call));
             });
 
@@ -420,8 +426,11 @@ void McpServer::defineTools() {
             });
 
     addTool("edit_clip",
-            "Change a clip: trim (source seconds), speed, and framing in the 9:16 frame. Values are clamped.",
+            "Change a clip: trim (source seconds), speed, and framing in the 9:16 frame; for photos, how long they "
+            "show and how they move. Values are clamped.",
             {{"index", prop("integer", "Clip index.")},
+             {"duration", prop("number", "Seconds on the timeline (photos: how long the slide shows).")},
+             {"motion", enumProp(Clip::motions(), "Photos only: slow zoom or pan over the slide.")},
              {"source_in", prop("number", "Where the clip starts in its file, in seconds.")},
              {"source_out", prop("number", "Where the clip ends in its file, in seconds.")},
              {"speed", prop("number", "0.25 to 4.")},
@@ -438,6 +447,14 @@ void McpServer::defineTools() {
                 for (const auto &key : keys)
                     if (call.args.contains(key.first))
                         call.project.setClipValue(index, key.second, call.args.value(key.first).toDouble());
+                if (call.args.contains("duration"))
+                    call.project.setClipValue(index, "duration", call.args.value("duration").toDouble());
+                if (call.args.contains("motion")) {
+                    if (!call.project.clips[index].still)
+                        throw ToolError{"Only photos have motion."};
+                    if (!call.project.setClipMotion(index, call.args.value("motion").toString()))
+                        throw ToolError{"Unknown motion. Use one of: " + Clip::motions().join(", ")};
+                }
                 return json(summary(call));
             });
 
@@ -711,6 +728,25 @@ void McpServer::defineTools() {
                 return json({{"output", output}, {"encoder", encoder}, {"duration", info.duration},
                              {"size", QString("%1x%2").arg(info.width).arg(info.height)},
                              {"bytes", QFileInfo(output).size()}});
+            });
+
+    addTool("export_photos",
+            "Render a photo set for TikTok photo mode (swipeable photo posts): one 1080x1920 JPG per clip, "
+            "numbered in order, with the look, captions and text drawn in. Post them in the TikTok app and pick "
+            "the sound there.",
+            {{"folder", prop("string", "Where to write the JPGs. Default: <project name>-photos next to the project.")}},
+            {}, false, [](Call &call) {
+                QString folder = call.args.value("folder").toString();
+                if (folder.isEmpty()) {
+                    const QFileInfo project(call.path);
+                    folder = project.absolutePath() + "/" + project.completeBaseName() + "-photos";
+                }
+                QString error;
+                const QStringList files = exportPhotoSet(call.project, accent(), absolute(folder), &error);
+                if (files.isEmpty())
+                    throw ToolError{error};
+                return json({{"folder", absolute(folder)}, {"files", QJsonArray::fromStringList(files)},
+                             {"size", "1080x1920"}});
             });
 
     addTool("show_in_app", "Open the project in the Reelcut window so the user can watch and edit it.", {}, {}, false,

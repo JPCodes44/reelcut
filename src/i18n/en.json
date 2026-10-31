@@ -1,4 +1,5 @@
 {
   "%n clips": { "one": "%n clip", "other": "%n clips" },
+  "Saved %n photos to %1.": { "one": "Saved %n photo to %1.", "other": "Saved %n photos to %1." },
   "%n words": { "one": "%n word", "other": "%n words" }
 }

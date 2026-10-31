@@ -137,7 +137,8 @@ Rectangle {
                             sourceSize.height: 90
                             source: clipItem.modelData.thumb > 0
                                     ? "image://thumbs/" + clipItem.modelData.thumb + "/"
-                                      + Math.round(Math.min(clipItem.modelData.out - 0.05, clipItem.modelData.in + (index + 0.5) * tileSeconds) * 10) * 100
+                                      + (clipItem.modelData.still ? 0
+                                         : Math.round(Math.min(clipItem.modelData.out - 0.05, clipItem.modelData.in + (index + 0.5) * tileSeconds) * 10) * 100)
                                     : ""
                             opacity: 0.85
                         }
@@ -148,7 +149,7 @@ Rectangle {
                     anchors.left: parent.left
                     anchors.bottom: parent.bottom
                     anchors.margins: 6
-                    text: clipItem.modelData.speed !== 1 ? clipItem.modelData.speed + "×" : ""
+                    text: clipItem.modelData.still ? "▣" : clipItem.modelData.speed !== 1 ? clipItem.modelData.speed + "×" : ""
                     font.pixelSize: 11
                     font.bold: true
                     padding: 2

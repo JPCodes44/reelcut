@@ -15,7 +15,13 @@ QStringList clipChains(const Project &project, bool withVideo, bool withAudio, c
     QStringList chains;
     for (int i = 0; i < project.clips.size(); ++i) {
         const Clip &c = project.clips[i];
-        if (withVideo) {
+        if (withVideo && c.still) {
+            // A looped photo: framed once, then moved over its duration.
+            QString motion = motionFilter(c);
+            chains << QString("[%1:v]trim=duration=%2,setpts=PTS-STARTPTS,%3%4,setsar=1,fps=%5,format=yuv420p[v%1]")
+                          .arg(i).arg(num(c.duration()), framingFilter(c), motion.isEmpty() ? QString() : "," + motion)
+                          .arg(Project::Fps);
+        } else if (withVideo) {
             chains << QString("[%1:v]trim=start=%2:end=%3,setpts=(PTS-STARTPTS)/%4,%5,setsar=1,fps=%6,"
                               "format=yuv420p[v%1]")
                           .arg(i).arg(num(c.in), num(c.out), num(c.speed, 4), framingFilter(c))
@@ -23,7 +29,7 @@ QStringList clipChains(const Project &project, bool withVideo, bool withAudio, c
         }
         if (!withAudio)
             continue;
-        if (c.audio) {
+        if (c.audio && !c.still) {
             QString chain = QString("[%1:a]atrim=start=%2:end=%3,asetpts=PTS-STARTPTS")
                                 .arg(i).arg(num(c.in), num(c.out));
             if (c.speed != 1.0)
@@ -65,8 +71,12 @@ QString videoFinish(const Project &project, const ExportOptions &options) {
 
 QStringList clipInputs(const Project &project) {
     QStringList args;
-    for (const Clip &clip : project.clips)
+    for (const Clip &clip : project.clips) {
+        // A photo becomes a stream of the same frame, as long as it shows.
+        if (clip.still)
+            args << "-loop" << "1" << "-framerate" << QString::number(Project::Fps) << "-t" << num(clip.duration() + 0.1);
         args << "-i" << clip.path;
+    }
     return args;
 }
 }  // namespace
@@ -93,6 +103,32 @@ QString framingFilter(const Clip &clip) {
     const int y = qRound((sh - Project::Height) * (qBound(-1.0, clip.panY, 1.0) + 1.0) / 2.0);
     return QString("scale=%1:%2:flags=lanczos,crop=%3:%4:%5:%6")
         .arg(sw).arg(sh).arg(Project::Width).arg(Project::Height).arg(x).arg(y);
+}
+
+QString motionFilter(const Clip &clip) {
+    if (!clip.still || clip.motion == "none" || !Clip::motions().contains(clip.motion))
+        return {};
+    // zoompan works on whole pixels, so it runs on a frame twice the size to
+    // keep slow moves smooth. Zoom goes 12% over the photo's duration.
+    const int frames = qMax(1, qRound(clip.duration() * Project::Fps));
+    const QString n = QString::number(frames);
+    QString z, x, y = "ih/2-ih/zoom/2";
+    if (clip.motion == "zoom-in") {
+        z = "1+0.12*on/" + n;
+        x = "iw/2-iw/zoom/2";
+    } else if (clip.motion == "zoom-out") {
+        z = "1.12-0.12*on/" + n;
+        x = "iw/2-iw/zoom/2";
+    } else if (clip.motion == "pan-left") {
+        z = "1.12";
+        x = "(iw-iw/zoom)*(1-on/" + n + ")";
+    } else {
+        z = "1.12";
+        x = "(iw-iw/zoom)*on/" + n;
+    }
+    return QString("scale=%1:%2:flags=bicubic,zoompan=z='%3':x='%4':y='%5':d=1:s=%6x%7:fps=%8")
+        .arg(Project::Width * 2).arg(Project::Height * 2).arg(z, x, y)
+        .arg(Project::Width).arg(Project::Height).arg(Project::Fps);
 }
 
 QString atempoChain(double speed) {

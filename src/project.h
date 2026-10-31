@@ -22,8 +22,16 @@ struct Clip {
     int height = 0;
     bool audio = true;
     double sourceDuration = 0.0;
+    // A photo held on screen for `out - in` seconds, optionally moving:
+    // none, zoom-in, zoom-out, pan-left, pan-right.
+    bool still = false;
+    QString motion = "none";
 
     double duration() const { return (out - in) / speed; }
+
+    static constexpr double PhotoSeconds = 2.5;
+    static constexpr double MaxPhotoSeconds = 30.0;
+    static QStringList motions();
 };
 
 // A caption word, in timeline seconds.
@@ -99,9 +107,12 @@ struct Project {
     // Edits with the same limits everywhere (the window, the MCP server).
     // Each returns false for an unknown key or index; values are clamped.
     bool setClipValue(int index, const QString &key, double value);
+    bool setClipMotion(int index, const QString &motion);
     bool setOverlayValue(int index, const QString &key, const QVariant &value);
     bool setLookValue(const QString &key, double value);
     bool setMusicValue(const QString &key, const QVariant &value);
+    // Times on the timeline where each clip starts, then the end.
+    QVector<double> clipStarts() const;
     // Natural, Warm, Cool, Punchy, Film or Mono (any case); false if unknown.
     bool applyPreset(const QString &name);
     static QStringList presets();

@@ -79,3 +79,8 @@ bool cutSilences(Project &project, int index, double thresholdDb, double minSile
 bool exportProject(const Project &project, const QString &accent, const QString &output, QString *encoder,
                    QString *error);
 QByteArray renderFrame(const Project &project, const QString &accent, double time, int width, QString *error);
+
+// One 1080x1920 JPG per clip (01.jpg, 02.jpg, ...) in `folder`, drawn like the
+// export draws that moment (framing, look, LUT, captions, text) without
+// motion: a photo set for TikTok's photo mode. Returns the files written.
+QStringList exportPhotoSet(const Project &project, const QString &accent, const QString &folder, QString *error);

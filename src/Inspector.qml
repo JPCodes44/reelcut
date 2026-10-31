@@ -71,12 +71,38 @@ Rectangle {
                             elide: Text.ElideMiddle
                         }
                         Label {
-                            text: root.clipData ? qsTr("%1 → %2, plays %3").arg(root.seconds(root.clipData.in)).arg(root.seconds(root.clipData.out)).arg(root.seconds(root.clipData.duration)) : ""
+                            text: !root.clipData ? "" : root.clipData.still ? qsTr("Photo, %1x%2").arg(root.clipData.width).arg(root.clipData.height)
+                                  : qsTr("%1 → %2, plays %3").arg(root.seconds(root.clipData.in)).arg(root.seconds(root.clipData.out)).arg(root.seconds(root.clipData.duration))
                             color: "#9a9aa2"
                             font.pixelSize: 12
                         }
 
                         ValueSlider {
+                            visible: root.clipData !== null && root.clipData.still
+                            label: qsTr("Duration")
+                            from: 0.5; to: 10; resetValue: 2.5; stepSize: 0.1
+                            value: root.clipData ? root.clipData.duration : 2.5
+                            valueText: value.toLocaleString(Qt.locale(), 'f', 1) + " s"
+                            onMoved: function(v) { backend.setClipValue(root.selectedClip, "duration", v) }
+                        }
+                        RowLayout {
+                            visible: root.clipData !== null && root.clipData.still
+                            Layout.fillWidth: true
+                            Label { text: qsTr("Motion"); Layout.fillWidth: true }
+                            ComboBox {
+                                id: motionBox
+                                Layout.preferredWidth: 200
+                                textRole: "label"
+                                valueRole: "id"
+                                model: [{ id: "none", label: qsTr("Still") }, { id: "zoom-in", label: qsTr("Zoom in") },
+                                        { id: "zoom-out", label: qsTr("Zoom out") }, { id: "pan-left", label: qsTr("Pan left") },
+                                        { id: "pan-right", label: qsTr("Pan right") }]
+                                currentIndex: root.clipData ? indexOfValue(root.clipData.motion) : 0
+                                onActivated: backend.setClipMotion(root.selectedClip, currentValue)
+                            }
+                        }
+                        ValueSlider {
+                            visible: root.clipData === null || !root.clipData.still
                             label: qsTr("Speed")
                             from: 0.25; to: 4; resetValue: 1; stepSize: 0.05
                             value: root.clipData ? root.clipData.speed : 1
@@ -109,6 +135,7 @@ Rectangle {
                             Button {
                                 Layout.fillWidth: true
                                 text: qsTr("Cut silences")
+                                visible: root.clipData === null || !root.clipData.still
                                 enabled: root.clipData !== null && root.clipData.audio && !backend.busy
                                 onClicked: backend.cutSilences(root.selectedClip)
                             }
@@ -138,7 +165,7 @@ Rectangle {
                         Layout.leftMargin: 18
                         Layout.rightMargin: 18
                         Layout.fillWidth: true
-                        text: qsTr("Add Clips")
+                        text: qsTr("Add Videos or Photos")
                         onClicked: backend.addMedia()
                     }
                 }

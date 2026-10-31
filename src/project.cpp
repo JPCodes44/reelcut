@@ -20,6 +20,17 @@ QString loadPath(const QString &path, const QString &baseDir) {
 }
 }  // namespace
 
+QStringList Clip::motions() {
+    return {"none", "zoom-in", "zoom-out", "pan-left", "pan-right"};
+}
+
+QVector<double> Project::clipStarts() const {
+    QVector<double> starts{0.0};
+    for (const Clip &clip : clips)
+        starts.append(starts.last() + clip.duration());
+    return starts;
+}
+
 double Project::duration() const {
     double total = 0.0;
     for (const Clip &clip : clips)
@@ -90,6 +101,7 @@ QJsonObject Project::toJson(const QString &baseDir) const {
             {"path", storePath(c.path, baseDir)}, {"in", c.in}, {"out", c.out}, {"speed", c.speed},
             {"zoom", c.zoom}, {"panX", c.panX}, {"panY", c.panY}, {"width", c.width},
             {"height", c.height}, {"audio", c.audio}, {"sourceDuration", c.sourceDuration},
+            {"still", c.still}, {"motion", c.motion},
         });
     }
     QJsonArray overlayArray;
@@ -135,6 +147,13 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
         c.height = o.value("height").toInt();
         c.audio = o.value("audio").toBool(true);
         c.sourceDuration = o.value("sourceDuration").toDouble(c.out);
+        c.still = o.value("still").toBool(false);
+        c.motion = Clip::motions().contains(o.value("motion").toString()) ? o.value("motion").toString() : "none";
+        if (c.still) {
+            c.audio = false;
+            c.speed = 1.0;
+            c.sourceDuration = Clip::MaxPhotoSeconds;
+        }
         if (c.out > c.in)
             p.clips.append(c);
     }
@@ -174,6 +193,13 @@ bool Project::setClipValue(int index, const QString &key, double value) {
     if (index < 0 || index >= clips.size())
         return false;
     Clip &c = clips[index];
+    if (key == "duration") {
+        // Photos have no source length; their duration is simply how long they show.
+        c.out = c.in + qBound(kMinClip * c.speed, value * c.speed, (c.sourceDuration > 0 ? c.sourceDuration : c.out) - c.in);
+        return true;
+    }
+    if (c.still && key == "speed")
+        return false;
     // Never shorter than a frame, never past the source.
     if (key == "in")
         c.in = qBound(0.0, value, c.out - kMinClip);
@@ -189,6 +215,13 @@ bool Project::setClipValue(int index, const QString &key, double value) {
         c.panY = qBound(-1.0, value, 1.0);
     else
         return false;
+    return true;
+}
+
+bool Project::setClipMotion(int index, const QString &motion) {
+    if (index < 0 || index >= clips.size() || !Clip::motions().contains(motion))
+        return false;
+    clips[index].motion = motion;
     return true;
 }
 

@@ -130,8 +130,9 @@ PortalFileFilter filter(const QString &name, const QStringList &mimes, const QSt
 PortalFileFilter filterFor(FilePicker::Kind kind) {
     switch (kind) {
     case FilePicker::Media:
-        return filter(QCoreApplication::translate("PortalFilePicker", "Video files"), {"video/*"},
-                      {"*.mp4", "*.mov", "*.m4v", "*.mkv", "*.webm", "*.avi"});
+        return filter(QCoreApplication::translate("PortalFilePicker", "Videos and photos"), {"video/*", "image/*"},
+                      {"*.mp4", "*.mov", "*.m4v", "*.mkv", "*.webm", "*.avi", "*.jpg", "*.jpeg", "*.png",
+                       "*.webp", "*.heic"});
     case FilePicker::Music:
         return filter(QCoreApplication::translate("PortalFilePicker", "Audio files"), {"audio/*"},
                       {"*.mp3", "*.m4a", "*.aac", "*.wav", "*.flac", "*.ogg", "*.opus"});
@@ -179,7 +180,7 @@ void PortalFilePicker::open(Kind kind) {
                    QVariant::fromValue(PortalFileFilters{primary, {tr("All files"), {{0, QStringLiteral("*")}}}}));
     options.insert(QStringLiteral("current_filter"), QVariant::fromValue(primary));
 
-    const QString title = kind == Media ? tr("Add Clips")
+    const QString title = kind == Media ? tr("Add Videos or Photos")
                         : kind == Music ? tr("Choose Music")
                         : kind == Lut ? tr("Choose LUT")
                         : tr("Open Project");

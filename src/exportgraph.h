@@ -32,6 +32,9 @@ QStringList frameArgs(const Project &project, const ExportOptions &options, doub
 // scale+crop that fills the 9:16 frame with a clip, honoring zoom and pan.
 QString framingFilter(const Clip &clip);
 
+// The slow zoom or pan over a photo, or empty for none (and for videos).
+QString motionFilter(const Clip &clip);
+
 // atempo stages for a speed; each stage only goes down to 0.5.
 QString atempoChain(double speed);
 

@@ -141,6 +141,15 @@ ApplicationWindow {
                     ToolButton { text: qsTr("Open"); onClicked: confirm.ask(qsTr("Open another project?"), function() { backend.open() }) }
                     ToolButton { text: qsTr("Save"); onClicked: backend.save() }
                     Button {
+                        text: qsTr("Photo Set")
+                        flat: true
+                        enabled: backend.clips.length > 0 && !backend.busy
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("One 1080×1920 JPG per clip, for TikTok photo posts")
+                        onClicked: backend.exportPhotos()
+                    }
+                    Button {
                         text: qsTr("Export")
                         highlighted: true
                         enabled: backend.clips.length > 0 && !backend.busy

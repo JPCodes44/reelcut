@@ -137,6 +137,19 @@ VideoInfo probe(const QString &path) {
 
     info.start = root.value("format").toObject().value("start_time").toString().toDouble();
 
+    // Photos come through ffmpeg's image demuxers (image2, png_pipe, ...) or
+    // as a single-frame stream; they play for as long as the edit says.
+    const QString format = root.value("format").toObject().value("format_name").toString();
+    if (format == "image2" || format.endsWith("_pipe") || stream.value("nb_frames").toString() == "1") {
+        info.still = true;
+        info.audio = false;
+        info.duration = 0.0;
+        info.ok = info.width > 0 && info.height > 0;
+        if (!info.ok)
+            info.error = "Could not read this image's size.";
+        return info;
+    }
+
     // Duration can live on the stream, on the container, or (for streamed
     // WebM captures) only on the last video packet.
     QString durationStr = stream.value("duration").toString();
@@ -164,17 +177,15 @@ QImage thumbnail(const QString &path, double time, int height,
     if (ffmpeg.isEmpty())
         return {};
 
+    // Seeking a single image, even to 0, drops its only frame, so the first
+    // frame (and every photo) is read without a seek.
+    QStringList args{"-loglevel", "error"};
+    if (time > 0.0)
+        args << "-ss" << QString::number(time, 'f', 3);
+    args << "-i" << path << "-frames:v" << "1" << "-vf" << QString("scale=-1:%1").arg(height)
+         << "-f" << "image2pipe" << "-vcodec" << "mjpeg" << "pipe:1";
     QProcess proc;
-    proc.start(ffmpeg, {
-        "-loglevel", "error",
-        "-ss", QString::number(qMax(time, 0.0), 'f', 3),
-        "-i", path,
-        "-frames:v", "1",
-        "-vf", QString("scale=-1:%1").arg(height),
-        "-f", "image2pipe",
-        "-vcodec", "mjpeg",
-        "pipe:1",
-    });
+    proc.start(ffmpeg, args);
 
     // Poll instead of waitForFinished(-1) so a stop request can kill the child
     // promptly — otherwise a worker thread would block until ffmpeg finishes
@@ -199,6 +210,24 @@ QImage thumbnail(const QString &path, double time, int height,
     QImage img;
     img.loadFromData(data, "JPEG");
     return img;
+}
+
+Clip clipFor(const VideoInfo &info, double photoSeconds) {
+    Clip clip;
+    clip.path = info.path;
+    clip.width = info.width;
+    clip.height = info.height;
+    clip.still = info.still;
+    clip.audio = info.audio && !info.still;
+    if (info.still) {
+        clip.sourceDuration = Clip::MaxPhotoSeconds;
+        clip.out = qBound(0.5, photoSeconds, Clip::MaxPhotoSeconds);
+        clip.motion = "zoom-in";
+    } else {
+        clip.sourceDuration = info.duration;
+        clip.out = info.duration;
+    }
+    return clip;
 }
 
 }  // namespace media

@@ -448,6 +448,84 @@ private slots:
         QCOMPARE(out.height, 1920);
     }
 
+    // Photos
+
+    void photosBecomeTimedSlides()
+    {
+        QTemporaryDir dir;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1600x1200",
+                           "-frames:v", "1", dir.filePath("a.jpg")}));
+        const media::VideoInfo info = media::probe(dir.filePath("a.jpg"));
+        QVERIFY2(info.ok, qPrintable(info.error));
+        QVERIFY(info.still);
+        QVERIFY(!info.audio);
+        // Timeline thumbnails of photos come from frame 0.
+        QVERIFY(!media::thumbnail(dir.filePath("a.jpg"), 0.0, 90).isNull());
+        const Clip clip = media::clipFor(info, 3.0);
+        QVERIFY(clip.still);
+        QCOMPARE(clip.duration(), 3.0);
+        QCOMPARE(clip.motion, QString("zoom-in"));
+
+        Project p;
+        p.clips = {clip};
+        QVERIFY(p.setClipValue(0, "duration", 4.5));
+        QCOMPARE(p.clips[0].duration(), 4.5);
+        QVERIFY(!p.setClipValue(0, "speed", 2.0));
+        QVERIFY(p.setClipMotion(0, "pan-left"));
+        QVERIFY(!p.setClipMotion(0, "spin"));
+        const Project back = Project::fromJson(p.toJson());
+        QVERIFY(back.clips[0].still);
+        QCOMPARE(back.clips[0].motion, QString("pan-left"));
+        QCOMPARE(back.clips[0].duration(), 4.5);
+    }
+
+    void motionFilterMovesPhotosOnly()
+    {
+        Clip photo = clip(0, 2);
+        photo.still = true;
+        photo.motion = "zoom-in";
+        QVERIFY(motionFilter(photo).contains("zoompan=z='1+0.12*on/60'"));
+        QVERIFY(motionFilter(photo).contains("s=1080x1920"));
+        photo.motion = "pan-right";
+        QVERIFY(motionFilter(photo).contains("x='(iw-iw/zoom)*on/60'"));
+        photo.motion = "none";
+        QVERIFY(motionFilter(photo).isEmpty());
+        QVERIFY(motionFilter(clip(0, 2)).isEmpty());
+    }
+
+    void exportsASlideshowAndAPhotoSet()
+    {
+        QTemporaryDir dir;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1600x1200",
+                           "-frames:v", "1", dir.filePath("wide.jpg")}));
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "mandelbrot=size=1080x1350",
+                           "-frames:v", "1", dir.filePath("tall.png")}));
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=640x360:rate=30:duration=2", "-f", "lavfi", "-i",
+                           "sine=frequency=440:duration=2", "-shortest", "-c:v", "libx264", "-c:a", "aac",
+                           dir.filePath("video.mp4")}));
+        Project p;
+        p.clips = {media::clipFor(media::probe(dir.filePath("wide.jpg")), 2.0),
+                   media::clipFor(media::probe(dir.filePath("tall.png")), 1.5),
+                   media::clipFor(media::probe(dir.filePath("video.mp4")))};
+        p.clips[1].motion = "pan-right";
+        p.overlays = {{"Slide one", 0, 2, 0.2, 96, "pop"}};
+
+        QString encoder, error;
+        QVERIFY2(exportProject(p, "#FFD60A", dir.filePath("show.mp4"), &encoder, &error), qPrintable(error));
+        const media::VideoInfo out = media::probe(dir.filePath("show.mp4"));
+        QCOMPARE(out.width, 1080);
+        QCOMPARE(out.height, 1920);
+        QVERIFY(out.audio);
+        QVERIFY2(qAbs(out.duration - 5.5) < 0.15, qPrintable(QString::number(out.duration)));
+
+        const QStringList files = exportPhotoSet(p, "#FFD60A", dir.filePath("set"), &error);
+        QVERIFY2(files.size() == 3, qPrintable(error));
+        QCOMPARE(QFileInfo(files[0]).fileName(), QString("01.jpg"));
+        QImage first(files[0]);
+        QCOMPARE(first.size(), QSize(1080, 1920));
+    }
+
     // MCP server
 
     void mcpSpeaksTheProtocol()
@@ -537,6 +615,36 @@ private slots:
         QCOMPARE(info.value("output").toString(), dir.filePath("demo-tiktok.mp4"));
         QCOMPARE(info.value("size").toString(), QString("1080x1920"));
         QVERIFY(qAbs(info.value("duration").toDouble() - 3.0) < 0.15);
+    }
+
+    void mcpBuildsAPhotoSlideshow()
+    {
+        QTemporaryDir dir, state;
+        QStringList photos;
+        for (int i = 0; i < 3; ++i) {
+            photos << dir.filePath(QString("p%1.jpg").arg(i));
+            QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                               QString("color=c=0x%1:size=1200x1600").arg(i == 0 ? "aa3333" : i == 1 ? "33aa33" : "3333aa"),
+                               "-frames:v", "1", photos.last()}));
+        }
+        McpServer server(state.path());
+        QVERIFY(!call(server, "create_project", {{"path", dir.filePath("slides")}}).value("isError").toBool());
+        QJsonObject r = call(server, "add_clips", {{"files", QJsonArray::fromStringList(photos)}, {"photo_seconds", 2.0},
+                                                   {"motion", "none"}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+        QVERIFY(!call(server, "edit_clip", {{"index", 1}, {"duration", 3.0}, {"motion", "zoom-out"}}).value("isError").toBool());
+        QVERIFY(!call(server, "add_text", {{"text", "my handwriting\nthen vs now"}, {"end", 2.0}}).value("isError").toBool());
+
+        const QJsonObject summary = QJsonDocument::fromJson(textOf(call(server, "get_project", {})).toUtf8()).object();
+        QCOMPARE(summary.value("duration").toDouble(), 7.0);
+        QVERIFY(summary.value("clips").toArray().at(0).toObject().value("photo").toBool());
+        QCOMPARE(summary.value("clips").toArray().at(1).toObject().value("motion").toString(), QString("zoom-out"));
+
+        const QJsonObject set = call(server, "export_photos", {});
+        QVERIFY2(!set.value("isError").toBool(), qPrintable(textOf(set)));
+        const QJsonObject result = QJsonDocument::fromJson(textOf(set).toUtf8()).object();
+        QCOMPARE(result.value("files").toArray().size(), 3);
+        QVERIFY(QFileInfo::exists(dir.filePath("slides-photos/03.jpg")));
     }
 
     void windowFollowsEditsMadeElsewhere()

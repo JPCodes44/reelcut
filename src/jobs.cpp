@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QEventLoop>
 #include <QFileInfo>
+#include <QImage>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QStandardPaths>
@@ -287,4 +288,36 @@ QByteArray renderFrame(const Project &project, const QString &accent, double tim
         return {};
     }
     return file.readAll();
+}
+
+QStringList exportPhotoSet(const Project &project, const QString &accent, const QString &folder, QString *error) {
+    if (project.clips.isEmpty()) {
+        *error = QObject::tr("The project has no clips.");
+        return {};
+    }
+    // A photo post doesn't move, so every photo is framed as it starts.
+    Project still = project;
+    for (Clip &clip : still.clips)
+        clip.motion = "none";
+    if (!QDir().mkpath(folder)) {
+        *error = QObject::tr("Could not create %1.").arg(folder);
+        return {};
+    }
+    const QVector<double> starts = still.clipStarts();
+    QStringList files;
+    for (int i = 0; i < still.clips.size(); ++i) {
+        // Late enough for text to have finished its entrance.
+        const double time = starts[i] + qMin(0.4, still.clips[i].duration() / 2);
+        const QByteArray png = renderFrame(still, accent, time, Project::Width, error);
+        QImage image;
+        if (png.isEmpty() || !image.loadFromData(png, "PNG"))
+            return {};
+        const QString file = QDir(folder).filePath(QString("%1.jpg").arg(i + 1, 2, 10, QChar('0')));
+        if (!image.save(file, "JPG", 95)) {
+            *error = QObject::tr("Could not write %1.").arg(file);
+            return {};
+        }
+        files.append(file);
+    }
+    return files;
 }

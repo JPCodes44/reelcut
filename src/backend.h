@@ -103,6 +103,7 @@ public:
     Q_INVOKABLE bool split(double time);
     // in, out, speed, zoom, panX, panY; values are clamped to what makes sense
     Q_INVOKABLE void setClipValue(int index, const QString &key, double value);
+    Q_INVOKABLE void setClipMotion(int index, const QString &motion);
     Q_INVOKABLE QVariantMap locate(double time) const;
     Q_INVOKABLE void cutSilences(int index);
 
@@ -135,6 +136,8 @@ public:
     Q_INVOKABLE void save();
     Q_INVOKABLE void saveAs();
     Q_INVOKABLE void exportVideo();
+    // A photo set for TikTok's photo mode, one JPG per clip, in ~/Videos.
+    Q_INVOKABLE void exportPhotos();
     Q_INVOKABLE void cancelJob();
     Q_INVOKABLE void dismissMessage();
     Q_INVOKABLE void showExport();

@@ -6,6 +6,7 @@ Make vertical reels for Instagram and TikTok on Omarchy: cut your clips, caption
 
 ## What it does
 
+- **Photos and slideshows**: drop in photos (JPG, PNG, WebP, HEIC) and they become slides with a duration and an optional slow zoom or pan. Export the slideshow as a video, or as a **photo set** for TikTok photo posts: one 1080×1920 JPG per slide with the text and look drawn in, numbered in order. Post the set in TikTok's photo mode and pick the sound in the app (TikTok's library sounds can only be added there).
 - **Cut**: drop in videos, split at the playhead, trim with the handles, reorder, change speed from 0.25× to 4×.
 - **Frame**: every clip fills the 9:16 frame; zoom and pan landscape footage to pick what shows.
 - **Cut silences**: one click removes the pauses from a talking clip.
@@ -71,13 +72,14 @@ Then ask for things like "make a reel from these three clips, cut the silences, 
 | Tool | What it does |
 | --- | --- |
 | `create_project`, `open_project`, `get_project`, `probe_media`, `set_platform` | Projects and media |
-| `add_clips`, `delete_clip`, `move_clip`, `split`, `edit_clip`, `cut_silences` | Cutting, trimming, speed, framing |
+| `add_clips`, `delete_clip`, `move_clip`, `split`, `edit_clip`, `cut_silences` | Cutting, trimming, speed, framing, photo duration and motion |
 | `transcribe`, `set_captions`, `edit_words` | Captions |
 | `add_text`, `edit_text`, `remove_text` | Text overlays |
 | `set_look`, `set_music` | Color, LUTs, music |
 | `undo`, `redo` | History |
 | `preview_frame` | A PNG of the finished frame at any time |
 | `export` | The MP4 |
+| `export_photos` | A photo set for TikTok photo posts |
 | `show_in_app` | Opens the project in the window |
 
 ## Development

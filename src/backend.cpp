@@ -85,6 +85,7 @@ QVariantList Backend::clips() const {
             {"width", c.width}, {"height", c.height}, {"audio", c.audio},
             {"sourceDuration", c.sourceDuration}, {"start", start}, {"duration", c.duration()},
             {"thumb", m_thumbKeys.value(c.path, -1)}, {"offline", !QFileInfo::exists(c.path)},
+            {"still", c.still}, {"motion", c.motion},
         });
         start += c.duration();
     }
@@ -218,14 +219,7 @@ void Backend::addUrls(const QList<QUrl> &urls) {
             if (!added)
                 checkpoint();
             added = true;
-            Clip clip;
-            clip.path = info.path;
-            clip.in = 0.0;
-            clip.out = info.duration;
-            clip.sourceDuration = info.duration;
-            clip.width = info.width;
-            clip.height = info.height;
-            clip.audio = info.audio;
+            const Clip clip = media::clipFor(info);
             thumbKey(info.path);
             m_project.clips.append(clip);
         }
@@ -283,6 +277,47 @@ bool Backend::split(double time) {
 void Backend::setClipValue(int index, const QString &key, double value) {
     if (m_project.setClipValue(index, key, value))
         changed();
+}
+
+void Backend::setClipMotion(int index, const QString &motion) {
+    if (index < 0 || index >= m_project.clips.size() || m_project.clips[index].motion == motion)
+        return;
+    checkpoint();
+    if (m_project.setClipMotion(index, motion))
+        changed();
+}
+
+void Backend::exportPhotos() {
+    if (busy())
+        return;
+    if (m_project.clips.isEmpty()) {
+        setMessage(tr("Add a clip first."), true);
+        return;
+    }
+    QString parent = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+    if (!QDir(parent).exists())
+        parent = QDir::homePath();
+    const QString folder = freePath(parent, title() + "-photos", QString());
+    const Project project = m_project;
+    const QString accent = m_theme ? m_theme->accent() : "#FFD60A";
+    setBusy(tr("Rendering photos…"));
+    auto *watcher = new QFutureWatcher<QPair<QStringList, QString>>(this);
+    connect(watcher, &QFutureWatcher<QPair<QStringList, QString>>::finished, this, [this, watcher, folder] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        clearBusy();
+        if (result.first.isEmpty()) {
+            setMessage(result.second, true);
+            return;
+        }
+        m_lastExport = result.first.first();
+        setMessage(tr("Saved %n photos to %1.", "", result.first.size()).arg(QFileInfo(folder).fileName()), false);
+    });
+    watcher->setFuture(QtConcurrent::run([project, accent, folder] {
+        QString error;
+        const QStringList files = exportPhotoSet(project, accent, folder, &error);
+        return qMakePair(files, error);
+    }));
 }
 
 QVariantMap Backend::locate(double time) const {

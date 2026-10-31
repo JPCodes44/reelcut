@@ -19,6 +19,8 @@ Rectangle {
     property var currentClip: clipIndex >= 0 && clipIndex < backend.clips.length ? backend.clips[clipIndex] : null
     // Where to seek once a newly set source has loaded, in milliseconds.
     property real pendingSeek: -1
+    // Wall-clock time of the last tick, for advancing through photos.
+    property real lastTick: 0
     signal timeAdvanced(real t)
 
     function seek(t) {
@@ -29,13 +31,21 @@ Rectangle {
             player.source = ""
             return
         }
-        load(backend.clips[at.index].path, at.source)
+        load(backend.clips[at.index], at.source)
         music.sync(t)
     }
     function refresh() { seek(time) }
-    function load(path, sourceSeconds) {
-        const url = "file://" + path
-        player.playbackRate = currentClip ? currentClip.speed : 1
+    function load(c, sourceSeconds) {
+        // Photos have no player; the timer moves through them by the clock.
+        if (c.still) {
+            pendingSeek = -1
+            player.stop()
+            player.source = ""
+            lastTick = Date.now()
+            return
+        }
+        const url = "file://" + c.path
+        player.playbackRate = c.speed
         if (player.source.toString() !== encodeURI(url) && player.source.toString() !== url) {
             pendingSeek = sourceSeconds * 1000
             player.source = url
@@ -49,7 +59,8 @@ Rectangle {
         if (backend.clips.length === 0) return
         if (time >= backend.duration - 0.05) { timeAdvanced(0); seek(0) }
         playing = true
-        player.play()
+        lastTick = Date.now()
+        if (!(currentClip && currentClip.still)) player.play()
         music.sync(time)
     }
     function pause() {
@@ -90,9 +101,18 @@ Rectangle {
         onTriggered: {
             const c = root.currentClip
             if (!c || root.pendingSeek >= 0) return
-            const source = player.position / 1000
-            const t = c.start + Math.max(0, source - c.in) / c.speed
-            if (source >= c.out - 0.02 || player.mediaStatus === MediaPlayer.EndOfMedia) {
+            const now = Date.now()
+            let t, done
+            if (c.still) {
+                t = root.time + (now - root.lastTick) / 1000
+                done = t >= c.start + c.duration
+            } else {
+                const source = player.position / 1000
+                t = c.start + Math.max(0, source - c.in) / c.speed
+                done = source >= c.out - 0.02 || player.mediaStatus === MediaPlayer.EndOfMedia
+            }
+            root.lastTick = now
+            if (done) {
                 const next = root.clipIndex + 1
                 if (next >= backend.clips.length) {
                     root.pause()
@@ -100,7 +120,8 @@ Rectangle {
                     return
                 }
                 root.clipIndex = next
-                root.load(backend.clips[next].path, backend.clips[next].in)
+                root.load(backend.clips[next], backend.clips[next].in)
+                if (!backend.clips[next].still) player.play()
                 root.timeAdvanced(backend.clips[next].start)
                 return
             }
@@ -128,27 +149,55 @@ Rectangle {
                 color: "black"
                 clip: true
 
+                // A photo's slow zoom or pan, the same moves as motionFilter().
                 Item {
-                    id: framed
+                    id: mover
+                    width: frame.width
+                    height: frame.height
                     readonly property var c: root.currentClip
-                    readonly property real srcW: c && c.width > 0 ? c.width : 1080
-                    readonly property real srcH: c && c.height > 0 ? c.height : 1920
-                    // Same math as framingFilter(): cover, zoom, then pan the crop.
-                    readonly property real s: Math.max(frame.width / srcW, frame.height / srcH) * (c ? c.zoom : 1)
-                    width: srcW * s
-                    height: srcH * s
-                    x: -(width - frame.width) * ((c ? c.panX : 0) + 1) / 2
-                    y: -(height - frame.height) * ((c ? c.panY : 0) + 1) / 2
+                    readonly property string motion: c && c.still ? c.motion : "none"
+                    readonly property real p: c && c.duration > 0 ? Math.max(0, Math.min(1, (root.time - c.start) / c.duration)) : 0
+                    readonly property real zoomLevel: motion === "zoom-in" ? 1 + 0.12 * p
+                                            : motion === "zoom-out" ? 1.12 - 0.12 * p
+                                            : motion === "pan-left" || motion === "pan-right" ? 1.12 : 1
+                    readonly property real across: motion === "pan-right" ? p : motion === "pan-left" ? 1 - p : 0.5
+                    transform: [
+                        Scale { xScale: mover.zoomLevel; yScale: mover.zoomLevel },
+                        Translate { x: -(mover.zoomLevel - 1) * frame.width * mover.across; y: -(mover.zoomLevel - 1) * frame.height / 2 }
+                    ]
 
-                    VideoOutput {
-                        id: video
-                        anchors.fill: parent
-                        fillMode: VideoOutput.Stretch
+                    Item {
+                        id: framed
+                        readonly property var c: root.currentClip
+                        readonly property real srcW: c && c.width > 0 ? c.width : 1080
+                        readonly property real srcH: c && c.height > 0 ? c.height : 1920
+                        // Same math as framingFilter(): cover, zoom, then pan the crop.
+                        readonly property real s: Math.max(frame.width / srcW, frame.height / srcH) * (c ? c.zoom : 1)
+                        width: srcW * s
+                        height: srcH * s
+                        x: -(width - frame.width) * ((c ? c.panX : 0) + 1) / 2
+                        y: -(height - frame.height) * ((c ? c.panY : 0) + 1) / 2
                         layer.enabled: true
                         layer.effect: MultiEffect {
                             brightness: backend.look.exposure * 0.25
                             contrast: backend.look.contrast * 0.5
                             saturation: backend.look.saturation
+                        }
+
+                        VideoOutput {
+                            id: video
+                            anchors.fill: parent
+                            fillMode: VideoOutput.Stretch
+                            visible: !(framed.c && framed.c.still)
+                        }
+                        Image {
+                            anchors.fill: parent
+                            visible: framed.c !== null && framed.c.still
+                            source: visible ? "file://" + framed.c.path : ""
+                            fillMode: Image.Stretch
+                            asynchronous: true
+                            autoTransform: true
+                            sourceSize.width: 2160
                         }
                     }
                 }
@@ -212,12 +261,12 @@ Rectangle {
                 spacing: 14
                 Label {
                     Layout.alignment: Qt.AlignHCenter
-                    text: qsTr("Drop videos here to start a reel")
+                    text: qsTr("Drop videos or photos here to start a reel")
                     font.pixelSize: 20
                 }
                 Button {
                     Layout.alignment: Qt.AlignHCenter
-                    text: qsTr("Add Clips")
+                    text: qsTr("Add Videos or Photos")
                     highlighted: true
                     Material.foreground: theme.accentForeground
                     onClicked: backend.addMedia()
