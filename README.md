@@ -58,6 +58,28 @@ reelcut my.reel                    # open a project
 reelcut export my.reel out.mp4     # render without the window (add --json for scripts)
 ```
 
+## Let an AI agent edit with you (MCP)
+
+`reelcut mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server with every editing feature as a tool. Add it to Claude Code:
+
+```sh
+claude mcp add reelcut --scope user -- reelcut mcp
+```
+
+Then ask for things like "make a reel from these three clips, cut the silences, caption it in pop style, add a hook that says *POV: you edit on Linux*, warm look, export for TikTok". Each edit is saved to the `.reel` file at once, and if that project is open in the Reelcut window it updates live (Ctrl+Z in the window undoes an outside edit). `open_project` with no path picks up whatever the window has open.
+
+| Tool | What it does |
+| --- | --- |
+| `create_project`, `open_project`, `get_project`, `probe_media`, `set_platform` | Projects and media |
+| `add_clips`, `delete_clip`, `move_clip`, `split`, `edit_clip`, `cut_silences` | Cutting, trimming, speed, framing |
+| `transcribe`, `set_captions`, `edit_words` | Captions |
+| `add_text`, `edit_text`, `remove_text` | Text overlays |
+| `set_look`, `set_music` | Color, LUTs, music |
+| `undo`, `redo` | History |
+| `preview_frame` | A PNG of the finished frame at any time |
+| `export` | The MP4 |
+| `show_in_app` | Opens the project in the window |
+
 ## Development
 
 ```sh

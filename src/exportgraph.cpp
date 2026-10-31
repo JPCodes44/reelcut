@@ -11,7 +11,7 @@ int even(double value) {
 }
 
 // One clip's video and audio chains, labelled [v<i>] and [a<i>].
-QStringList clipChains(const Project &project, bool withVideo, const QString &audioFormat) {
+QStringList clipChains(const Project &project, bool withVideo, bool withAudio, const QString &audioFormat) {
     QStringList chains;
     for (int i = 0; i < project.clips.size(); ++i) {
         const Clip &c = project.clips[i];
@@ -21,6 +21,8 @@ QStringList clipChains(const Project &project, bool withVideo, const QString &au
                           .arg(i).arg(num(c.in), num(c.out), num(c.speed, 4), framingFilter(c))
                           .arg(Project::Fps);
         }
+        if (!withAudio)
+            continue;
         if (c.audio) {
             QString chain = QString("[%1:a]atrim=start=%2:end=%3,asetpts=PTS-STARTPTS")
                                 .arg(i).arg(num(c.in), num(c.out));
@@ -37,11 +39,28 @@ QStringList clipChains(const Project &project, bool withVideo, const QString &au
     return chains;
 }
 
-QString concatInputs(int count, bool withVideo) {
+QString concatInputs(int count, bool withVideo, bool withAudio) {
     QString inputs;
     for (int i = 0; i < count; ++i)
-        inputs += withVideo ? QString("[v%1][a%1]").arg(i) : QString("[a%1]").arg(i);
+        inputs += (withVideo ? QString("[v%1]").arg(i) : QString()) + (withAudio ? QString("[a%1]").arg(i) : QString());
     return inputs;
+}
+
+// The look, then the LUT on top of it, then text, which must stay white.
+QString videoFinish(const Project &project, const ExportOptions &options) {
+    QStringList video;
+    const Look &look = project.look;
+    if (!look.isNeutral()) {
+        video << QString("eq=brightness=%1:contrast=%2:saturation=%3")
+                     .arg(num(look.exposure * 0.25), num(1.0 + look.contrast * 0.5), num(1.0 + look.saturation));
+        if (look.temperature != 0.0)
+            video << QString("colortemperature=temperature=%1").arg(qRound(6500 - look.temperature * 2500));
+    }
+    if (!options.lutFile.isEmpty())
+        video << QString("lut3d=file=%1").arg(options.lutFile);
+    if (!options.assFile.isEmpty())
+        video << QString("ass=filename=%1").arg(options.assFile);
+    return "[vcat]" + (video.isEmpty() ? QString("null") : video.join(',')) + "[vout]";
 }
 
 QStringList clipInputs(const Project &project) {
@@ -95,23 +114,9 @@ QStringList exportArgs(const Project &project, const ExportOptions &options) {
     if (project.music.isSet())
         args << "-i" << project.music.path;
 
-    QStringList graph = clipChains(project, true, kAudioFormat);
-    graph << concatInputs(n, true) + QString("concat=n=%1:v=1:a=1[vcat][acat]").arg(n);
-
-    // The look, then the LUT on top of it, then text, which must stay white.
-    QStringList video;
-    const Look &look = project.look;
-    if (!look.isNeutral()) {
-        video << QString("eq=brightness=%1:contrast=%2:saturation=%3")
-                     .arg(num(look.exposure * 0.25), num(1.0 + look.contrast * 0.5), num(1.0 + look.saturation));
-        if (look.temperature != 0.0)
-            video << QString("colortemperature=temperature=%1").arg(qRound(6500 - look.temperature * 2500));
-    }
-    if (!options.lutFile.isEmpty())
-        video << QString("lut3d=file=%1").arg(options.lutFile);
-    if (!options.assFile.isEmpty())
-        video << QString("ass=filename=%1").arg(options.assFile);
-    graph << "[vcat]" + (video.isEmpty() ? QString("null") : video.join(',')) + "[vout]";
+    QStringList graph = clipChains(project, true, true, kAudioFormat);
+    graph << concatInputs(n, true, true) + QString("concat=n=%1:v=1:a=1[vcat][acat]").arg(n);
+    graph << videoFinish(project, options);
 
     QString voice = "[acat]";
     if (project.music.isSet()) {
@@ -151,8 +156,23 @@ QStringList timelineAudioArgs(const Project &project, const QString &wav) {
     const int n = project.clips.size();
     QStringList args{"-hide_banner", "-nostdin", "-y", "-progress", "pipe:1", "-nostats"};
     args << clipInputs(project);
-    QStringList graph = clipChains(project, false, mono);
-    graph << concatInputs(n, false) + QString("concat=n=%1:v=0:a=1[aout]").arg(n);
+    QStringList graph = clipChains(project, false, true, mono);
+    graph << concatInputs(n, false, true) + QString("concat=n=%1:v=0:a=1[aout]").arg(n);
     args << "-filter_complex" << graph.join(';') << "-map" << "[aout]" << "-c:a" << "pcm_s16le" << wav;
+    return args;
+}
+
+QStringList frameArgs(const Project &project, const ExportOptions &options, double time, const QString &png, int width) {
+    const int n = project.clips.size();
+    QStringList args{"-hide_banner", "-nostdin", "-y", "-loglevel", "error"};
+    args << clipInputs(project);
+    QStringList graph = clipChains(project, true, false, {});
+    graph << concatInputs(n, true, false) + QString("concat=n=%1:v=1:a=0[vcat]").arg(n);
+    graph << videoFinish(project, options);
+    graph.last().replace("[vout]", QString(",scale=%1:-2[vout]").arg(width));
+    // Seeking the output keeps every filter's timing (captions, speed) exact.
+    args << "-filter_complex" << graph.join(';') << "-map" << "[vout]"
+         << "-ss" << num(qBound(0.0, time, qMax(0.0, project.duration() - 1.0 / Project::Fps)))
+         << "-frames:v" << "1" << png;
     return args;
 }

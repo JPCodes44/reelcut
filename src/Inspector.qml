@@ -416,24 +416,15 @@ Rectangle {
                             columnSpacing: 6
                             Repeater {
                                 model: [
-                                    { label: qsTr("Natural"), e: 0, c: 0, s: 0, t: 0 },
-                                    { label: qsTr("Warm"), e: 0.05, c: 0.1, s: 0.1, t: 0.4 },
-                                    { label: qsTr("Cool"), e: 0, c: 0.1, s: 0, t: -0.4 },
-                                    { label: qsTr("Punchy"), e: 0.05, c: 0.35, s: 0.35, t: 0 },
-                                    { label: qsTr("Film"), e: -0.05, c: 0.2, s: -0.25, t: 0.15 },
-                                    { label: qsTr("Mono"), e: 0, c: 0.25, s: -1, t: 0 }
+                                    { id: "Natural", label: qsTr("Natural") }, { id: "Warm", label: qsTr("Warm") },
+                                    { id: "Cool", label: qsTr("Cool") }, { id: "Punchy", label: qsTr("Punchy") },
+                                    { id: "Film", label: qsTr("Film") }, { id: "Mono", label: qsTr("Mono") }
                                 ]
                                 delegate: Button {
                                     required property var modelData
                                     Layout.fillWidth: true
                                     text: modelData.label
-                                    onClicked: {
-                                        backend.checkpoint()
-                                        backend.setLookValue("exposure", modelData.e)
-                                        backend.setLookValue("contrast", modelData.c)
-                                        backend.setLookValue("saturation", modelData.s)
-                                        backend.setLookValue("temperature", modelData.t)
-                                    }
+                                    onClicked: backend.applyPreset(modelData.id)
                                 }
                             }
                         }

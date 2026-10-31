@@ -20,6 +20,7 @@
 
 #include "backend.h"
 #include "jobs.h"
+#include "mcpserver.h"
 #include "portalfilepicker.h"
 #include "theme.h"
 #include "thumbprovider.h"
@@ -30,6 +31,7 @@ const char *kUsage =
     "Usage:\n"
     "  reelcut [FILE...]                    open the editor, with a project or clips\n"
     "  reelcut export PROJECT.reel OUT.mp4  render a project without the window\n"
+    "  reelcut mcp                          serve the Model Context Protocol on stdio\n"
     "  reelcut help                         show this help\n"
     "\n"
     "Add --json to export for a machine-readable result.\n";
@@ -66,42 +68,29 @@ int exportCommand(const QStringList &args) {
         if (!QFileInfo::exists(clip.path))
             return fail(QString("%1 is missing").arg(clip.path));
 
-    QTemporaryDir work;
-    QString error;
-    ExportOptions options = prepareExport(project, Theme().accent(), work.path(), output, &error);
-    if (!error.isEmpty())
+    QString encoder, error;
+    if (!exportProject(project, Theme().accent(), output, &encoder, &error))
         return fail(error);
-
-    QByteArray errors;
-    for (const QString encoder : {"h264_nvenc", "libx264"}) {
-        options.encoder = encoder;
-        QProcess ffmpeg;
-        ffmpeg.setWorkingDirectory(work.path());
-        ffmpeg.start("ffmpeg", exportArgs(project, options));
-        if (ffmpeg.waitForFinished(-1) && ffmpeg.exitStatus() == QProcess::NormalExit && ffmpeg.exitCode() == 0) {
-            if (json)
-                out << QJsonDocument(QJsonObject{{"ok", true}, {"output", output}, {"encoder", encoder},
-                                                 {"duration", project.duration()}})
-                           .toJson(QJsonDocument::Compact)
-                    << "\n";
-            else
-                out << "Exported " << output << "\n";
-            return 0;
-        }
-        errors = ffmpeg.readAllStandardError();
-    }
-    QFile::remove(output);
-    return fail("ffmpeg failed:\n" + tail(errors, 15));
+    if (json)
+        out << QJsonDocument(QJsonObject{{"ok", true}, {"output", output}, {"encoder", encoder},
+                                         {"duration", project.duration()}})
+                   .toJson(QJsonDocument::Compact)
+            << "\n";
+    else
+        out << "Exported " << output << "\n";
+    return 0;
 }
 }  // namespace
 
 int main(int argc, char *argv[]) {
     const QString command = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QString();
-    if (command == "export" || command == "help" || command == "--help" || command == "-h") {
+    if (command == "export" || command == "mcp" || command == "help" || command == "--help" || command == "-h") {
         QCoreApplication app(argc, argv);
         app.setApplicationName("reelcut");
         if (command == "export")
             return exportCommand(app.arguments().mid(2));
+        if (command == "mcp")
+            return McpServer().run();
         QTextStream(stdout) << kUsage;
         return 0;
     }

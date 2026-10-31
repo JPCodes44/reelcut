@@ -1,9 +1,11 @@
 #pragma once
 
+#include <QFileSystemWatcher>
 #include <QHash>
 #include <QJsonObject>
 #include <QObject>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QUrl>
 #include <QVariant>
 #include <QVector>
@@ -53,7 +55,10 @@ class Backend : public QObject {
     Q_PROPERTY(QString whisperState READ whisperState NOTIFY jobChanged)
 
 public:
-    Backend(FilePicker *picker, ThumbProvider *thumbs, Theme *theme, QObject *parent = nullptr);
+    // stateDir is where the open project's path is recorded for `reelcut mcp`;
+    // tests pass a temp dir.
+    Backend(FilePicker *picker, ThumbProvider *thumbs, Theme *theme, QObject *parent = nullptr,
+            const QString &stateDir = {});
     ~Backend() override;
 
     QVariantList clips() const;
@@ -118,6 +123,7 @@ public:
     Q_INVOKABLE void removeMusic();
     Q_INVOKABLE void setMusicValue(const QString &key, const QVariant &value);
     Q_INVOKABLE void setLookValue(const QString &key, double value);
+    Q_INVOKABLE void applyPreset(const QString &name);
     Q_INVOKABLE void chooseLut();
     Q_INVOKABLE void clearLut();
     Q_INVOKABLE void setPlatform(const QString &platform);
@@ -149,6 +155,10 @@ private:
     int thumbKey(const QString &path);
     void runExport(const QString &output, const QString &encoder);
     void downloadModel();
+    // Follows the project file, so edits made elsewhere (the MCP server) show up.
+    void watchProject();
+    void reloadIfChangedOutside();
+    void recordOpenProject();
     void startTranscription();
 
     FilePicker *m_picker;
@@ -172,6 +182,11 @@ private:
     QString m_lastExport;
 
     QHash<QString, int> m_thumbKeys;
+    QString m_stateDir;
+    QFileSystemWatcher m_watcher;
+    QTimer *m_reloadDebounce = nullptr;
+    // The file as last read or written here; anything else on disk came from outside.
+    QByteArray m_onDisk;
     QNetworkAccessManager *m_network = nullptr;
     QNetworkReply *m_download = nullptr;
 };

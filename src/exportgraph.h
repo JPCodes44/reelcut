@@ -24,6 +24,11 @@ QStringList exportArgs(const Project &project, const ExportOptions &options);
 // transcription, so the words come back in timeline time.
 QStringList timelineAudioArgs(const Project &project, const QString &wav);
 
+// One finished frame at timeline `time` as a PNG `width` wide: everything the
+// export draws (framing, look, LUT, captions, text), without the audio.
+QStringList frameArgs(const Project &project, const ExportOptions &options, double time, const QString &png,
+                      int width = 540);
+
 // scale+crop that fills the 9:16 frame with a clip, honoring zoom and pan.
 QString framingFilter(const Clip &clip);
 

@@ -3,6 +3,7 @@
 #include <QJsonObject>
 #include <QPair>
 #include <QString>
+#include <QVariant>
 #include <QVector>
 
 // One stretch of a source video on the timeline. Times are in seconds of the
@@ -94,6 +95,17 @@ struct Project {
     // Replaces a clip with copies of it covering only the given source ranges,
     // so cutting silences keeps framing and speed.
     void replaceClipWithRanges(int index, const QVector<QPair<double, double>> &ranges);
+
+    // Edits with the same limits everywhere (the window, the MCP server).
+    // Each returns false for an unknown key or index; values are clamped.
+    bool setClipValue(int index, const QString &key, double value);
+    bool setOverlayValue(int index, const QString &key, const QVariant &value);
+    bool setLookValue(const QString &key, double value);
+    bool setMusicValue(const QString &key, const QVariant &value);
+    // Natural, Warm, Cool, Punchy, Film or Mono (any case); false if unknown.
+    bool applyPreset(const QString &name);
+    static QStringList presets();
+    int addOverlay(const QString &text, double start, double end = -1.0);
 
     // Paths are stored relative to the project file's folder, so a project
     // moved with its media still opens.

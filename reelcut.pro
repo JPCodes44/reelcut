@@ -10,6 +10,7 @@ HEADERS += \
     src/exportgraph.h \
     src/filepicker.h \
     src/jobs.h \
+    src/mcpserver.h \
     src/media.h \
     src/portalfilepicker.h \
     src/project.h \
@@ -25,6 +26,7 @@ SOURCES += \
     src/captions.cpp \
     src/exportgraph.cpp \
     src/jobs.cpp \
+    src/mcpserver.cpp \
     src/media.cpp \
     src/portalfilepicker.cpp \
     src/project.cpp \

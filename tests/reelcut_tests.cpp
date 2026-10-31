@@ -1,5 +1,6 @@
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QProcess>
 #include <QTemporaryDir>
@@ -9,6 +10,7 @@
 #include "captions.h"
 #include "exportgraph.h"
 #include "filepicker.h"
+#include "mcpserver.h"
 #include "media.h"
 #include "project.h"
 #include "silence.h"
@@ -363,7 +365,8 @@ private slots:
         p.clips = {clip(0, 4), clip(10, 14)};
         write(dir.filePath("a.reel"), QJsonDocument(p.toJson()).toJson());
 
-        Backend backend(nullptr, nullptr, nullptr);
+        QTemporaryDir state;
+        Backend backend(nullptr, nullptr, nullptr, nullptr, state.path());
         QVERIFY(backend.openFile(dir.filePath("a.reel")));
         QVERIFY(!backend.dirty());
         QVERIFY(backend.split(2.0));
@@ -401,7 +404,8 @@ private slots:
         p.clips = {c};
         write(dir.filePath("talk.reel"), QJsonDocument(p.toJson()).toJson());
 
-        Backend backend(nullptr, nullptr, nullptr);
+        QTemporaryDir state;
+        Backend backend(nullptr, nullptr, nullptr, nullptr, state.path());
         QVERIFY(backend.openFile(dir.filePath("talk.reel")));
         backend.cutSilences(0);
         QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 30000);
@@ -422,7 +426,8 @@ private slots:
                            "sine=frequency=440:duration=2", "-shortest", "-c:v", "libx264", "-c:a", "aac",
                            source}));
         FakePicker picker;
-        Backend backend(&picker, nullptr, nullptr);
+        QTemporaryDir state;
+        Backend backend(&picker, nullptr, nullptr, nullptr, state.path());
         backend.addUrls({QUrl::fromLocalFile(source)});
         QTRY_COMPARE_WITH_TIMEOUT(backend.project().clips.size(), 1, 15000);
         backend.addOverlay(0.0);
@@ -443,7 +448,141 @@ private slots:
         QCOMPARE(out.height, 1920);
     }
 
+    // MCP server
+
+    void mcpSpeaksTheProtocol()
+    {
+        QTemporaryDir state;
+        McpServer server(state.path());
+        const QJsonObject init = server.handle({{"jsonrpc", "2.0"}, {"id", 1}, {"method", "initialize"},
+                                                {"params", QJsonObject{{"protocolVersion", "2025-06-18"}}}});
+        QCOMPARE(init.value("result").toObject().value("serverInfo").toObject().value("name").toString(), QString("reelcut"));
+        QVERIFY(server.handle({{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}).isEmpty());
+
+        const QJsonArray tools = server.handle({{"jsonrpc", "2.0"}, {"id", 2}, {"method", "tools/list"}})
+                                     .value("result").toObject().value("tools").toArray();
+        QStringList names;
+        for (const QJsonValue &tool : tools)
+            names.append(tool.toObject().value("name").toString());
+        for (const char *name : {"create_project", "add_clips", "split", "edit_clip", "cut_silences", "transcribe",
+                                 "set_captions", "edit_words", "add_text", "set_look", "set_music", "undo",
+                                 "preview_frame", "export", "show_in_app"})
+            QVERIFY2(names.contains(name), name);
+
+        const QJsonObject unknown = server.handle({{"jsonrpc", "2.0"}, {"id", 3}, {"method", "nope"}});
+        QCOMPARE(unknown.value("error").toObject().value("code").toInt(), -32601);
+        // Without a project, tools say what to do instead of failing obscurely.
+        const QJsonObject noProject = call(server, "get_project", {});
+        QVERIFY(noProject.value("isError").toBool());
+    }
+
+    void mcpEditsPreviewsAndExportsAReel()
+    {
+        QTemporaryDir dir, state;
+        const QString source = dir.filePath("clip.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=1280x720:rate=30:duration=4", "-f", "lavfi", "-i",
+                           "sine=frequency=440:duration=4", "-shortest", "-c:v", "libx264", "-c:a", "aac", source}));
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=10",
+                           dir.filePath("song.mp3")}));
+        McpServer server(state.path());
+
+        QJsonObject r = call(server, "create_project", {{"path", dir.filePath("demo")}, {"clips", QJsonArray{source}},
+                                                         {"platform", "tiktok"}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+        QVERIFY(QFileInfo::exists(dir.filePath("demo.reel")));
+
+        // The rest use the project in use without naming it.
+        QVERIFY(!call(server, "split", {{"time", 2.0}}).value("isError").toBool());
+        QVERIFY(!call(server, "edit_clip", {{"index", 1}, {"speed", 2.0}, {"zoom", 9.0}}).value("isError").toBool());
+        QVERIFY(call(server, "edit_clip", {{"index", 7}}).value("isError").toBool());
+        QVERIFY(!call(server, "set_captions", {{"style", "pop"}, {"words", QJsonArray{
+            QJsonObject{{"text", "made"}, {"start", 0.2}, {"end", 0.6}},
+            QJsonObject{{"text", "by"}, {"start", 0.6}, {"end", 0.9}},
+            QJsonObject{{"text", "agnet"}, {"start", 0.9}, {"end", 1.4}}}}}).value("isError").toBool());
+        QVERIFY(!call(server, "edit_words", {{"edits", QJsonArray{QJsonObject{{"index", 2}, {"text", "agent"}}}}})
+                     .value("isError").toBool());
+        QVERIFY(!call(server, "add_text", {{"text", "Watch this"}, {"end", 1.5}, {"animation", "slide"}}).value("isError").toBool());
+        QVERIFY(!call(server, "set_look", {{"preset", "warm"}, {"saturation", 0.5}}).value("isError").toBool());
+        QVERIFY(!call(server, "set_music", {{"file", dir.filePath("song.mp3")}, {"volume", 0.2}}).value("isError").toBool());
+
+        Project saved = Project::fromJson(QJsonDocument::fromJson(readAll(dir.filePath("demo.reel"))).object(), dir.path());
+        QCOMPARE(saved.platform, QString("tiktok"));
+        QCOMPARE(saved.clips.size(), 2);
+        QCOMPARE(saved.clips[1].speed, 2.0);
+        QCOMPARE(saved.clips[1].zoom, 3.0);
+        QCOMPARE(saved.words[2].text, QString("agent"));
+        QCOMPARE(saved.overlays[0].animation, QString("slide"));
+        QCOMPARE(saved.look.temperature, 0.4);
+        QCOMPARE(saved.look.saturation, 0.5);
+        QCOMPARE(saved.music.volume, 0.2);
+
+        // Undo walks back one tool call at a time.
+        QVERIFY(!call(server, "undo", {}).value("isError").toBool());
+        saved = Project::fromJson(QJsonDocument::fromJson(readAll(dir.filePath("demo.reel"))).object(), dir.path());
+        QVERIFY(!saved.music.isSet());
+        QVERIFY(!call(server, "redo", {}).value("isError").toBool());
+
+        const QJsonObject frame = call(server, "preview_frame", {{"time", 1.0}, {"width", 270}});
+        QVERIFY2(!frame.value("isError").toBool(), qPrintable(textOf(frame)));
+        const QJsonObject image = frame.value("content").toArray().first().toObject();
+        QCOMPARE(image.value("type").toString(), QString("image"));
+        QImage png;
+        QVERIFY(png.loadFromData(QByteArray::fromBase64(image.value("data").toString().toLatin1()), "PNG"));
+        QCOMPARE(png.size(), QSize(270, 480));
+
+        const QJsonObject exported = call(server, "export", {});
+        QVERIFY2(!exported.value("isError").toBool(), qPrintable(textOf(exported)));
+        const QJsonObject info = QJsonDocument::fromJson(textOf(exported).toUtf8()).object();
+        QCOMPARE(info.value("output").toString(), dir.filePath("demo-tiktok.mp4"));
+        QCOMPARE(info.value("size").toString(), QString("1080x1920"));
+        QVERIFY(qAbs(info.value("duration").toDouble() - 3.0) < 0.15);
+    }
+
+    void windowFollowsEditsMadeElsewhere()
+    {
+        QTemporaryDir dir, state;
+        Project p;
+        p.clips = {clip(0, 4)};
+        write(dir.filePath("live.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+
+        Backend backend(nullptr, nullptr, nullptr, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("live.reel")));
+        // The window records what it has open, so the MCP server finds it.
+        QCOMPARE(QString::fromUtf8(readAll(McpServer::openProjectFile(state.path()))), dir.filePath("live.reel"));
+
+        McpServer server(state.path());
+        QVERIFY(!call(server, "open_project", {}).value("isError").toBool());
+        QVERIFY(!call(server, "split", {{"time", 1.0}}).value("isError").toBool());
+        QTRY_COMPARE_WITH_TIMEOUT(backend.project().clips.size(), 2, 5000);
+        QVERIFY(!backend.dirty());
+        // The outside edit is one undo away in the window.
+        backend.undo();
+        QCOMPARE(backend.project().clips.size(), 1);
+    }
+
 private:
+    static QJsonObject call(McpServer &server, const QString &tool, const QJsonObject &args)
+    {
+        return server.handle({{"jsonrpc", "2.0"}, {"id", 9}, {"method", "tools/call"},
+                              {"params", QJsonObject{{"name", tool}, {"arguments", args}}}})
+            .value("result").toObject();
+    }
+
+    static QString textOf(const QJsonObject &result)
+    {
+        for (const QJsonValue &item : result.value("content").toArray())
+            if (item.toObject().value("type") == "text")
+                return item.toObject().value("text").toString();
+        return {};
+    }
+
+    static QByteArray readAll(const QString &path)
+    {
+        QFile file(path);
+        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+    }
+
     static void write(const QString &path, const QByteArray &contents)
     {
         QFile file(path);

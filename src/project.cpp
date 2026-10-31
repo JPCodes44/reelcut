@@ -169,3 +169,116 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
     p.platform = json.value("platform").toString(p.platform);
     return p;
 }
+
+bool Project::setClipValue(int index, const QString &key, double value) {
+    if (index < 0 || index >= clips.size())
+        return false;
+    Clip &c = clips[index];
+    // Never shorter than a frame, never past the source.
+    if (key == "in")
+        c.in = qBound(0.0, value, c.out - kMinClip);
+    else if (key == "out")
+        c.out = qBound(c.in + kMinClip, value, c.sourceDuration > 0 ? c.sourceDuration : qMax(value, c.in + kMinClip));
+    else if (key == "speed")
+        c.speed = qBound(0.25, value, 4.0);
+    else if (key == "zoom")
+        c.zoom = qBound(1.0, value, 3.0);
+    else if (key == "panX")
+        c.panX = qBound(-1.0, value, 1.0);
+    else if (key == "panY")
+        c.panY = qBound(-1.0, value, 1.0);
+    else
+        return false;
+    return true;
+}
+
+bool Project::setOverlayValue(int index, const QString &key, const QVariant &value) {
+    if (index < 0 || index >= overlays.size())
+        return false;
+    Overlay &o = overlays[index];
+    if (key == "text")
+        o.text = value.toString();
+    else if (key == "start")
+        o.start = qBound(0.0, value.toDouble(), o.end - 0.1);
+    else if (key == "end")
+        o.end = qMax(o.start + 0.1, value.toDouble());
+    else if (key == "y")
+        o.y = qBound(0.05, value.toDouble(), 0.95);
+    else if (key == "size")
+        o.size = qBound(40, value.toInt(), 200);
+    else if (key == "animation") {
+        const QString animation = value.toString();
+        if (!QStringList{"none", "fade", "pop", "slide"}.contains(animation))
+            return false;
+        o.animation = animation;
+    } else
+        return false;
+    return true;
+}
+
+bool Project::setLookValue(const QString &key, double value) {
+    const double v = qBound(-1.0, value, 1.0);
+    if (key == "exposure")
+        look.exposure = v;
+    else if (key == "contrast")
+        look.contrast = v;
+    else if (key == "saturation")
+        look.saturation = v;
+    else if (key == "temperature")
+        look.temperature = v;
+    else
+        return false;
+    return true;
+}
+
+bool Project::setMusicValue(const QString &key, const QVariant &value) {
+    if (key == "volume")
+        music.volume = qBound(0.0, value.toDouble(), 1.5);
+    else if (key == "offset")
+        music.offset = qMax(0.0, value.toDouble());
+    else if (key == "duck")
+        music.duck = value.toBool();
+    else
+        return false;
+    return true;
+}
+
+namespace {
+struct Preset {
+    const char *name;
+    double exposure, contrast, saturation, temperature;
+};
+constexpr Preset kPresets[] = {
+    {"Natural", 0, 0, 0, 0},       {"Warm", 0.05, 0.1, 0.1, 0.4},  {"Cool", 0, 0.1, 0, -0.4},
+    {"Punchy", 0.05, 0.35, 0.35, 0}, {"Film", -0.05, 0.2, -0.25, 0.15}, {"Mono", 0, 0.25, -1, 0},
+};
+}  // namespace
+
+QStringList Project::presets() {
+    QStringList names;
+    for (const Preset &preset : kPresets)
+        names.append(preset.name);
+    return names;
+}
+
+bool Project::applyPreset(const QString &name) {
+    for (const Preset &preset : kPresets) {
+        if (name.compare(preset.name, Qt::CaseInsensitive) == 0) {
+            look.exposure = preset.exposure;
+            look.contrast = preset.contrast;
+            look.saturation = preset.saturation;
+            look.temperature = preset.temperature;
+            return true;
+        }
+    }
+    return false;
+}
+
+int Project::addOverlay(const QString &text, double start, double end) {
+    Overlay overlay;
+    overlay.text = text;
+    overlay.start = qMax(0.0, start);
+    overlay.end = end > overlay.start ? end : qMin(overlay.start + 3.0, qMax(duration(), overlay.start + 1.0));
+    overlays.append(overlay);
+    return overlays.size() - 1;
+}

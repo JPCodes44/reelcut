@@ -18,6 +18,7 @@
 
 #include "captions.h"
 #include "filepicker.h"
+#include "mcpserver.h"
 #include "media.h"
 #include "silence.h"
 #include "theme.h"
@@ -26,10 +27,8 @@
 
 namespace {
 constexpr int kUndoLimit = 200;
-const char *kModelUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
-
 QString modelPath() {
-    return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/reelcut/models/ggml-base.bin";
+    return whisperModelPath();
 }
 
 QString fileName(const QString &path) {
@@ -45,8 +44,14 @@ QString freePath(const QString &folder, const QString &base, const QString &suff
 }
 }  // namespace
 
-Backend::Backend(FilePicker *picker, ThumbProvider *thumbs, Theme *theme, QObject *parent)
-    : QObject(parent), m_picker(picker), m_thumbs(thumbs), m_theme(theme) {
+Backend::Backend(FilePicker *picker, ThumbProvider *thumbs, Theme *theme, QObject *parent, const QString &stateDir)
+    : QObject(parent), m_picker(picker), m_thumbs(thumbs), m_theme(theme), m_stateDir(stateDir) {
+    m_reloadDebounce = new QTimer(this);
+    m_reloadDebounce->setSingleShot(true);
+    m_reloadDebounce->setInterval(120);
+    connect(m_reloadDebounce, &QTimer::timeout, this, &Backend::reloadIfChangedOutside);
+    connect(&m_watcher, &QFileSystemWatcher::fileChanged, m_reloadDebounce, qOverload<>(&QTimer::start));
+    connect(&m_watcher, &QFileSystemWatcher::directoryChanged, m_reloadDebounce, qOverload<>(&QTimer::start));
     if (m_picker) {
         connect(m_picker, &FilePicker::selected, this, &Backend::picked);
         connect(m_picker, &FilePicker::failed, this, [this](const QString &error) { setMessage(error, true); });
@@ -276,26 +281,8 @@ bool Backend::split(double time) {
 }
 
 void Backend::setClipValue(int index, const QString &key, double value) {
-    if (index < 0 || index >= m_project.clips.size())
-        return;
-    Clip &c = m_project.clips[index];
-    // Never shorter than a frame, never past the source.
-    const double frame = 1.0 / Project::Fps;
-    if (key == "in")
-        c.in = qBound(0.0, value, c.out - frame);
-    else if (key == "out")
-        c.out = qBound(c.in + frame, value, c.sourceDuration > 0 ? c.sourceDuration : value);
-    else if (key == "speed")
-        c.speed = qBound(0.25, value, 4.0);
-    else if (key == "zoom")
-        c.zoom = qBound(1.0, value, 3.0);
-    else if (key == "panX")
-        c.panX = qBound(-1.0, value, 1.0);
-    else if (key == "panY")
-        c.panY = qBound(-1.0, value, 1.0);
-    else
-        return;
-    changed();
+    if (m_project.setClipValue(index, key, value))
+        changed();
 }
 
 QVariantMap Backend::locate(double time) const {
@@ -319,14 +306,9 @@ void Backend::cutSilences(int index) {
                 setMessage(tr("Finding silences failed:\n%1").arg(tail(errors)), true);
             return;
         }
-        // With -ss before the input, times in the log start at the clip's in point.
-        QVector<Range> silences = parseSilences(errors);
-        for (Range &s : silences) {
-            s.first += clip.in;
-            s.second += clip.in;
-        }
-        const QVector<Range> keep = keepRanges(clip.in, clip.out, silences);
-        if (silences.isEmpty() || keep.isEmpty() || (keep.size() == 1 && keep[0] == Range(clip.in, clip.out))) {
+        bool found = false;
+        const QVector<Range> keep = clipKeepRanges(clip, errors, &found);
+        if (!found || keep.isEmpty() || (keep.size() == 1 && keep[0] == Range(clip.in, clip.out))) {
             setMessage(tr("No silences long enough to cut."), false);
             return;
         }
@@ -340,8 +322,7 @@ void Backend::cutSilences(int index) {
         changed();
         setMessage(tr("Cut %1 s of silence.").arg(QLocale().toString(before - m_project.duration(), 'f', 1)), false);
     };
-    m_job.start("ffmpeg", {"-hide_banner", "-nostdin", "-ss", num(clip.in), "-to", num(clip.out), "-i", clip.path,
-                           "-vn", "-af", "silencedetect=n=-35dB:d=0.4", "-f", "null", "-"});
+    m_job.start("ffmpeg", silenceArgs(clip));
 }
 
 // ---- Captions ----
@@ -376,7 +357,7 @@ void Backend::downloadModel() {
         return;
     }
     setBusy(tr("Downloading the speech model (once)…"), 0.0);
-    QNetworkRequest request{QUrl(kModelUrl)};
+    QNetworkRequest request{QUrl(whisperModelUrl())};
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     m_download = m_network->get(request);
     connect(m_download, &QNetworkReply::readyRead, this, [this, part] { part->write(m_download->readAll()); });
@@ -443,10 +424,7 @@ void Backend::startTranscription() {
             setMessage(stale ? tr("Captions added. The clips changed while transcribing, so check the timing.")
                              : tr("Captions added. Click a word to fix it."), false);
         };
-        const int threads = qBound(1, QThread::idealThreadCount() - 1, 8);
-        m_job.start("whisper-cli", {"-m", modelPath(), "-f", m_work->filePath("audio.wav"), "-l", "auto",
-                                    "-ml", "1", "-sow", "-oj", "-of", base, "-np", "-pp",
-                                    "-t", QString::number(threads)});
+        m_job.start("whisper-cli", whisperArgs(m_work->filePath("audio.wav"), base));
     };
     m_job.start("ffmpeg", timelineAudioArgs(snapshot, wav), snapshot.duration());
 }
@@ -487,34 +465,14 @@ void Backend::setCaptionY(double y) {
 
 int Backend::addOverlay(double time) {
     checkpoint();
-    Overlay overlay;
-    overlay.text = tr("Your hook here");
-    overlay.start = qMax(0.0, time);
-    overlay.end = qMin(overlay.start + 3.0, qMax(m_project.duration(), overlay.start + 1.0));
-    m_project.overlays.append(overlay);
+    const int index = m_project.addOverlay(tr("Your hook here"), time);
     changed();
-    return m_project.overlays.size() - 1;
+    return index;
 }
 
 void Backend::setOverlayValue(int index, const QString &key, const QVariant &value) {
-    if (index < 0 || index >= m_project.overlays.size())
-        return;
-    Overlay &o = m_project.overlays[index];
-    if (key == "text")
-        o.text = value.toString();
-    else if (key == "start")
-        o.start = qBound(0.0, value.toDouble(), o.end - 0.1);
-    else if (key == "end")
-        o.end = qMax(o.start + 0.1, value.toDouble());
-    else if (key == "y")
-        o.y = qBound(0.05, value.toDouble(), 0.95);
-    else if (key == "size")
-        o.size = qBound(40, value.toInt(), 200);
-    else if (key == "animation")
-        o.animation = value.toString();
-    else
-        return;
-    changed();
+    if (m_project.setOverlayValue(index, key, value))
+        changed();
 }
 
 void Backend::removeOverlay(int index) {
@@ -541,32 +499,19 @@ void Backend::removeMusic() {
 }
 
 void Backend::setMusicValue(const QString &key, const QVariant &value) {
-    Music &m = m_project.music;
-    if (key == "volume")
-        m.volume = qBound(0.0, value.toDouble(), 1.5);
-    else if (key == "offset")
-        m.offset = qMax(0.0, value.toDouble());
-    else if (key == "duck")
-        m.duck = value.toBool();
-    else
-        return;
-    changed();
+    if (m_project.setMusicValue(key, value))
+        changed();
 }
 
 void Backend::setLookValue(const QString &key, double value) {
-    Look &l = m_project.look;
-    const double v = qBound(-1.0, value, 1.0);
-    if (key == "exposure")
-        l.exposure = v;
-    else if (key == "contrast")
-        l.contrast = v;
-    else if (key == "saturation")
-        l.saturation = v;
-    else if (key == "temperature")
-        l.temperature = v;
-    else
-        return;
-    changed();
+    if (m_project.setLookValue(key, value))
+        changed();
+}
+
+void Backend::applyPreset(const QString &name) {
+    checkpoint();
+    if (m_project.applyPreset(name))
+        changed();
 }
 
 void Backend::chooseLut() {
@@ -628,6 +573,9 @@ void Backend::newProject() {
     m_undo.clear();
     m_redo.clear();
     m_dirty = false;
+    m_onDisk.clear();
+    watchProject();
+    recordOpenProject();
     emit projectChanged();
 }
 
@@ -638,9 +586,8 @@ void Backend::open() {
 
 bool Backend::openFile(const QString &path) {
     QFile file(path);
-    QJsonParseError parseError;
-    const QJsonDocument doc = file.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(file.readAll(), &parseError)
-                                                             : QJsonDocument();
+    const QByteArray bytes = file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+    const QJsonDocument doc = QJsonDocument::fromJson(bytes);
     if (!doc.isObject()) {
         setMessage(tr("%1 is not a Reelcut project.").arg(fileName(path)), true);
         return false;
@@ -652,8 +599,55 @@ bool Backend::openFile(const QString &path) {
     m_dirty = false;
     for (const Clip &clip : m_project.clips)
         thumbKey(clip.path);
+    m_onDisk = bytes;
+    watchProject();
+    recordOpenProject();
     emit projectChanged();
     return true;
+}
+
+void Backend::watchProject() {
+    const QStringList watched = m_watcher.files() + m_watcher.directories();
+    if (!watched.isEmpty())
+        m_watcher.removePaths(watched);
+    if (m_path.isEmpty())
+        return;
+    // Saves replace the file by renaming over it, which drops a file watch,
+    // so the folder is watched too and the file re-armed after each change.
+    m_watcher.addPath(QFileInfo(m_path).absolutePath());
+    if (QFileInfo::exists(m_path))
+        m_watcher.addPath(m_path);
+}
+
+void Backend::reloadIfChangedOutside() {
+    watchProject();
+    QFile file(m_path);
+    if (m_path.isEmpty() || !file.open(QIODevice::ReadOnly))
+        return;
+    const QByteArray bytes = file.readAll();
+    const QJsonDocument doc = QJsonDocument::fromJson(bytes);
+    if (bytes == m_onDisk || !doc.isObject())
+        return;
+    // Someone else (usually the MCP server) edited the project. Take their
+    // version, with ours one undo away, so nothing is lost either way.
+    checkpoint();
+    m_project = Project::fromJson(doc.object(), QFileInfo(m_path).absolutePath());
+    m_onDisk = bytes;
+    m_dirty = false;
+    for (const Clip &clip : m_project.clips)
+        thumbKey(clip.path);
+    emit projectChanged();
+    setMessage(tr("Updated from outside Reelcut. Ctrl+Z undoes it."), false);
+}
+
+void Backend::recordOpenProject() {
+    const QString state = McpServer::openProjectFile(m_stateDir);
+    QDir().mkpath(QFileInfo(state).absolutePath());
+    QSaveFile file(state);
+    if (file.open(QIODevice::WriteOnly)) {
+        file.write(m_path.toUtf8());
+        file.commit();
+    }
 }
 
 void Backend::save() {
@@ -680,7 +674,10 @@ bool Backend::writeProject(const QString &path) {
         return false;
     }
     m_path = QFileInfo(path).absoluteFilePath();
+    m_onDisk = data;
     m_dirty = false;
+    watchProject();
+    recordOpenProject();
     emit projectChanged();
     setMessage(tr("Saved %1.").arg(fileName(path)), false);
     return true;
