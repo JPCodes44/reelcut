@@ -26,6 +26,10 @@ constexpr int ShadowBlur = 5;
 constexpr int OutlineWidth = 3;  // pixels at 1080x1920
 constexpr int BoxPadding = 18;   // as the .ass text box (src/captions.cpp)
 constexpr int BoxRadius = 12;
+// Supersampling for sharp text (see render()); the preview's lens texture is
+// FlatScale times its size too.
+constexpr int FlatScale = 4;
+constexpr int LensScale = 2;
 
 QString fontFamily();  // the preview's Text uses the same family
 

@@ -212,6 +212,12 @@ Item {
                 visible: false
                 sourceRect: Qt.rect(-(lens.width - label.width) / 2, -(lens.height - label.height) / 2,
                                     lens.width, lens.height)
+                // The lens enlarges the middle, so capture the text finer than it shows
+                // (FisheyeText::FlatScale) or it goes soft.
+                textureSize: Qt.size(Math.ceil(lens.width * 4 * Screen.devicePixelRatio),
+                                     Math.ceil(lens.height * 4 * Screen.devicePixelRatio))
+                smooth: true
+                mipmap: true
             }
             ShaderEffect {
                 id: lens

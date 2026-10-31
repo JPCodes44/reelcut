@@ -74,10 +74,15 @@ QImage render(const Overlay &overlay) {
     const QSize core(block.width() + 2 * pad, block.height() + 2 * pad);
     const int w = qCeil(core.width() * Padding), h = qCeil(core.height() * Padding);
 
-    QImage flat(w, h, QImage::Format_ARGB32_Premultiplied);
+    // Sharpness: the lens enlarges the middle about 1.5 times, so the flat
+    // text is drawn FlatScale times bigger than it shows, and the lens is
+    // worked out at LensScale times the size and then smoothly shrunk (which
+    // keeps the edges, where the lens shrinks the text, from going jagged).
+    QImage flat(w * FlatScale, h * FlatScale, QImage::Format_ARGB32_Premultiplied);
     flat.fill(Qt::transparent);
     {
         QPainter p(&flat);
+        p.scale(FlatScale, FlatScale);  // draw in 1x units, rasterized FlatScale times finer
         p.setRenderHint(QPainter::Antialiasing);
         p.setRenderHint(QPainter::TextAntialiasing);
         const QRect boxRect((w - core.width()) / 2, (h - core.height()) / 2, core.width(), core.height());
@@ -103,16 +108,18 @@ QImage render(const Overlay &overlay) {
 
     // The lens: each output pixel reads the flat text nearer the centre.
     const double k = MaxBulge * qBound(0.0, overlay.bulge, 1.0);
-    QImage lens(w, h, QImage::Format_ARGB32_Premultiplied);
-    for (int y = 0; y < h; ++y) {
-        QRgb *row = reinterpret_cast<QRgb *>(lens.scanLine(y));
-        for (int x = 0; x < w; ++x) {
-            const double dx = (x + 0.5) / w * 2 - 1, dy = (y + 0.5) / h * 2 - 1;
+    const int lw = w * LensScale, lh = h * LensScale;
+    QImage big(lw, lh, QImage::Format_ARGB32_Premultiplied);
+    for (int y = 0; y < lh; ++y) {
+        QRgb *row = reinterpret_cast<QRgb *>(big.scanLine(y));
+        for (int x = 0; x < lw; ++x) {
+            const double dx = (x + 0.5) / lw * 2 - 1, dy = (y + 0.5) / lh * 2 - 1;
             const double r2 = dx * dx + dy * dy;
             const double s = r2 < 1 ? 1 - k * (1 - r2) : 1;
-            row[x] = sample(flat, (dx * s + 1) / 2 * w - 0.5, (dy * s + 1) / 2 * h - 0.5);
+            row[x] = sample(flat, (dx * s + 1) / 2 * flat.width() - 0.5, (dy * s + 1) / 2 * flat.height() - 0.5);
         }
     }
+    const QImage lens = big.scaled(w, h, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 
     // A soft shadow under it: the lens's alpha, blurred, offset and tinted.
     const QColor shadowColor = QColor::fromString(overlay.colorOf("shadow"));
