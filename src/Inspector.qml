@@ -523,6 +523,78 @@ Rectangle {
                                     valueText: Math.round(value * 100) + "%"
                                     onMoved: function(v) { backend.setOverlayValue(card.index, "bulge", v) }
                                 }
+                                // Type: font (every installed family, each shown in itself), bold, italic.
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Label { text: qsTr("Font") }
+                                    ComboBox {
+                                        id: fontBox
+                                        objectName: "overlayFont" + card.index
+                                        Layout.fillWidth: true
+                                        readonly property var families: [""].concat(Qt.fontFamilies())
+                                        model: families
+                                        displayText: card.modelData.font ? card.modelData.font
+                                                                         : qsTr("Default (%1)").arg(card.modelData.fontFamily)
+                                        currentIndex: count > 0 ? Math.max(0, families.indexOf(card.modelData.font || "")) : -1
+                                        font.family: card.modelData.fontFamily
+                                        delegate: ItemDelegate {
+                                            required property var modelData
+                                            required property int index
+                                            width: ListView.view ? ListView.view.width : 200
+                                            text: modelData === "" ? qsTr("Default") : modelData
+                                            font.family: modelData === "" ? fontBox.font.family : modelData
+                                            highlighted: fontBox.highlightedIndex === index
+                                        }
+                                        onActivated: function(i) {
+                                            backend.checkpoint()
+                                            backend.setOverlayValue(card.index, "font", families[i])
+                                        }
+                                    }
+                                    Button {
+                                        objectName: "overlayBold" + card.index
+                                        text: "B"
+                                        font.bold: true
+                                        checkable: true
+                                        checked: card.modelData.isBold === true
+                                        implicitWidth: 44
+                                        onClicked: { backend.checkpoint(); backend.setOverlayValue(card.index, "bold", checked) }
+                                        ToolTip.visible: hovered
+                                        ToolTip.text: qsTr("Bold")
+                                    }
+                                    Button {
+                                        objectName: "overlayItalic" + card.index
+                                        text: "I"
+                                        font.italic: true
+                                        checkable: true
+                                        checked: card.modelData.italic === true
+                                        implicitWidth: 44
+                                        onClicked: { backend.checkpoint(); backend.setOverlayValue(card.index, "italic", checked) }
+                                        ToolTip.visible: hovered
+                                        ToolTip.text: qsTr("Italic")
+                                    }
+                                }
+                                // Double-click a label to go back to the style's default.
+                                ValueSlider {
+                                    label: qsTr("Outline thickness")
+                                    from: 0; to: 30; stepSize: 0.5; resetValue: -1
+                                    value: card.modelData.outlineWidthValue || 0
+                                    valueText: value.toFixed(1) + " px" + (card.modelData.outlineWidth < 0 ? qsTr(" (default)") : "")
+                                    onMoved: function(v) { backend.setOverlayValue(card.index, "outlineWidth", v) }
+                                }
+                                ValueSlider {
+                                    label: qsTr("Shadow distance")
+                                    from: 0; to: 30; stepSize: 0.5; resetValue: -1
+                                    value: card.modelData.shadowDistanceValue || 0
+                                    valueText: value.toFixed(1) + " px" + (card.modelData.shadowDistance < 0 ? qsTr(" (default)") : "")
+                                    onMoved: function(v) { backend.setOverlayValue(card.index, "shadowDistance", v) }
+                                }
+                                ValueSlider {
+                                    label: qsTr("Letter spacing")
+                                    from: -20; to: 60; stepSize: 0.5; resetValue: 0
+                                    value: card.modelData.letterSpacing || 0
+                                    valueText: value.toFixed(1) + " px"
+                                    onMoved: function(v) { backend.setOverlayValue(card.index, "letterSpacing", v) }
+                                }
                                 RowLayout {
                                     Layout.fillWidth: true
                                     Label { text: qsTr("Entrance") }

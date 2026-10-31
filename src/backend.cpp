@@ -130,7 +130,12 @@ QVariantList Backend::overlays() const {
                                 {"size", o.size}, {"animation", o.animation}, {"style", o.style},
                                 {"bulge", o.bulge}, {"fill", o.fill}, {"outline", o.outline}, {"shadow", o.shadow},
                                 {"box", o.box}, {"fillColor", o.colorOf("fill")}, {"outlineColor", o.colorOf("outline")},
-                                {"shadowColor", o.colorOf("shadow")}, {"boxColor", o.colorOf("box")}});
+                                {"shadowColor", o.colorOf("shadow")}, {"boxColor", o.colorOf("box")},
+                                {"font", o.font}, {"bold", o.bold}, {"italic", o.italic},
+                                {"outlineWidth", o.outlineWidth}, {"shadowDistance", o.shadowDistance},
+                                {"letterSpacing", o.letterSpacing}, {"fontFamily", o.fontOf()},
+                                {"isBold", o.boldOf()}, {"outlineWidthValue", o.outlineWidthOf()},
+                                {"shadowDistanceValue", o.shadowDistanceOf()}});
     }
     return list;
 }

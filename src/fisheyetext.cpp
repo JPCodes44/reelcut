@@ -10,7 +10,6 @@
 
 namespace FisheyeText {
 
-QString fontFamily() { return "Liberation Serif"; }
 
 namespace {
 
@@ -60,8 +59,11 @@ QImage render(const Overlay &overlay) {
     if (overlay.text.trimmed().isEmpty())
         return frame;
 
-    QFont font(fontFamily());
+    QFont font(overlay.fontOf());
     font.setPixelSize(overlay.size);
+    font.setBold(overlay.boldOf());
+    font.setItalic(overlay.italic);
+    font.setLetterSpacing(QFont::AbsoluteSpacing, overlay.letterSpacing);
     const int flags = Qt::AlignHCenter | Qt::TextWordWrap;
     // Lines wrap at 94% of the frame, like the preview's Text.
     const QRect block = QFontMetrics(font).boundingRect(QRect(0, 0, qRound(Project::Width * 0.94), 100000), flags,
@@ -94,13 +96,16 @@ QImage render(const Overlay &overlay) {
         const QRect textRect = boxRect.adjusted(pad, pad, -pad, -pad);
         p.setFont(font);
         // An outline: the text drawn around itself in a ring, then the fill on top.
-        if (outline.alpha() > 0) {
+        // (QPainter is scaled, so fractions of a pixel still land FlatScale times finer.)
+        const double ring = overlay.outlineWidthOf();
+        if (outline.alpha() > 0 && ring > 0) {
             p.setPen(outline);
-            for (int i = 0; i < 16; ++i) {
-                const double a = i * 3.14159265 / 8;
-                p.drawText(textRect.translated(qRound(OutlineWidth * std::cos(a)), qRound(OutlineWidth * std::sin(a))),
-                           flags, overlay.text);
-            }
+            // Rings out to the full width, so a thick outline has no gaps.
+            for (double r = ring; r > 0.01; r -= 1.5)
+                for (int i = 0; i < 24; ++i) {
+                    const double a = i * 3.14159265 / 12;
+                    p.drawText(QRectF(textRect).translated(r * std::cos(a), r * std::sin(a)), flags, overlay.text);
+                }
         }
         p.setPen(fill);
         p.drawText(textRect, flags, overlay.text);
@@ -143,7 +148,9 @@ QImage render(const Overlay &overlay) {
     const int left = qRound(overlay.x * Project::Width - w / 2.0);
     const int top = qRound(overlay.y * Project::Height - h / 2.0);
     QPainter p(&frame);
-    p.drawImage(left + ShadowX, top + ShadowY, shadow);
+    // The shadow falls down and a little right, as far as the overlay says.
+    const double d = overlay.shadowDistanceOf();
+    p.drawImage(left + qRound(d * ShadowX), top + qRound(d * ShadowY), shadow);
     p.drawImage(left, top, lens);
     return frame;
 }

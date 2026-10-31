@@ -144,6 +144,18 @@ Item {
             readonly property bool hasBox: boxColor.a > 0
             // The box reaches this far past the text (TextBoxPadding, FisheyeText::BoxPadding).
             readonly property real pad: hasBox ? 18 * root.scaleFactor : 0
+            // Outline ring offsets in preview pixels; none without an outline, or
+            // behind a plain box (BorderStyle 3 draws the box instead).
+            readonly property real outlineWidth: (modelData.outlineWidthValue || 0) * root.scaleFactor
+            readonly property var outlineOffsets: {
+                if (outlineColor.a === 0 || outlineWidth <= 0 || (hasBox && !fisheye))
+                    return []
+                const list = []
+                for (let r = outlineWidth; r > 0.01; r -= 1.5)
+                    for (let i = 0; i < 16; ++i)
+                        list.push([r * Math.cos(i * Math.PI / 8), r * Math.sin(i * Math.PI / 8)])
+                return list
+            }
             width: label.width
             height: label.height
             x: modelData.x * root.width - width / 2
@@ -171,18 +183,33 @@ Item {
                     color: overlay.boxColor
                 }
                 Text {
-                    // ASS draws a hard shadow 5 px down and right (TextShadowOffset).
-                    visible: !overlay.fisheye && overlay.shadowColor.a > 0
-                    x: 5 * root.scaleFactor
-                    y: 5 * root.scaleFactor
+                    // ASS draws a hard shadow the shadow distance down and right.
+                    readonly property real d: (overlay.modelData.shadowDistanceValue || 0) * root.scaleFactor
+                    visible: !overlay.fisheye && overlay.shadowColor.a > 0 && d > 0
+                    x: d
+                    y: d
                     width: label.width
                     text: label.text
                     horizontalAlignment: label.horizontalAlignment
                     wrapMode: label.wrapMode
                     font: label.font
                     color: overlay.shadowColor
-                    style: label.style
-                    styleColor: overlay.shadowColor
+                }
+                // The outline: copies of the text in rings out to its width, the
+                // same way the fisheye export draws it. (Text.Outline is 1 px.)
+                Repeater {
+                    model: overlay.outlineOffsets
+                    Text {
+                        required property var modelData
+                        x: modelData[0]
+                        y: modelData[1]
+                        width: label.width
+                        text: label.text
+                        horizontalAlignment: label.horizontalAlignment
+                        wrapMode: label.wrapMode
+                        font: label.font
+                        color: overlay.outlineColor
+                    }
                 }
                 Text {
                     id: label
@@ -191,15 +218,14 @@ Item {
                     text: overlay.modelData.text
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
-                    font.family: overlay.fisheye ? "Liberation Serif" : backend.captionFont
-                    font.bold: !overlay.fisheye
+                    font.family: overlay.modelData.fontFamily || backend.captionFont
+                    font.bold: overlay.modelData.isBold === undefined ? !overlay.fisheye : overlay.modelData.isBold
+                    font.italic: overlay.modelData.italic === true
+                    font.letterSpacing: (overlay.modelData.letterSpacing || 0) * root.scaleFactor
                     // Fisheye text is an image at true pixel size in the export, so no caption scale.
                     font.pixelSize: Math.max(1, Math.round(overlay.modelData.size
                                                            * (overlay.fisheye ? root.scaleFactor : root.fontScale)))
                     color: overlay.fillColor
-                    // A box replaces the outline, as BorderStyle 3 does in the .ass file.
-                    style: overlay.outlineColor.a > 0 && !(overlay.hasBox && !overlay.fisheye) ? Text.Outline : Text.Normal
-                    styleColor: overlay.outlineColor
                 }
             }
 
@@ -229,7 +255,9 @@ Item {
                 y: (label.height - height) / 2
                 property variant source: flatText
                 property real k: 0.6 * (overlay.modelData.bulge === undefined ? 0.6 : overlay.modelData.bulge)
-                property point shadow: Qt.point(4 * root.scaleFactor / Math.max(1, width), 6 * root.scaleFactor / Math.max(1, height))
+                // FisheyeText::ShadowX / ShadowY times the shadow distance.
+                readonly property real d: (overlay.modelData.shadowDistanceValue || 0) * root.scaleFactor
+                property point shadow: Qt.point(0.66 * d / Math.max(1, width), d / Math.max(1, height))
                 property point blur: Qt.point(5 * root.scaleFactor / Math.max(1, width), 5 * root.scaleFactor / Math.max(1, height))
                 property vector4d shadowColor: Qt.vector4d(overlay.shadowColor.r, overlay.shadowColor.g,
                                                            overlay.shadowColor.b, overlay.shadowColor.a)

@@ -131,6 +131,8 @@ QJsonObject Project::toJson(const QString &baseDir) const {
             {"text", o.text}, {"start", o.start}, {"end", o.end}, {"x", o.x}, {"y", o.y},
             {"size", o.size}, {"animation", o.animation}, {"style", o.style}, {"bulge", o.bulge},
             {"fill", o.fill}, {"outline", o.outline}, {"shadow", o.shadow}, {"box", o.box},
+            {"font", o.font}, {"bold", o.bold}, {"italic", o.italic}, {"outlineWidth", o.outlineWidth},
+            {"shadowDistance", o.shadowDistance}, {"letterSpacing", o.letterSpacing},
         });
     }
     QJsonArray effectArray;
@@ -214,6 +216,12 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
         overlay.bulge = qBound(0.0, o.value("bulge").toDouble(overlay.bulge), 1.0);
         for (const QString &part : Overlay::colorParts())
             overlay.setColor(part, o.value(part).toString());
+        overlay.font = o.value("font").toString();
+        overlay.bold = qBound(-1, o.value("bold").toInt(-1), 1);
+        overlay.italic = o.value("italic").toBool();
+        overlay.outlineWidth = qMin(30.0, o.value("outlineWidth").toDouble(-1));
+        overlay.shadowDistance = qMin(30.0, o.value("shadowDistance").toDouble(-1));
+        overlay.letterSpacing = qBound(-20.0, o.value("letterSpacing").toDouble(), 60.0);
         p.overlays.append(overlay);
     }
     for (const auto &value : json.value("effects").toArray()) {
@@ -351,6 +359,15 @@ bool Overlay::setColor(const QString &part, const QString &value) {
     return true;
 }
 
+// Plain text: bold Noto Sans with an 8 px outline, like the captions.
+// Fisheye: regular Liberation Serif, a 3 px outline when it has one.
+QString Overlay::fontOf() const {
+    return !font.isEmpty() ? font : style == "fisheye" ? QStringLiteral("Liberation Serif") : QStringLiteral("Noto Sans");
+}
+bool Overlay::boldOf() const { return bold >= 0 ? bold == 1 : style != "fisheye"; }
+double Overlay::outlineWidthOf() const { return outlineWidth >= 0 ? outlineWidth : style == "fisheye" ? 3 : 8; }
+double Overlay::shadowDistanceOf() const { return shadowDistance >= 0 ? shadowDistance : style == "fisheye" ? 6 : 5; }
+
 QString Overlay::colorOf(const QString &part) const {
     const QString set = part == "fill" ? fill : part == "outline" ? outline : part == "shadow" ? shadow : box;
     if (!set.isEmpty())
@@ -396,6 +413,19 @@ bool Project::setOverlayValue(int index, const QString &key, const QVariant &val
         o.bulge = qBound(0.0, value.toDouble(), 1.0);
     else if (Overlay::colorParts().contains(key))
         return o.setColor(key, value.toString());
+    else if (key == "font")
+        o.font = value.toString() == "default" ? QString() : value.toString().trimmed();
+    else if (key == "bold") {
+        const QString v = value.toString();
+        o.bold = v == "default" || v == "-1" ? -1 : value.toBool() ? 1 : 0;
+    } else if (key == "italic")
+        o.italic = value.toBool();
+    else if (key == "outlineWidth")
+        o.outlineWidth = value.toDouble() < 0 ? -1 : qBound(0.0, value.toDouble(), 30.0);
+    else if (key == "shadowDistance")
+        o.shadowDistance = value.toDouble() < 0 ? -1 : qBound(0.0, value.toDouble(), 30.0);
+    else if (key == "letterSpacing")
+        o.letterSpacing = qBound(-20.0, value.toDouble(), 60.0);
     else
         return false;
     return true;

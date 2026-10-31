@@ -1823,6 +1823,14 @@ private slots:
         hex->setProperty("text", "#3366FF");
         QMetaObject::invokeMethod(hex, "editingFinished");
         QTRY_COMPARE(backend.project().overlays[0].fill, QString("#ff3366ff"));
+        // Font, bold and italic controls are on the card.
+        QVERIFY(findItem(window->contentItem(), "overlayFont0"));
+        auto *bold = findItem(window->contentItem(), "overlayBold0");
+        QVERIFY(bold);
+        QVERIFY(bold->property("checked").toBool());  // plain text is bold by default
+        QMetaObject::invokeMethod(bold, "toggle");
+        QMetaObject::invokeMethod(bold, "clicked");
+        QTRY_COMPARE(backend.project().overlays[0].bold, 0);
         // The preview's text takes the color.
         QQuickItem *label = findItem(window->contentItem(), "overlayText0");
         QVERIFY(label);
@@ -1852,6 +1860,88 @@ private slots:
         QCOMPARE(saved.overlays[0].box, QString("#cc000000"));
         QVERIFY(call(server, "edit_clip", {{"index", 0}, {"color_wheels", QJsonObject{{"glow", 1}}}}).value("isError").toBool());
         QVERIFY(call(server, "edit_text", {{"index", 0}, {"fill", "nope"}}).value("isError").toBool());
+    }
+
+    void textTypeOptions()
+    {
+        Overlay o;
+        QCOMPARE(o.fontOf(), QString("Noto Sans"));
+        QVERIFY(o.boldOf());
+        QCOMPARE(o.outlineWidthOf(), 8.0);
+        o.style = "fisheye";
+        QCOMPARE(o.fontOf(), QString("Liberation Serif"));
+        QVERIFY(!o.boldOf());
+        QCOMPARE(o.outlineWidthOf(), 3.0);
+
+        Project p;
+        p.clips = {clip(0, 4)};
+        const int i = p.addOverlay("typed", 0, 2);
+        QVERIFY(p.setOverlayValue(i, "font", "Liberation Serif"));
+        QVERIFY(p.setOverlayValue(i, "bold", false));
+        QVERIFY(p.setOverlayValue(i, "italic", true));
+        QVERIFY(p.setOverlayValue(i, "outlineWidth", 12.5));
+        QVERIFY(p.setOverlayValue(i, "shadowDistance", 40));  // clamped to 30
+        QVERIFY(p.setOverlayValue(i, "letterSpacing", 5));
+        QVERIFY(p.setOverlayValue(i, "shadow", "#ff000000"));
+        const Project back = Project::fromJson(p.toJson(QDir::tempPath()), QDir::tempPath());
+        const Overlay &b = back.overlays[i];
+        QCOMPARE(b.font, QString("Liberation Serif"));
+        QCOMPARE(b.bold, 0);
+        QVERIFY(b.italic);
+        QCOMPARE(b.outlineWidth, 12.5);
+        QCOMPARE(b.shadowDistance, 30.0);
+        QCOMPARE(b.letterSpacing, 5.0);
+        // Back to the defaults.
+        QVERIFY(p.setOverlayValue(i, "outlineWidth", -1));
+        QVERIFY(p.setOverlayValue(i, "bold", "default"));
+        QVERIFY(p.setOverlayValue(i, "font", "default"));
+        QCOMPARE(p.overlays[i].outlineWidthOf(), 8.0);
+        QVERIFY(p.overlays[i].boldOf());
+        QCOMPARE(p.overlays[i].fontOf(), QString("Noto Sans"));
+
+        // In the .ass file as override tags.
+        const QString ass = assDocument(back, "#FF0000");
+        QVERIFY2(ass.contains("\\fnLiberation Serif\\b0\\i1\\fsp5"), qPrintable(ass.right(400)));
+        QVERIFY(ass.contains("\\bord12.5"));
+        QVERIFY(ass.contains("\\shad30"));
+
+        // Fisheye: a thicker outline covers more of the image.
+        Overlay f;
+        f.text = "WIDE";
+        f.style = "fisheye";
+        f.size = 140;
+        f.y = 0.5;
+        f.setColor("outline", "#ff0000ff");
+        f.setColor("shadow", "transparent");
+        auto blue = [](const QImage &img) {
+            int n = 0;
+            for (int y = 700; y < 1220; y += 2)
+                for (int x = 0; x < 1080; x += 2) {
+                    const QRgb px = img.pixel(x, y);
+                    n += qAlpha(px) > 200 && qBlue(px) > 200 && qRed(px) < 60;
+                }
+            return n;
+        };
+        f.outlineWidth = 2;
+        const int thin = blue(FisheyeText::render(f));
+        f.outlineWidth = 14;
+        const int thick = blue(FisheyeText::render(f));
+        QVERIFY2(thick > thin * 2, qPrintable(QString("thin %1 thick %2").arg(thin).arg(thick)));
+        // And it can be set from the MCP tools.
+        QTemporaryDir dir, state;
+        const QString source = dir.filePath("source.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=320x240:rate=30:duration=2", "-c:v", "libx264", source}));
+        McpServer server(state.path());
+        QVERIFY(!call(server, "create_project", {{"path", dir.filePath("t")}, {"clips", QJsonArray{source}}}).value("isError").toBool());
+        QJsonObject r = call(server, "add_text", {{"text", "hi"}, {"font", "Liberation Serif"}, {"italic", true},
+                                                  {"outline_width", 4}, {"letter_spacing", 2}});
+        QVERIFY2(!r.value("isError").toBool(), qPrintable(textOf(r)));
+        const Project saved = Project::fromJson(QJsonDocument::fromJson(readAll(dir.filePath("t.reel"))).object(), dir.path());
+        QCOMPARE(saved.overlays[0].font, QString("Liberation Serif"));
+        QVERIFY(saved.overlays[0].italic);
+        QCOMPARE(saved.overlays[0].outlineWidth, 4.0);
+        QCOMPARE(saved.overlays[0].letterSpacing, 2.0);
     }
 
     void mcpManagesEffects()

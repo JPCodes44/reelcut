@@ -67,6 +67,18 @@ struct Overlay {
     // Colors, as "#AARRGGBB"; empty means the style's default, alpha 0 is
     // transparent. Parts: fill, outline, shadow, box (a panel behind it).
     QString fill, outline, shadow, box;
+    // Type. Empty / -1 means the style's default (see the *Of() below).
+    QString font;               // a font family
+    int bold = -1;              // -1 default, 0 regular, 1 bold
+    bool italic = false;
+    double outlineWidth = -1;   // pixels at 1080x1920, 0..30
+    double shadowDistance = -1; // pixels at 1080x1920, 0..30
+    double letterSpacing = 0;   // extra pixels between letters, -20..60
+
+    QString fontOf() const;
+    bool boldOf() const;
+    double outlineWidthOf() const;
+    double shadowDistanceOf() const;
 
     static QStringList colorParts();
     // "" or "default" for the style's default, "transparent", or any color

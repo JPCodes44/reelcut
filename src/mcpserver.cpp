@@ -263,7 +263,9 @@ QJsonObject McpServer::summary(const Call &call, bool withWords) const {
                                     {"x", o.x}, {"position", o.y}, {"size", o.size}, {"animation", o.animation},
                                     {"style", o.style}, {"bulge", o.bulge}, {"fill", o.colorOf("fill")},
                                     {"outline", o.colorOf("outline")}, {"shadow", o.colorOf("shadow")},
-                                    {"box", o.colorOf("box")}});
+                                    {"box", o.colorOf("box")}, {"font", o.fontOf()}, {"bold", o.boldOf()},
+                                    {"italic", o.italic}, {"outline_width", o.outlineWidthOf()},
+                                    {"shadow_distance", o.shadowDistanceOf()}, {"letter_spacing", o.letterSpacing}});
     }
     QJsonArray effects;
     for (int i = 0; i < p.effects.size(); ++i) {
@@ -651,7 +653,15 @@ void McpServer::defineTools() {
             {"outline", prop("string", "Outline color, same forms as fill.")},
             {"shadow", prop("string", "Shadow color, same forms as fill. Plain text has none by default.")},
             {"box", prop("string", "Color of a box behind the text, same forms as fill. None by default; "
-                                   "on plain text a box replaces the outline.")}};
+                                   "on plain text a box replaces the outline.")},
+            {"font", prop("string", "A font family installed on this computer, e.g. \"Liberation Serif\". "
+                                    "\"default\" for the style's own (plain: Noto Sans, fisheye: Liberation Serif).")},
+            {"bold", prop("boolean", "Bold. Plain text is bold by default, fisheye is not.")},
+            {"italic", prop("boolean", "Italic. Default false.")},
+            {"outline_width", prop("number", "Outline thickness in pixels at 1080x1920, 0 to 30; -1 for the "
+                                             "style's default (plain 8, fisheye 3).")},
+            {"shadow_distance", prop("number", "How far the shadow falls, in pixels, 0 to 30; -1 for the default.")},
+            {"letter_spacing", prop("number", "Extra pixels between letters, -20 to 60. Default 0.")}};
     };
     auto applyOverlay = [](Project &p, int index, const QJsonObject &args) {
         if (args.contains("end"))
@@ -659,7 +669,10 @@ void McpServer::defineTools() {
         const QList<QPair<QString, QString>> keys{{"text", "text"}, {"start", "start"}, {"end", "end"},
                                                   {"position", "y"}, {"x", "x"}, {"size", "size"}, {"animation", "animation"},
                                                   {"style", "style"}, {"bulge", "bulge"}, {"fill", "fill"},
-                                                  {"outline", "outline"}, {"shadow", "shadow"}, {"box", "box"}};
+                                                  {"outline", "outline"}, {"shadow", "shadow"}, {"box", "box"},
+                                                  {"font", "font"}, {"bold", "bold"}, {"italic", "italic"},
+                                                  {"outline_width", "outlineWidth"}, {"shadow_distance", "shadowDistance"},
+                                                  {"letter_spacing", "letterSpacing"}};
         for (const auto &key : keys)
             if (args.contains(key.first) && !p.setOverlayValue(index, key.second, args.value(key.first).toVariant()))
                 throw ToolError{QString("Invalid %1.").arg(key.first)};

@@ -5,11 +5,12 @@
 
 #include <cmath>
 
+#include "exportgraph.h"
+
 namespace {
-// Text box padding and shadow offset, in pixels at 1080x1920. The preview
-// (src/CaptionLayer.qml) draws them the same size.
+// Text box padding, in pixels at 1080x1920. The preview
+// (src/CaptionLayer.qml) draws it the same size.
 constexpr int TextBoxPadding = 18;
-constexpr int TextShadowOffset = 5;
 
 QString hex2(int v) { return QString("%1").arg(v, 2, 16, QChar('0')).toUpper(); }
 
@@ -177,6 +178,11 @@ QString assDocument(const Project &project, const QString &accent) {
             continue;  // fisheye text is an image laid over by the export (src/fisheyetext.h)
         const int x = qRound(overlay.x * Project::Width), y = qRound(overlay.y * Project::Height);
         QString tags = QString("\\an5\\fs%1").arg(overlay.size);
+        // Type: font, weight, slant, letter spacing (\fsp, in pixels).
+        tags += QString("\\fn%1\\b%2\\i%3").arg(QString(overlay.fontOf()).remove('\\').remove('}'))
+                    .arg(overlay.boldOf() ? 1 : 0).arg(overlay.italic ? 1 : 0);
+        if (overlay.letterSpacing != 0)
+            tags += QString("\\fsp%1").arg(num(overlay.letterSpacing, 1));
         if (overlay.animation == "fade")
             tags += QString("\\pos(%1,%2)\\fad(250,150)").arg(x).arg(y);
         else if (overlay.animation == "pop")
@@ -193,12 +199,12 @@ QString assDocument(const Project &project, const QString &accent) {
         tags += colorTag(1, fill);
         if (box.alpha() > 0)
             tags += colorTag(3, box);  // the box replaces the outline
-        else if (outline.alpha() > 0)
-            tags += colorTag(3, outline);
+        else if (outline.alpha() > 0 && overlay.outlineWidthOf() > 0)
+            tags += colorTag(3, outline) + QString("\\bord%1").arg(num(overlay.outlineWidthOf(), 1));
         else
             tags += "\\bord0";
-        if (shadow.alpha() > 0)
-            tags += colorTag(4, shadow) + QString("\\shad%1").arg(TextShadowOffset);
+        if (shadow.alpha() > 0 && overlay.shadowDistanceOf() > 0)
+            tags += colorTag(4, shadow) + QString("\\shad%1").arg(num(overlay.shadowDistanceOf(), 1));
         ass += dialogue(overlay.start, overlay.end, box.alpha() > 0 ? "HookBox" : "Hook",
                         "{" + tags + "}" + escape(overlay.text));
     }

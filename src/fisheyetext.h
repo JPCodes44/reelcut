@@ -20,10 +20,11 @@ namespace FisheyeText {
 
 constexpr double Padding = 1.45;
 constexpr double MaxBulge = 0.6;
-constexpr int ShadowX = 4;  // drop shadow offset and softness, in pixels at 1080x1920
-constexpr int ShadowY = 6;
+// Drop shadow: its direction (times Overlay::shadowDistanceOf()) and softness
+// in pixels at 1080x1920.
+constexpr double ShadowX = 0.66;
+constexpr double ShadowY = 1.0;
 constexpr int ShadowBlur = 5;
-constexpr int OutlineWidth = 3;  // pixels at 1080x1920
 constexpr int BoxPadding = 18;   // as the .ass text box (src/captions.cpp)
 constexpr int BoxRadius = 12;
 // Supersampling for sharp text (see render()); the preview's lens texture is
@@ -31,7 +32,6 @@ constexpr int BoxRadius = 12;
 constexpr int FlatScale = 4;
 constexpr int LensScale = 2;
 
-QString fontFamily();  // the preview's Text uses the same family
 
 // The whole 1080x1920 frame, transparent except for the warped text centred on
 // the overlay's position, in the overlay's colors (Overlay::colorOf): fill,
