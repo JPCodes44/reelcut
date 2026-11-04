@@ -2628,9 +2628,9 @@ private slots:
         auto *chrome = findItem(window->contentItem(), "socialPreview");
         QVERIFY(chrome);
         QVERIFY(chrome->isVisible());
-        QCOMPARE(chrome->property("tiktok").toBool(), false);
+        QCOMPARE(chrome->property("platform").toString(), QString("instagram"));
         backend.setPlatform("tiktok");
-        QTRY_COMPARE(chrome->property("tiktok").toBool(), true);
+        QTRY_COMPARE(chrome->property("platform").toString(), QString("tiktok"));
         auto *toggle = findItem(window->contentItem(), "showAppUi");
         QVERIFY(toggle);
         toggle->setProperty("checked", false);
@@ -2656,8 +2656,11 @@ private slots:
         QCOMPARE(backend.postHashtags(), QString());
         backend.redo();
         QCOMPARE(backend.postCaption(), caption->property("text").toString());
-        for (const QString &platform : {QString("instagram"), QString("tiktok")}) {
+        for (const QString &platform : Posting::ids()) {
             backend.setPlatform(platform);
+            QTRY_COMPARE(chrome->property("platform").toString(), platform);
+            // Each app's own chrome, not another's.
+            QVERIFY2(findItem(chrome, "socialChrome-" + platform), qPrintable(platform));
         for (const QSize size : {QSize(1360, 900), QSize(1000, 700), QSize(1800, 1050)}) {
             window->resize(size);
             QTest::qWait(80);

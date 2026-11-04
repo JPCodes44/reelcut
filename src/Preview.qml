@@ -386,8 +386,12 @@ Rectangle {
                     scale: frame.width / 360
                     anchors.centerIn: parent
                     visible: root.showAppUi
-                    tiktok: backend.platform === "tiktok"
-                    username: backend.instagramUser.length > 0 && !tiktok ? backend.instagramUser : "your_account"
+                    platform: backend.platform
+                    // The connected account on that platform, when there is one.
+                    username: (platform === "instagram" ? backend.instagramUser
+                               : platform === "facebook" ? backend.facebookPage
+                               : platform === "youtube" ? backend.youtubeChannel : "") || "your_account"
+                    title: backend.title
                     caption: backend.postCaption
                     hashtags: backend.checkPost(backend.platform, backend.postCaption, backend.postHashtags).tags.join(" ")
                     onEditRequested: postEditor.begin()
