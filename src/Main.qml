@@ -156,13 +156,13 @@ ApplicationWindow {
                         color: backend.duration > 90 ? "#ff8a65" : win.dim
                         elide: Text.ElideRight
                         ToolTip.visible: backend.duration > 90 && overDuration.hovered
-                        ToolTip.text: qsTr("Longer than 90 seconds. Reels and TikToks perform best when short.")
+                        ToolTip.text: qsTr("Longer than 90 seconds. Reels, Shorts and TikToks perform best when short.")
                         HoverHandler { id: overDuration }
                     }
                     Item { Layout.fillWidth: true }
                     ButtonGroup { id: platforms }
                     Repeater {
-                        model: [{ id: "instagram", label: qsTr("Instagram") }, { id: "tiktok", label: qsTr("TikTok") }]
+                        model: backend.platforms
                         delegate: Button {
                             required property var modelData
                             Layout.minimumWidth: implicitWidth
@@ -197,7 +197,7 @@ ApplicationWindow {
                         enabled: backend.clips.length > 0 && !backend.busy
                         ToolTip.visible: hovered
                         ToolTip.delay: 500
-                        ToolTip.text: qsTr("Export and open TikTok or Instagram, ready to post")
+                        ToolTip.text: qsTr("Publish to Instagram, Facebook or YouTube, or export ready to post on TikTok")
                         onClicked: postDialog.openFor("")
                     }
                     Button {

@@ -142,7 +142,7 @@ struct Project {
     bool captionAuto = true;
     double captionScale = 1.0;  // 0.5 to 2 times the style's size
     Look look;
-    QString platform = "instagram";      // instagram, tiktok
+    QString platform = "instagram";      // an id from Posting::targets(): instagram, facebook, youtube, tiktok
 
     // Where captions sit by default on a platform, as frame fractions (center):
     // in the middle of the safe zone across, and just above the app's own

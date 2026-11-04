@@ -50,6 +50,10 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList effects READ effects NOTIFY projectChanged)
     Q_PROPERTY(QVariantList bodyKinds READ bodyKinds CONSTANT)
     Q_PROPERTY(QString platform READ platform NOTIFY projectChanged)
+    // Every platform (src/posting.h) as maps: id, label, limits, safe zone.
+    Q_PROPERTY(QVariantList platforms READ platforms CONSTANT)
+    // The project's platform, as one of those maps.
+    Q_PROPERTY(QVariantMap platformInfo READ platformInfo NOTIFY projectChanged)
     Q_PROPERTY(QString captionFont READ captionFont CONSTANT)
     Q_PROPERTY(double captionScale READ captionScale CONSTANT)
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY projectChanged)
@@ -100,6 +104,8 @@ public:
     QVariantList effects() const;
     QVariantList bodyKinds() const;
     QString platform() const { return m_project.platform; }
+    QVariantList platforms() const;
+    QVariantMap platformInfo() const;
     QString captionFont() const;
     // Qt pixel size per ASS font size unit; libass sizes a font by its line
     // height (ascent + descent), Qt by its em, so the preview scales by this.

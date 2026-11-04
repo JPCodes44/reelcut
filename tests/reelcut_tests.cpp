@@ -591,6 +591,41 @@ private slots:
         QCOMPARE(legacy.captionY, tiktok.y());
     }
 
+    // One table of platforms drives names, safe zones and caption spots.
+    void platformTableCoversFourApps()
+    {
+        QCOMPARE(Posting::ids(), (QStringList{"instagram", "facebook", "youtube", "tiktok"}));
+        QCOMPARE(Posting::normalize("youtube"), QString("youtube"));
+        QCOMPARE(Posting::normalize("myspace"), QString("instagram"));
+        const QHash<QString, QVector<double>> zones{{"instagram", {40, 220, 950, 1500}},
+                                                    {"facebook", {65, 270, 960, 1250}},
+                                                    {"youtube", {48, 290, 890, 1400}},
+                                                    {"tiktok", {40, 160, 930, 1440}}};
+        for (const QString &id : Posting::ids()) {
+            const Posting::Target *t = Posting::find(id);
+            QVERIFY(t);
+            const QVector<double> z = zones.value(id);
+            QCOMPARE(t->safe.left, z[0]);
+            QCOMPARE(t->safe.top, z[1]);
+            QCOMPARE(t->safe.right, z[2]);
+            QCOMPARE(t->safe.bottom, z[3]);
+            const QPointF home = Project::captionHome(id);
+            QCOMPARE(home.x(), (z[0] + z[2]) / 2 / 1080.0);
+            QCOMPARE(home.y(), (z[3] - 190) / 1920.0);
+            Project p;
+            p.setPlatform(id);
+            QCOMPARE(p.platform, id);
+            QCOMPARE(Project::fromJson(p.toJson()).platform, id);
+            QCOMPARE(t->toMap().value("safeBottom").toDouble(), z[3]);
+        }
+        Project p;
+        p.setPlatform("myspace");
+        QCOMPARE(p.platform, QString("instagram"));
+        QCOMPARE(Posting::find("facebook")->minSeconds, 3);
+        QCOMPARE(Posting::find("facebook")->maxSeconds, 90);
+        QCOMPARE(Posting::find("youtube")->maxSeconds, 180);
+    }
+
     void jsonRoundTripsWithRelativePaths()
     {
         Project p;

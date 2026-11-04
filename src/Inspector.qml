@@ -382,13 +382,13 @@ Rectangle {
                                 wrapMode: Text.WordWrap
                                 color: "#9a9aa2"
                                 text: backend.captionAuto
-                                      ? qsTr("Placed for %1. Moves with the platform.").arg(backend.platform === "tiktok" ? "TikTok" : "Instagram")
+                                      ? qsTr("Placed for %1. Moves with the platform.").arg(backend.platformInfo.label)
                                       : qsTr("Placed by hand.")
                             }
                             Button {
                                 objectName: "captionResetPosition"
                                 visible: !backend.captionAuto
-                                text: qsTr("Place for %1").arg(backend.platform === "tiktok" ? "TikTok" : "Instagram")
+                                text: qsTr("Place for %1").arg(backend.platformInfo.label)
                                 flat: true
                                 Layout.minimumWidth: implicitWidth
                                 onClicked: backend.resetCaptionPosition()
@@ -943,7 +943,7 @@ Rectangle {
                         Label {
                             Layout.fillWidth: true
                             Layout.topMargin: 8
-                            text: qsTr("Exports are leveled to -14 LUFS, the loudness Instagram and TikTok play at.")
+                            text: qsTr("Exports are leveled to -14 LUFS, the loudness Instagram, Facebook, YouTube and TikTok play at.")
                             color: "#9a9aa2"
                             wrapMode: Text.Wrap
                             font.pixelSize: 12

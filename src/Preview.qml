@@ -397,11 +397,11 @@ Rectangle {
                     id: safeArea
                     anchors.fill: parent
                     visible: root.safeZones && backend.clips.length > 0
-                    readonly property bool tiktok: backend.platform === "tiktok"
-                    readonly property real topEdge: (tiktok ? 160 : 220) * frame.scaleFactor
-                    readonly property real bottomEdge: height - (tiktok ? 480 : 420) * frame.scaleFactor
-                    readonly property real leftEdge: 40 * frame.scaleFactor
-                    readonly property real rightEdge: width - (tiktok ? 150 : 130) * frame.scaleFactor
+                    readonly property var zone: backend.platformInfo
+                    readonly property real topEdge: zone.safeTop * frame.scaleFactor
+                    readonly property real bottomEdge: zone.safeBottom * frame.scaleFactor
+                    readonly property real leftEdge: zone.safeLeft * frame.scaleFactor
+                    readonly property real rightEdge: zone.safeRight * frame.scaleFactor
                     ShapePath {
                         strokeColor: Qt.rgba(1, 1, 1, 0.7)
                         strokeWidth: 1
@@ -547,7 +547,7 @@ Rectangle {
             spacing: 8
             Label {
                 Layout.fillWidth: true
-                text: qsTr("%1 preview text").arg(backend.platform === "tiktok" ? "TikTok" : "Instagram")
+                text: qsTr("%1 preview text").arg(backend.platformInfo.label)
                 font.bold: true
                 wrapMode: Text.WordWrap
             }

@@ -1,5 +1,7 @@
 #include "project.h"
 
+#include "posting.h"
+
 #include <QColor>
 #include <QDir>
 #include <QJsonArray>
@@ -263,7 +265,7 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
     p.look.filter = filter ? filter->id : QString();
     p.look.filterAmount = qBound(0.0, l.value("filterAmount").toDouble(1.0), 1.0);
     p.look.grade = ColorGrade::Grade::fromJson(l.value("grade").toObject());
-    p.platform = json.value("platform").toString(p.platform) == "tiktok" ? "tiktok" : "instagram";
+    p.platform = Posting::normalize(json.value("platform").toString(p.platform));
     // Files from before captionAuto: captions still on the old fixed default
     // count as never moved.
     p.captionAuto = json.contains("captionAuto") ? json.value("captionAuto").toBool()
@@ -493,25 +495,21 @@ bool Project::setFilter(const QString &id) {
 }
 
 namespace {
-// Safe zones in 1080x1920 pixels: what each app's buttons and text leave
-// clear. Keep in step with the dashed outline in Preview.qml.
-struct SafeZone { double left, top, right, bottom; };
-SafeZone safeZone(const QString &platform) {
-    if (platform == "tiktok")
-        return {40, 160, 1080 - 150, 1920 - 480};
-    return {40, 220, 1080 - 130, 1920 - 420};
+// Safe zones come from the platform table (src/posting.cpp).
+Posting::SafeZone safeZone(const QString &platform) {
+    return Posting::find(Posting::normalize(platform))->safe;
 }
 }
 
 QPointF Project::captionHome(const QString &platform) {
-    const SafeZone z = safeZone(platform);
+    const Posting::SafeZone z = safeZone(platform);
     // 190px above the bottom of the safe zone leaves room for two lines of
     // captions before the app's own text starts.
     return {(z.left + z.right) / 2 / 1080.0, (z.bottom - 190) / 1920.0};
 }
 
 void Project::setPlatform(const QString &name) {
-    platform = name == "tiktok" ? "tiktok" : "instagram";
+    platform = Posting::normalize(name);
     if (captionAuto) {
         const QPointF home = captionHome(platform);
         captionX = home.x();
@@ -520,7 +518,7 @@ void Project::setPlatform(const QString &name) {
     }
     // Moved by hand: keep the spot, but not under the new app's buttons. The
     // center stays a caption's half-height (about 90px) inside the zone.
-    const SafeZone z = safeZone(platform);
+    const Posting::SafeZone z = safeZone(platform);
     captionX = qBound((z.left + 120) / 1080.0, captionX, (z.right - 120) / 1080.0);
     captionY = qBound((z.top + 90) / 1920.0, captionY, (z.bottom - 90) / 1920.0);
 }

@@ -812,6 +812,17 @@ void Backend::clearLut() {
     changed();
 }
 
+QVariantList Backend::platforms() const {
+    QVariantList out;
+    for (const Posting::Target &t : Posting::targets())
+        out << t.toMap();
+    return out;
+}
+
+QVariantMap Backend::platformInfo() const {
+    return Posting::find(Posting::normalize(m_project.platform))->toMap();
+}
+
 void Backend::setPlatform(const QString &platform) {
     if (platform == m_project.platform)
         return;

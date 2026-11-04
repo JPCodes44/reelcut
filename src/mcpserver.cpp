@@ -25,7 +25,7 @@
 namespace {
 constexpr int kUndoLimit = 100;
 const char *kInstructions =
-    "Reelcut edits vertical 1080x1920 reels for Instagram and TikTok. Work on one .reel project: "
+    "Reelcut edits vertical 1080x1920 reels for Instagram, Facebook, YouTube Shorts and TikTok. Work on one .reel project: "
     "create_project or open_project first (open_project with no path picks the project open in the Reelcut "
     "window). Every edit saves the file at once and the window reloads it live. Times are seconds on the "
     "timeline unless a tool says source seconds. Clip indexes start at 0. Use preview_frame to look at the "
@@ -365,7 +365,7 @@ void McpServer::defineTools() {
             {{"path", prop("string", "Where to write the .reel file (the extension is added if missing).")},
              {"clips", QJsonObject{{"type", "array"}, {"items", QJsonObject{{"type", "string"}}},
                                    {"description", "Video files to add, in timeline order."}}},
-             {"platform", enumProp({"instagram", "tiktok"}, "Which app's safe zones to design for.")}},
+             {"platform", enumProp({"instagram", "facebook", "youtube", "tiktok"}, "Which app's safe zones to design for.")}},
             {"path"}, false, [this](Call &call) {
                 QString path = absolute(call.args.value("path").toString());
                 if (!path.endsWith(".reel"))
@@ -418,8 +418,8 @@ void McpServer::defineTools() {
                              {"width", info.width}, {"height", info.height}, {"has_audio", info.audio}});
             }, false);
 
-    addTool("set_platform", "Design for Instagram Reels or TikTok (changes the safe zones shown and the file name).",
-            {{"platform", enumProp({"instagram", "tiktok"}, "The platform.")}}, {"platform"}, true, [this](Call &call) {
+    addTool("set_platform", "Design for Instagram Reels, Facebook Reels, YouTube Shorts or TikTok (changes the safe zones shown and the file name).",
+            {{"platform", enumProp({"instagram", "facebook", "youtube", "tiktok"}, "The platform.")}}, {"platform"}, true, [this](Call &call) {
                 call.project.setPlatform(call.args.value("platform").toString());
                 return json(summary(call));
             });
@@ -572,7 +572,7 @@ void McpServer::defineTools() {
             {{"style", enumProp({"highlight", "pop", "bold", "box"},
                                 "highlight: line with the spoken word in the accent color; pop: one word at a time; "
                                 "bold: plain white line; box: white text on a dark box.")},
-             {"position", prop("number", "Vertical center, 0.05 (top) to 0.95 (bottom). Default: just above the platform's own caption area (0.68 Instagram, 0.65 TikTok), following the platform until set.")},
+             {"position", prop("number", "Vertical center, 0.05 (top) to 0.95 (bottom). Default: just above the platform's own caption area (0.68 Instagram, 0.55 Facebook, 0.63 YouTube, 0.65 TikTok), following the platform until set.")},
              {"x", prop("number", "Horizontal center, 0 (left) to 1 (right). Default: the middle of the platform's safe zone.")},
              {"size", prop("number", "Size, 0.5 to 2 times normal. Default 1.")},
              {"words", QJsonObject{{"type", "array"},
