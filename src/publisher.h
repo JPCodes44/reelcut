@@ -3,6 +3,8 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QJsonObject>
+#include <QList>
+#include <QPair>
 #include <QObject>
 #include <QString>
 #include <QUrl>
@@ -62,6 +64,10 @@ struct Response {
 // the way Meta ({"error": {"message"}}) and Google ({"error": {"message"}}
 // or {"error": "...", "error_description"}) send it.
 void whenDone(QNetworkReply *reply, const std::function<void(const Response &)> &then);
+
+// An application/x-www-form-urlencoded body. Every value is percent-encoded,
+// so a "+" or "&" in a caption arrives as typed.
+QByteArray formBody(const QList<QPair<QString, QString>> &form);
 
 // Writes `json` to `path` readable only by you (it holds tokens).
 bool savePrivate(const QString &path, const QJsonObject &json);

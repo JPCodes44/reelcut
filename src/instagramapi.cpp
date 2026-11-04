@@ -124,13 +124,10 @@ QNetworkReply *InstagramApi::get(const QString &path, const QList<QPair<QString,
 }
 
 QNetworkReply *InstagramApi::postForm(const QString &path, const QList<QPair<QString, QString>> &form) {
-    QUrlQuery q;
-    for (const auto &item : form)
-        q.addQueryItem(item.first, item.second);
-    q.addQueryItem("access_token", m_token);
     QNetworkRequest request(QUrl(apiBase() + path));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
-    return m_net->post(request, q.query(QUrl::FullyEncoded).toUtf8());
+    // Percent-encoded throughout, so a "+" in a caption isn't read as a space.
+    return m_net->post(request, Net::formBody(form + QList<QPair<QString, QString>>{{"access_token", m_token}}));
 }
 
 void InstagramApi::connectToken(const QString &token) {

@@ -7,6 +7,7 @@
 #include <QNetworkReply>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QUrl>
 
 namespace Net {
 
@@ -27,6 +28,16 @@ void whenDone(QNetworkReply *reply, const std::function<void(const Response &)> 
         reply->deleteLater();
         then(r);
     });
+}
+
+QByteArray formBody(const QList<QPair<QString, QString>> &form) {
+    QByteArray body;
+    for (const auto &item : form) {
+        if (!body.isEmpty())
+            body += '&';
+        body += QUrl::toPercentEncoding(item.first) + '=' + QUrl::toPercentEncoding(item.second);
+    }
+    return body;
 }
 
 bool savePrivate(const QString &path, const QJsonObject &json) {

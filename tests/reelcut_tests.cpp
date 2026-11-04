@@ -32,6 +32,7 @@
 #include "fisheyetext.h"
 #include "jobs.h"
 #include "instagramapi.h"
+#include "facebookapi.h"
 #include "postscheduler.h"
 #include "mcpserver.h"
 #include "posting.h"
@@ -112,7 +113,7 @@ public:
                         return;
                     call.body = buffer->mid(headerEnd + 4, length);
                     if (call.headers.value("content-type").startsWith("application/x-www-form-urlencoded"))
-                        call.query = QUrlQuery(QString::fromUtf8(call.body));
+                        call.query = QUrlQuery(QString::fromUtf8(call.body).replace('+', "%20"));  // "+" is a space in a form
                     calls << call;
                     const QJsonObject reply = answer(call);
                     QByteArray body = QJsonDocument(reply).toJson(QJsonDocument::Compact);
@@ -241,6 +242,136 @@ public:
             return err("No such post.");
         }
         return err("unexpected " + c.function);
+    }
+};
+
+
+// A local HTTP server for API stand-ins: parses each request, hands it to
+// `answer`, and remembers it. Answers are JSON unless they say otherwise.
+class FakeHttp : public QObject {
+public:
+    struct Call { QString method, path; QUrlQuery query; QByteArray body; QHash<QString, QString> headers; };
+    struct Reply { int status = 200; QByteArray body; QList<QPair<QByteArray, QByteArray>> headers; };
+    QTcpServer server;
+    QVector<Call> calls;
+    std::function<Reply(const Call &)> answer;
+
+    FakeHttp() {
+        server.listen(QHostAddress::LocalHost);
+        connect(&server, &QTcpServer::newConnection, this, [this] {
+            while (QTcpSocket *socket = server.nextPendingConnection()) {
+                auto *buffer = new QByteArray;
+                connect(socket, &QTcpSocket::disconnected, socket, [socket, buffer] { delete buffer; socket->deleteLater(); });
+                connect(socket, &QTcpSocket::readyRead, socket, [this, socket, buffer] {
+                    buffer->append(socket->readAll());
+                    const int headerEnd = buffer->indexOf("\r\n\r\n");
+                    if (headerEnd < 0)
+                        return;
+                    const QList<QByteArray> lines = buffer->left(headerEnd).split('\n');
+                    Call call;
+                    const QList<QByteArray> first = lines.first().trimmed().split(' ');
+                    call.method = first.value(0);
+                    const QUrl url("http://x" + QString::fromUtf8(first.value(1)));
+                    call.path = url.path();
+                    call.query = QUrlQuery(url);
+                    for (int i = 1; i < lines.size(); ++i) {
+                        const int colon = lines[i].indexOf(':');
+                        if (colon > 0)
+                            call.headers.insert(QString(lines[i].left(colon)).toLower(), lines[i].mid(colon + 1).trimmed());
+                    }
+                    const int length = call.headers.value("content-length").toInt();
+                    if (buffer->size() < headerEnd + 4 + length)
+                        return;
+                    call.body = buffer->mid(headerEnd + 4, length);
+                    buffer->clear();
+                    // As a real server reads a form: "+" is a space.
+                    if (call.headers.value("content-type").startsWith("application/x-www-form-urlencoded"))
+                        for (const auto &item : QUrlQuery(QString::fromUtf8(call.body).replace('+', "%20")).queryItems(QUrl::FullyDecoded))
+                            call.query.addQueryItem(item.first, item.second);
+                    calls << call;
+                    const Reply reply = answer(call);
+                    QByteArray head = "HTTP/1.1 " + QByteArray::number(reply.status) + " X\r\nContent-Length: "
+                                      + QByteArray::number(reply.body.size()) + "\r\nConnection: close\r\n";
+                    bool typed = false;
+                    for (const auto &h : reply.headers) {
+                        head += h.first + ": " + h.second + "\r\n";
+                        typed = typed || h.first.toLower() == "content-type";
+                    }
+                    if (!typed)
+                        head += "Content-Type: application/json\r\n";
+                    socket->write(head + "\r\n" + reply.body);
+                    socket->disconnectFromHost();
+                });
+            }
+        });
+    }
+    QString base() const { return QString("http://127.0.0.1:%1").arg(server.serverPort()); }
+    static Reply json(const QJsonObject &o, int status = 200) {
+        return {status, QJsonDocument(o).toJson(QJsonDocument::Compact), {}};
+    }
+    static Reply error(const QString &message, int status = 400) {
+        return json({{"error", QJsonObject{{"message", message}}}}, status);
+    }
+    QVector<Call> callsTo(const QString &path) const {
+        QVector<Call> out;
+        for (const Call &c : calls)
+            if (c.path == path)
+                out << c;
+        return out;
+    }
+};
+
+// Facebook's Graph API and its rupload host, for FacebookApi: Pages for a
+// user token, then the three Reels phases and the status checks.
+class FakeFacebook : public FakeHttp {
+public:
+    int pages = 1;
+    int processingFor = 1;    // status checks that say processing first
+    QString failWith;          // a processing error to report
+    QString finishedState;     // video_state the finish call sent, lowercased
+
+    FakeFacebook() {
+        answer = [this](const Call &c) -> Reply {
+            const QString token = c.query.queryItemValue("access_token");
+            if (c.path == "/me/accounts") {
+                if (token != "EAA-user-token")
+                    return error("Invalid OAuth access token.");
+                QJsonArray list;
+                for (int i = 0; i < pages; ++i)
+                    list.append(QJsonObject{{"id", QString::number(1000000000000001LL + i)},
+                                            {"name", QString("Page %1").arg(i + 1)},
+                                            {"access_token", QString("page-token-%1").arg(i + 1)}});
+                return json({{"data", list}});
+            }
+            if (c.path.startsWith("/video-upload/")) {
+                if (c.headers.value("authorization") != "OAuth page-token-1"
+                    || c.headers.value("file_size").toLongLong() != c.body.size() || c.headers.value("offset") != "0")
+                    return error("bad upload");
+                return json({{"success", true}});
+            }
+            if (token != "page-token-1")
+                return error("Invalid OAuth access token.");
+            if (c.path == "/1000000000000001/video_reels" && c.query.queryItemValue("upload_phase") == "start")
+                return json({{"video_id", "V1"}, {"upload_url", base() + "/video-upload/v26.0/V1"}});
+            if (c.path == "/1000000000000001/video_reels" && c.query.queryItemValue("upload_phase") == "finish") {
+                finishedState = c.query.queryItemValue("video_state").toLower();
+                return json({{"success", c.query.queryItemValue("video_id") == "V1"}});
+            }
+            if (c.path == "/V1" && c.query.queryItemValue("fields") == "status") {
+                const bool processing = processingFor-- > 0;
+                QJsonObject processingPhase{{"status", !failWith.isEmpty() ? "error" : processing ? "in_progress" : "complete"}};
+                if (!failWith.isEmpty())
+                    processingPhase["error"] = QJsonObject{{"message", failWith}};
+                return json({{"status", QJsonObject{
+                    {"video_status", !failWith.isEmpty() ? "error" : processing ? "processing" : "ready"},
+                    {"processing_phase", processingPhase},
+                    {"publishing_phase", QJsonObject{{"status", processing ? "not_started" : "complete"},
+                                                     {"publish_status", processing ? "draft" : finishedState}}}}}});
+            }
+            if (c.path == "/V1" && c.query.queryItemValue("fields") == "permalink_url")
+                return json({{"permalink_url", "/reel/V1/"}});
+            return error("unexpected " + c.path);
+        };
     }
 };
 
@@ -3059,7 +3190,7 @@ private slots:
         write(dir.filePath("reel.mp4"), QByteArray(5000, 'v'));
         QSignalSpy done(&api, &InstagramApi::published);
         fake.calls.clear();
-        api.publish(dir.filePath("reel.mp4"), "My trip\n\n#travel");
+        api.publish(dir.filePath("reel.mp4"), "My trip + more\n\n#travel");
         QVERIFY(done.wait(10000));
         QVERIFY2(done.first().at(0).toBool(), qPrintable(done.first().at(1).toString()));
         QCOMPARE(done.first().at(2).toUrl(), QUrl("https://www.instagram.com/reel/abc/"));
@@ -3068,7 +3199,7 @@ private slots:
         QCOMPARE(c[0].path, QString("/17841400000000001/media"));
         QCOMPARE(c[0].query.queryItemValue("media_type"), QString("REELS"));
         QCOMPARE(c[0].query.queryItemValue("upload_type"), QString("resumable"));
-        QCOMPARE(c[0].query.queryItemValue("caption", QUrl::FullyDecoded), QString("My trip\n\n#travel"));
+        QCOMPARE(c[0].query.queryItemValue("caption", QUrl::FullyDecoded), QString("My trip + more\n\n#travel"));
         QCOMPARE(c[1].path, QString("/upload/C1"));
         QCOMPARE(c[1].body.size(), 5000);
         QCOMPARE(c[1].headers.value("file_size"), QString("5000"));
@@ -3156,6 +3287,107 @@ private slots:
         QVERIFY(!published.first().at(0).toBool());
         QCOMPARE(opened, QUrl("https://www.instagram.com/"));
         backend.disconnectInstagram();
+    }
+
+    // Facebook Pages through the Reels Publishing API, against a stand-in.
+    void facebookConnectsAndPublishes()
+    {
+        QTemporaryDir dir, state;
+        QFile video(dir.filePath("reel.mp4"));
+        QVERIFY(video.open(QIODevice::WriteOnly));
+        video.write(QByteArray(5000, 'v'));
+        video.close();
+        FakeFacebook fake;
+        FacebookApi api;
+        api.stateDir = state.path();
+        api.graphBase = fake.base();
+        api.pollIntervalMs = 10;
+        QSignalSpy connected(&api, &FacebookApi::connectFinished);
+        api.connectToken("EAA-user-token");
+        QVERIFY(connected.wait());
+        QVERIFY2(connected.first().at(0).toBool(), qPrintable(connected.first().at(1).toString()));
+        QVERIFY(api.connected());
+        QCOMPARE(api.account(), QString("Page 1"));
+        QCOMPARE(api.pageId(), QString("1000000000000001"));
+        QCOMPARE(QFile::permissions(api.accountFile()) & 0x0077, QFileDevice::Permissions());
+        QVERIFY(!readAll(api.accountFile()).contains("EAA-user-token"));  // only the Page's token is kept
+
+        // Kept across restarts.
+        FacebookApi again;
+        again.stateDir = state.path();
+        QTRY_VERIFY(again.connected());
+        QCOMPARE(again.account(), QString("Page 1"));
+
+        // Publish now: start, upload the bytes, finish PUBLISHED, wait, link.
+        QSignalSpy done(&api, &FacebookApi::published);
+        api.publish({video.fileName(), "Hello + 100% #fb &", "", {}});
+        QVERIFY(done.wait());
+        QVERIFY2(done.first().at(0).toBool(), qPrintable(done.first().at(1).toString()));
+        QCOMPARE(done.first().at(2).toUrl(), QUrl("https://www.facebook.com/reel/V1/"));
+        QCOMPARE(fake.finishedState, QString("published"));
+        const auto finish = fake.callsTo("/1000000000000001/video_reels").last();
+        QCOMPARE(finish.query.queryItemValue("description", QUrl::FullyDecoded), QString("Hello + 100% #fb &"));
+        QVERIFY(!finish.query.hasQueryItem("scheduled_publish_time"));
+        QCOMPARE(fake.callsTo("/video-upload/v26.0/V1").size(), 1);
+
+        // Scheduled: SCHEDULED with the time in Unix seconds.
+        fake.processingFor = 0;
+        done.clear();
+        const QDateTime when = QDateTime::currentDateTimeUtc().addDays(2);
+        api.publish({video.fileName(), "Later", "", when});
+        QVERIFY(done.wait());
+        QVERIFY2(done.first().at(0).toBool(), qPrintable(done.first().at(1).toString()));
+        QCOMPARE(fake.finishedState, QString("scheduled"));
+        QCOMPARE(fake.callsTo("/1000000000000001/video_reels").last().query.queryItemValue("scheduled_publish_time"),
+                 QString::number(when.toSecsSinceEpoch()));
+
+        // Facebook refusing the video stops with its reason.
+        fake.failWith = "Unsupported aspect ratio";
+        done.clear();
+        api.publish({video.fileName(), "Bad", "", {}});
+        QVERIFY(done.wait());
+        QVERIFY(!done.first().at(0).toBool());
+        QVERIFY(done.first().at(1).toString().contains("Unsupported aspect ratio"));
+    }
+
+    void facebookPagePickingAndErrors()
+    {
+        QTemporaryDir state;
+        FakeFacebook fake;
+        FacebookApi api;
+        api.stateDir = state.path();
+        api.graphBase = fake.base();
+
+        // Several Pages: pick one.
+        fake.pages = 3;
+        QSignalSpy found(&api, &FacebookApi::pagesFound);
+        QSignalSpy connected(&api, &FacebookApi::connectFinished);
+        api.connectToken("EAA-user-token");
+        QVERIFY(found.wait());
+        const QVariantList pages = found.first().at(0).toList();
+        QCOMPARE(pages.size(), 3);
+        QCOMPARE(pages[1].toMap().value("name").toString(), QString("Page 2"));
+        QVERIFY(!api.connected());
+        api.choosePage("1000000000000002");
+        QCOMPARE(connected.size(), 1);
+        QVERIFY(connected.first().at(0).toBool());
+        QCOMPARE(api.account(), QString("Page 2"));
+
+        // No Pages, or a bad token: an error, and the connection stays.
+        fake.pages = 0;
+        connected.clear();
+        api.connectToken("EAA-user-token");
+        QVERIFY(connected.wait());
+        QVERIFY(!connected.first().at(0).toBool());
+        QVERIFY(connected.first().at(1).toString().contains("pages_manage_posts"));
+        connected.clear();
+        api.connectToken("wrong");
+        QVERIFY(connected.wait());
+        QVERIFY(!connected.first().at(0).toBool());
+        QCOMPARE(api.account(), QString("Page 2"));
+        api.disconnect();
+        QVERIFY(!api.connected());
+        QVERIFY(!QFile::exists(api.accountFile()));
     }
 
     void mcpManagesEffects()
