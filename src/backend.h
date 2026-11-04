@@ -38,6 +38,8 @@ class Backend : public QObject {
     Q_PROPERTY(QString captionStyle READ captionStyle NOTIFY projectChanged)
     Q_PROPERTY(double captionX READ captionX NOTIFY projectChanged)
     Q_PROPERTY(double captionY READ captionY NOTIFY projectChanged)
+    // True while captions sit on the platform's home spot and follow it.
+    Q_PROPERTY(bool captionAuto READ captionAuto NOTIFY projectChanged)
     Q_PROPERTY(double captionSize READ captionSize NOTIFY projectChanged)
     Q_PROPERTY(QVariantList overlays READ overlays NOTIFY projectChanged)
     Q_PROPERTY(QVariantMap music READ music NOTIFY projectChanged)
@@ -60,6 +62,14 @@ class Backend : public QObject {
     Q_PROPERTY(QString message READ message NOTIFY messageChanged)
     Q_PROPERTY(bool messageIsError READ messageIsError NOTIFY messageChanged)
     Q_PROPERTY(QString lastExport READ lastExport NOTIFY messageChanged)
+    Q_PROPERTY(QString postCaption READ postCaption NOTIFY projectChanged)
+    Q_PROPERTY(QString postHashtags READ postHashtags NOTIFY projectChanged)
+    // The Instagram account Reelcut can publish to through Instagram's API, or empty.
+    Q_PROPERTY(QString instagramUser READ instagramUser NOTIFY instagramChanged)
+    // Scheduled posts (src/postscheduler.h): whether the backend is set up, and what's on it.
+    Q_PROPERTY(bool schedulerReady READ schedulerReady NOTIFY schedulerChanged)
+    Q_PROPERTY(QVariantList scheduledPosts READ scheduledPosts NOTIFY schedulerChanged)
+    Q_PROPERTY(QString schedulerError READ schedulerError NOTIFY schedulerChanged)
     Q_PROPERTY(QString whisperState READ whisperState NOTIFY jobChanged)
 
 public:
@@ -76,6 +86,7 @@ public:
     QString captionStyle() const { return m_project.captionStyle; }
     double captionX() const { return m_project.captionX; }
     double captionY() const { return m_project.captionY; }
+    bool captionAuto() const { return m_project.captionAuto; }
     double captionSize() const { return m_project.captionScale; }
     QVariantList overlays() const;
     QVariantMap music() const;
@@ -104,6 +115,8 @@ public:
     QString message() const { return m_message; }
     bool messageIsError() const { return m_messageIsError; }
     QString lastExport() const { return m_lastExport; }
+    QString postCaption() const { return m_project.postCaption; }
+    QString postHashtags() const { return m_project.postHashtags; }
     // ready, no-whisper (the tool isn't installed), or no-model (downloads on first use)
     QString whisperState() const;
 
@@ -172,6 +185,8 @@ public:
     Q_INVOKABLE void chooseLut();
     Q_INVOKABLE void clearLut();
     Q_INVOKABLE void setPlatform(const QString &platform);
+    // Puts the captions back on the platform's home spot.
+    Q_INVOKABLE void resetCaptionPosition();
 
     // Files and jobs
     Q_INVOKABLE void newProject();
@@ -180,6 +195,45 @@ public:
     Q_INVOKABLE void save();
     Q_INVOKABLE void saveAs();
     Q_INVOKABLE void exportVideo();
+    // Posting (src/posting.h): what the caption will be and whether it fits,
+    // then export, open the site's upload page, show the file and copy the text.
+    Q_INVOKABLE QVariantMap checkPost(const QString &platform, const QString &caption, const QString &hashtags) const;
+    // Successive keystrokes share one undo step when newUndoStep is false.
+    Q_INVOKABLE void setPostText(const QString &caption, const QString &hashtags, bool newUndoStep = true);
+    // publish: Instagram only, through its API (src/instagramapi.h), when an
+    // account is connected. Otherwise the site opens for you to post by hand.
+    // publishAtMs, when set (ms since the epoch), schedules the Instagram post
+    // for then instead of publishing now.
+    Q_INVOKABLE void post(const QString &platform, const QString &caption, const QString &hashtags,
+                          bool publish = false, double publishAtMs = 0);
+    // A typed time to post at: "2026-11-05 18:30", "tomorrow 9am", "today 6:30pm", "fri 9:00".
+    // Gives ok, ms, label ("Thursday, Nov 5 at 6:30 PM · in 13 hours") and problem.
+    Q_INVOKABLE QVariantMap parseWhen(const QString &text) const;
+    // The next full hour, at least an hour away, as parseWhen reads it; or text moved by minutes.
+    Q_INVOKABLE QString suggestWhen(const QString &text = {}, int minutes = 0) const;
+    Q_INVOKABLE void setupScheduler(const QString &url, const QString &key);
+    Q_INVOKABLE void refreshScheduled();
+    Q_INVOKABLE void cancelScheduled(const QString &id);
+    Q_INVOKABLE void rescheduleScheduled(const QString &id, double publishAtMs);
+    Q_INVOKABLE void retryScheduled(const QString &id);
+    Q_INVOKABLE void removeScheduled(const QString &id);
+    bool schedulerReady() const;
+    QVariantList scheduledPosts() const;
+    QString schedulerError() const;
+    class PostScheduler *scheduler() const { return m_scheduler; }
+    Q_INVOKABLE void connectInstagram(const QString &token);
+    Q_INVOKABLE void disconnectInstagram();
+    Q_INVOKABLE void openLink(const QUrl &url);
+    QString instagramUser() const;
+    void openForHand(const QString &platform);
+    class InstagramApi *instagram() const { return m_instagram; }
+    Q_INVOKABLE void copyPostText();
+    Q_INVOKABLE void showPostVideo();
+    // What posting does outside the app: open a web page, show a file. Tests
+    // replace both so nothing opens.
+    std::function<void(const QUrl &)> openUrl;
+    std::function<void(const QString &)> revealFile;
+    QString postFolder;  // where posted videos are exported; empty for ~/Videos
     // A photo set for TikTok's photo mode, one JPG per clip, in ~/Videos.
     Q_INVOKABLE void exportPhotos();
     Q_INVOKABLE void cancelJob();
@@ -187,6 +241,15 @@ public:
     Q_INVOKABLE void showExport();
 
 signals:
+    // The upload page is open, the file shown and the text copied.
+    void postOpened(const QString &platform, const QString &file, const QString &steps);
+    void instagramChanged();
+    void instagramConnected(bool ok, const QString &message);
+    // Publishing through the API: what's happening (fraction -1 when unknown), then the result.
+    void postProgress(const QString &text, double fraction);
+    void postPublished(bool ok, const QString &message, const QUrl &link);
+    void postScheduled(bool ok, const QString &message);
+    void schedulerChanged();
     void projectChanged();
     void jobChanged();
     void messageChanged();
@@ -227,6 +290,10 @@ private:
     QString m_message;
     bool m_messageIsError = false;
     QString m_lastExport;
+    std::function<void(const QString &)> m_afterExport;  // runs once an export succeeds
+    QString m_postFile;
+    class InstagramApi *m_instagram = nullptr;
+    class PostScheduler *m_scheduler = nullptr;
 
     QHash<QString, int> m_thumbKeys;
     QString m_stateDir;

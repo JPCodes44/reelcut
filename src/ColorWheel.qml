@@ -20,7 +20,7 @@ ColumnLayout {
 
     RowLayout {
         Layout.fillWidth: true
-        Label { text: root.label; font.bold: true; Layout.fillWidth: true }
+        Label { text: root.label; font.bold: true; Layout.fillWidth: true; elide: Text.ElideRight }
         ToolButton {
             text: "↺"
             font.pixelSize: 14
@@ -34,9 +34,13 @@ ColumnLayout {
     Item {
         id: face
         objectName: "wheel-" + root.label
+        // Square, up to 150px, shrinking with the column so two fit side by side.
         Layout.alignment: Qt.AlignHCenter
+        Layout.fillWidth: true
+        Layout.minimumWidth: 96
         Layout.preferredWidth: 150
-        Layout.preferredHeight: 150
+        Layout.maximumWidth: 150
+        Layout.preferredHeight: width
 
         ShaderEffect {
             anchors.fill: parent
@@ -93,7 +97,8 @@ ColumnLayout {
 
     RowLayout {
         Layout.alignment: Qt.AlignHCenter
-        spacing: 8
+        Layout.maximumWidth: root.width
+        spacing: 6
         Repeater {
             model: [["R", "#ff6b6b"], ["G", "#69db7c"], ["B", "#74c0fc"]]
             Label {

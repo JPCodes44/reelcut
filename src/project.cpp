@@ -133,6 +133,7 @@ QJsonObject Project::toJson(const QString &baseDir) const {
             {"fill", o.fill}, {"outline", o.outline}, {"shadow", o.shadow}, {"box", o.box},
             {"font", o.font}, {"bold", o.bold}, {"italic", o.italic}, {"outlineWidth", o.outlineWidth},
             {"shadowDistance", o.shadowDistance}, {"letterSpacing", o.letterSpacing},
+            {"spacingDefault", o.spacingDefault}, {"noShadow", o.noShadow}, {"thickness", o.thickness},
         });
     }
     QJsonArray effectArray;
@@ -154,12 +155,14 @@ QJsonObject Project::toJson(const QString &baseDir) const {
         {"captionStyle", captionStyle},
         {"captionX", captionX},
         {"captionY", captionY},
+        {"captionAuto", captionAuto},
         {"captionScale", captionScale},
         {"look", QJsonObject{{"exposure", look.exposure}, {"contrast", look.contrast},
                              {"saturation", look.saturation}, {"temperature", look.temperature},
                              {"lut", storePath(look.lut, baseDir)}, {"filter", look.filter},
                              {"filterAmount", look.filterAmount}, {"grade", look.grade.toJson()}}},
         {"platform", platform},
+        {"post", QJsonObject{{"caption", postCaption}, {"hashtags", postHashtags}}},
     };
 }
 
@@ -222,6 +225,10 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
         overlay.outlineWidth = qMin(30.0, o.value("outlineWidth").toDouble(-1));
         overlay.shadowDistance = qMin(30.0, o.value("shadowDistance").toDouble(-1));
         overlay.letterSpacing = qBound(-20.0, o.value("letterSpacing").toDouble(), 60.0);
+        // Projects from before the box: spacing that was set stays on.
+        overlay.spacingDefault = o.value("spacingDefault").toBool(overlay.letterSpacing == 0);
+        overlay.noShadow = o.value("noShadow").toBool();
+        overlay.thickness = qBound(0.0, o.value("thickness").toDouble(), 20.0);
         p.overlays.append(overlay);
     }
     for (const auto &value : json.value("effects").toArray()) {
@@ -256,7 +263,18 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
     p.look.filter = filter ? filter->id : QString();
     p.look.filterAmount = qBound(0.0, l.value("filterAmount").toDouble(1.0), 1.0);
     p.look.grade = ColorGrade::Grade::fromJson(l.value("grade").toObject());
-    p.platform = json.value("platform").toString(p.platform);
+    p.platform = json.value("platform").toString(p.platform) == "tiktok" ? "tiktok" : "instagram";
+    // Files from before captionAuto: captions still on the old fixed default
+    // count as never moved.
+    p.captionAuto = json.contains("captionAuto") ? json.value("captionAuto").toBool()
+                                                 : (qFuzzyCompare(p.captionX, 0.5) && qFuzzyCompare(p.captionY, 0.68));
+    if (p.captionAuto) {
+        const QPointF home = captionHome(p.platform);
+        p.captionX = home.x();
+        p.captionY = home.y();
+    }
+    p.postCaption = json.value("post").toObject().value("caption").toString();
+    p.postHashtags = json.value("post").toObject().value("hashtags").toString();
     return p;
 }
 
@@ -360,12 +378,12 @@ bool Overlay::setColor(const QString &part, const QString &value) {
 }
 
 // Plain text: bold Noto Sans with an 8 px outline, like the captions.
-// Fisheye: regular Liberation Serif, a 3 px outline when it has one.
+// Fisheye: regular Liberation Serif, a black outline 0 px wide until set.
 QString Overlay::fontOf() const {
     return !font.isEmpty() ? font : style == "fisheye" ? QStringLiteral("Liberation Serif") : QStringLiteral("Noto Sans");
 }
 bool Overlay::boldOf() const { return bold >= 0 ? bold == 1 : style != "fisheye"; }
-double Overlay::outlineWidthOf() const { return outlineWidth >= 0 ? outlineWidth : style == "fisheye" ? 3 : 8; }
+double Overlay::outlineWidthOf() const { return outlineWidth >= 0 ? outlineWidth : style == "fisheye" ? 0 : 8; }
 double Overlay::shadowDistanceOf() const { return shadowDistance >= 0 ? shadowDistance : style == "fisheye" ? 6 : 5; }
 
 QString Overlay::colorOf(const QString &part) const {
@@ -376,8 +394,10 @@ QString Overlay::colorOf(const QString &part) const {
     // Plain text: white with a black outline. Fisheye: yellow with a soft shadow.
     if (part == "fill")
         return fisheye ? "#ffffee00" : "#ffffffff";
+    // Both styles have a black outline; fisheye's is 0 px wide until the
+    // thickness slider moves (outlineWidthOf), so that slider always shows.
     if (part == "outline")
-        return fisheye ? "#00000000" : "#ff000000";
+        return "#ff000000";
     if (part == "shadow")
         return fisheye ? "#8c000000" : "#00000000";
     return "#00000000";
@@ -424,8 +444,20 @@ bool Project::setOverlayValue(int index, const QString &key, const QVariant &val
         o.outlineWidth = value.toDouble() < 0 ? -1 : qBound(0.0, value.toDouble(), 30.0);
     else if (key == "shadowDistance")
         o.shadowDistance = value.toDouble() < 0 ? -1 : qBound(0.0, value.toDouble(), 30.0);
-    else if (key == "letterSpacing")
-        o.letterSpacing = qBound(-20.0, value.toDouble(), 60.0);
+    else if (key == "letterSpacing") {
+        // "default" ticks the Default box; a number sets the spacing and unticks it.
+        if (value.toString() == "default")
+            o.spacingDefault = true;
+        else {
+            o.letterSpacing = qBound(-20.0, value.toDouble(), 60.0);
+            o.spacingDefault = false;
+        }
+    } else if (key == "spacingDefault")
+        o.spacingDefault = value.toBool();
+    else if (key == "noShadow")
+        o.noShadow = value.toBool();
+    else if (key == "thickness")
+        o.thickness = qBound(0.0, value.toDouble(), 20.0);
     else
         return false;
     return true;
@@ -460,15 +492,51 @@ bool Project::setFilter(const QString &id) {
     return true;
 }
 
+namespace {
+// Safe zones in 1080x1920 pixels: what each app's buttons and text leave
+// clear. Keep in step with the dashed outline in Preview.qml.
+struct SafeZone { double left, top, right, bottom; };
+SafeZone safeZone(const QString &platform) {
+    if (platform == "tiktok")
+        return {40, 160, 1080 - 150, 1920 - 480};
+    return {40, 220, 1080 - 130, 1920 - 420};
+}
+}
+
+QPointF Project::captionHome(const QString &platform) {
+    const SafeZone z = safeZone(platform);
+    // 190px above the bottom of the safe zone leaves room for two lines of
+    // captions before the app's own text starts.
+    return {(z.left + z.right) / 2 / 1080.0, (z.bottom - 190) / 1920.0};
+}
+
+void Project::setPlatform(const QString &name) {
+    platform = name == "tiktok" ? "tiktok" : "instagram";
+    if (captionAuto) {
+        const QPointF home = captionHome(platform);
+        captionX = home.x();
+        captionY = home.y();
+        return;
+    }
+    // Moved by hand: keep the spot, but not under the new app's buttons. The
+    // center stays a caption's half-height (about 90px) inside the zone.
+    const SafeZone z = safeZone(platform);
+    captionX = qBound((z.left + 120) / 1080.0, captionX, (z.right - 120) / 1080.0);
+    captionY = qBound((z.top + 90) / 1920.0, captionY, (z.bottom - 90) / 1920.0);
+}
+
 bool Project::setCaptionValue(const QString &key, double value) {
-    if (key == "x")
+    if (key == "x") {
         captionX = qBound(0.0, value, 1.0);
-    else if (key == "y")
+        captionAuto = false;
+    } else if (key == "y") {
         captionY = qBound(0.05, value, 0.95);
-    else if (key == "scale")
+        captionAuto = false;
+    } else if (key == "scale") {
         captionScale = qBound(0.5, value, 2.0);
-    else
+    } else {
         return false;
+    }
     return true;
 }
 

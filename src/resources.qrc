@@ -2,8 +2,11 @@
     <qresource prefix="/">
         <file alias="Main.qml">Main.qml</file>
         <file alias="Preview.qml">Preview.qml</file>
+        <file alias="SocialPreview.qml">SocialPreview.qml</file>
+        <file alias="SocialIcon.qml">SocialIcon.qml</file>
         <file alias="CaptionLayer.qml">CaptionLayer.qml</file>
         <file alias="ReelTimeline.qml">ReelTimeline.qml</file>
+        <file alias="Waveform.qml">Waveform.qml</file>
         <file alias="Inspector.qml">Inspector.qml</file>
         <file alias="ValueSlider.qml">ValueSlider.qml</file>
         <file alias="HelpOverlay.qml">HelpOverlay.qml</file>
@@ -21,5 +24,7 @@
         <file alias="ColorWheel.qml">ColorWheel.qml</file>
         <file alias="GradePanel.qml">GradePanel.qml</file>
         <file alias="GradeEffect.qml">GradeEffect.qml</file>
+        <file alias="PostDialog.qml">PostDialog.qml</file>
+        <file alias="FontPicker.qml">FontPicker.qml</file>
     </qresource>
 </RCC>

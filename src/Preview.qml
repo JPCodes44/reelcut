@@ -16,6 +16,7 @@ Rectangle {
 
     property real time: 0
     property bool safeZones: true
+    property bool showAppUi: true
     property bool playing: false
     property int clipIndex: -1
     property var currentClip: clipIndex >= 0 && clipIndex < backend.clips.length ? backend.clips[clipIndex] : null
@@ -139,7 +140,7 @@ Rectangle {
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 16
-        spacing: 10
+        spacing: 12
 
         Item {
             id: stage
@@ -150,6 +151,25 @@ Rectangle {
             Rectangle {
                 id: frame
                 readonly property real scaleFactor: height / 1920
+                // Where dragged text and captions snap, in frame pixels: the
+                // frame's center lines and thirds (where the eye goes first),
+                // the middle of the safe zone, and the safe zone's borders.
+                readonly property var snapGuides: {
+                    const w = width, h = height
+                    const dedupe = function(list) {
+                        const out = []
+                        for (const v of list.sort((a, b) => a - b))
+                            if (out.length === 0 || v - out[out.length - 1] > 2) out.push(v)
+                        return out
+                    }
+                    return {
+                        area: frame,
+                        x: dedupe([w / 2, w / 3, w * 2 / 3, (safeArea.leftEdge + safeArea.rightEdge) / 2]),
+                        y: dedupe([h / 2, h / 3, h * 2 / 3, (safeArea.topEdge + safeArea.bottomEdge) / 2]),
+                        edgeX: [safeArea.leftEdge, safeArea.rightEdge],
+                        edgeY: [safeArea.topEdge, safeArea.bottomEdge]
+                    }
+                }
                 height: Math.min(stage.height, stage.width * 16 / 9)
                 width: height * 9 / 16
                 anchors.centerIn: parent
@@ -263,15 +283,28 @@ Rectangle {
                         })
                     }
                     onClicked: function(m) { pick(m.x, m.y) }
+                    // Fits a narrow frame: the pill never grows past the frame's
+                    // width, and the hint elides instead of being cut off.
                     Rectangle {
                         anchors.horizontalCenter: parent.horizontalCenter
                         anchors.top: parent.top
-                        anchors.topMargin: 10
-                        width: hint.implicitWidth + 20
-                        height: hint.implicitHeight + 10
+                        anchors.topMargin: 8
+                        width: Math.min(hint.implicitWidth + 24, parent.width - 16)
+                        height: hint.implicitHeight + 12
                         radius: height / 2
                         color: "#cc000000"
-                        Label { id: hint; anchors.centerIn: parent; text: qsTr("Click to pick a color · Esc to cancel"); color: "white"; font.pixelSize: 12 }
+                        Label {
+                            id: hint
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 12
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                            elide: Text.ElideRight
+                            text: qsTr("Click to pick a color · Esc to cancel")
+                            color: "white"
+                            font.pixelSize: 12
+                        }
                     }
                 }
 
@@ -279,6 +312,8 @@ Rectangle {
                 EditBox {
                     objectName: "clipBox"
                     anchors.fill: parent
+                    // Guides only: the picture snaps its pan, not its box.
+                    snap: ({ area: frame, x: [], y: [], edgeX: [], edgeY: [] })
                     handlesInside: true
                     visible: root.currentClip !== null
                     selected: win.selectionKind === "clip" && win.selectedClip === root.clipIndex
@@ -298,9 +333,27 @@ Rectangle {
                         spanY = (framed.height - frame.height) / 2
                     }
                     onBegan: backend.checkpoint()
+                    // Pan snaps to centered (0) and to the picture's edges (±1)
+                    // when the picture is within a few pixels of them.
+                    function snapPan(pan, span, line) {
+                        if (!snapping)
+                            return [pan, -1]
+                        for (const target of [0, -1, 1])
+                            if (Math.abs((pan - target) * span) < snapDistance)
+                                return [target, target === 0 ? line : -1]
+                        return [pan, -1]
+                    }
                     onDragged: function(dx, dy) {
-                        if (spanX > 0.5) backend.setClipValue(root.clipIndex, "panX", startPanX - dx / spanX)
-                        if (spanY > 0.5) backend.setClipValue(root.clipIndex, "panY", startPanY - dy / spanY)
+                        if (spanX > 0.5) {
+                            const px = snapPan(startPanX - dx / spanX, spanX, frame.width / 2)
+                            backend.setClipValue(root.clipIndex, "panX", px[0])
+                            guideX = px[1]
+                        }
+                        if (spanY > 0.5) {
+                            const py = snapPan(startPanY - dy / spanY, spanY, frame.height / 2)
+                            backend.setClipValue(root.clipIndex, "panY", py[0])
+                            guideY = py[1]
+                        }
                     }
                     onResized: function(factor) { backend.setClipValue(root.clipIndex, "zoom", startZoom * factor) }
                     onWheeled: function(steps) {
@@ -317,6 +370,7 @@ Rectangle {
 
                 CaptionLayer {
                     anchors.fill: parent
+                    snap: frame.snapGuides
                     time: root.time
                     animate: root.playing
                     scaleFactor: frame.scaleFactor
@@ -324,6 +378,21 @@ Rectangle {
 
                 // Where the app's own buttons and text don't cover the video:
                 // a dashed outline only, so the picture itself stays untouched.
+                // One logical phone surface scales every layout, icon and
+                // text size together, including at narrow preview widths.
+                SocialPreview {
+                    width: 360
+                    height: 640
+                    scale: frame.width / 360
+                    anchors.centerIn: parent
+                    visible: root.showAppUi
+                    tiktok: backend.platform === "tiktok"
+                    username: backend.instagramUser.length > 0 && !tiktok ? backend.instagramUser : "your_account"
+                    caption: backend.postCaption
+                    hashtags: backend.checkPost(backend.platform, backend.postCaption, backend.postHashtags).tags.join(" ")
+                    onEditRequested: postEditor.begin()
+                }
+
                 Shape {
                     id: safeArea
                     anchors.fill: parent
@@ -360,20 +429,28 @@ Rectangle {
 
                 Label {
                     anchors.centerIn: parent
+                    width: parent.width - 32
                     visible: root.currentClip !== null && root.currentClip.offline
                     text: qsTr("Missing file:\n%1").arg(root.currentClip ? root.currentClip.name : "")
                     horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WrapAtWordBoundaryOrAnywhere
                     color: "#ff8a65"
                 }
             }
 
             // Empty state
+            // Sits inside the 9:16 frame so the text wraps within it.
             ColumnLayout {
-                anchors.centerIn: parent
+                // Falls back to the wider stage when the frame gets too narrow.
+                anchors.horizontalCenter: frame.horizontalCenter
+                anchors.verticalCenter: frame.verticalCenter
+                width: Math.min(stage.width - 32, Math.max(frame.width - 32, 260))
                 visible: backend.clips.length === 0
-                spacing: 14
+                spacing: 12
                 Label {
-                    Layout.alignment: Qt.AlignHCenter
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
                     text: qsTr("Drop videos or photos here to start a reel")
                     font.pixelSize: 20
                 }
@@ -385,7 +462,9 @@ Rectangle {
                     onClicked: backend.addMedia()
                 }
                 Label {
-                    Layout.alignment: Qt.AlignHCenter
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
                     text: qsTr("Press ? for shortcuts")
                     color: "#9a9aa2"
                 }
@@ -393,18 +472,41 @@ Rectangle {
         }
 
         RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            CheckBox {
+                objectName: "showAppUi"
+                text: qsTr("Show app UI")
+                checked: true
+                onCheckedChanged: root.showAppUi = checked
+            }
+            Item { Layout.fillWidth: true }
+            Button {
+                objectName: "editPostText"
+                text: qsTr("Caption and tags")
+                onClicked: postEditor.begin()
+            }
+        }
+
+        // Transport: centered; the time label can shrink and elide on narrow panels.
+        RowLayout {
             Layout.alignment: Qt.AlignHCenter
             spacing: 12
             ToolButton {
+                // Fixed width: the two glyphs differ, so the row would shift.
+                Layout.preferredWidth: 48
                 text: root.playing ? "❚❚" : "▶"
                 font.pixelSize: 18
                 enabled: backend.clips.length > 0
                 onClicked: root.toggle()
             }
             Label {
+                Layout.alignment: Qt.AlignVCenter
+                Layout.minimumWidth: 0
                 text: win.timeText(root.time) + " / " + win.timeText(backend.duration)
                 font.family: "monospace"
                 color: "#c8c8cf"
+                elide: Text.ElideRight
             }
             ToolButton {
                 text: qsTr("Safe zones")
@@ -412,6 +514,75 @@ Rectangle {
                 checked: root.safeZones
                 onToggled: win.safeZones = checked
                 font.pixelSize: 12
+            }
+        }
+    }
+
+    Popup {
+        id: postEditor
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 32, 500)
+        height: Math.min(parent.height - 32, implicitHeight)
+        padding: 20
+        modal: true
+        property bool editing: false
+        property bool hasEdited: false
+        function begin() {
+            editing = false
+            previewCaption.text = backend.postCaption
+            previewTags.text = backend.postHashtags
+            hasEdited = false
+            editing = true
+            open()
+            previewCaption.forceActiveFocus()
+        }
+        function updateText() {
+            if (!editing) return
+            backend.setPostText(previewCaption.text, previewTags.text, !hasEdited)
+            hasEdited = true
+        }
+        onClosed: editing = false
+        contentItem: ColumnLayout {
+            spacing: 8
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("%1 preview text").arg(backend.platform === "tiktok" ? "TikTok" : "Instagram")
+                font.bold: true
+                wrapMode: Text.WordWrap
+            }
+            Label { text: qsTr("Caption") }
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 120
+                clip: true
+                TextArea {
+                    id: previewCaption
+                    objectName: "previewPostCaption"
+                    wrapMode: TextEdit.Wrap
+                    placeholderText: qsTr("What's this reel about?")
+                    onTextChanged: postEditor.updateText()
+                }
+            }
+            Label { text: qsTr("Hashtags") }
+            TextField {
+                id: previewTags
+                objectName: "previewPostHashtags"
+                Layout.fillWidth: true
+                placeholderText: qsTr("#travel #sunset")
+                onTextChanged: postEditor.updateText()
+            }
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("Saved with your project and used when posting. App UI is preview only.")
+                wrapMode: Text.WordWrap
+                font.pixelSize: 12
+                opacity: 0.7
+            }
+            Button {
+                Layout.alignment: Qt.AlignRight
+                text: qsTr("Done")
+                onClicked: postEditor.close()
             }
         }
     }

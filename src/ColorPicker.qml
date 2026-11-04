@@ -19,7 +19,7 @@ RowLayout {
     property string shown: "#ffffffff"
     signal picked(string value)
 
-    spacing: 8
+    spacing: 10
     Layout.fillWidth: true
 
     readonly property bool isDefault: value === ""
@@ -71,7 +71,7 @@ RowLayout {
         property var colors: []
     }
 
-    Label { text: root.label; Layout.preferredWidth: 64 }
+    Label { text: root.label; Layout.preferredWidth: 72; elide: Text.ElideRight }  // Inspector's labelWidth
 
     // The swatch: the color over a checkerboard, so see-through shows.
     AbstractButton {
@@ -93,13 +93,15 @@ RowLayout {
             // The name on a small dark pill, readable over any color.
             Rectangle {
                 anchors.centerIn: parent
-                width: name.implicitWidth + 12
+                width: Math.min(name.implicitWidth + 12, parent.width - 8)
                 height: name.implicitHeight + 4
                 radius: height / 2
                 color: "#b0000000"
                 Label {
                     id: name
                     anchors.centerIn: parent
+                    width: Math.min(implicitWidth, parent.width - 12)
+                    elide: Text.ElideRight
                     text: root.isDefault ? qsTr("Default") : root.isTransparent ? qsTr("Transparent")
                                                              : root.value.toUpperCase()
                     font.pixelSize: 11
@@ -142,7 +144,7 @@ RowLayout {
 
             RowLayout {
                 Layout.fillWidth: true
-                Label { text: root.label; font.bold: true; Layout.fillWidth: true }
+                Label { text: root.label; font.bold: true; Layout.fillWidth: true; elide: Text.ElideRight }
                 Button {
                     text: qsTr("Default")
                     flat: true
@@ -161,8 +163,8 @@ RowLayout {
             Item {
                 id: wheelArea
                 Layout.alignment: Qt.AlignHCenter
-                width: 180
-                height: 180
+                Layout.preferredWidth: 180
+                Layout.preferredHeight: 180
                 ShaderEffect {
                     anchors.fill: parent
                     property real value: Math.max(0.15, root.v)
@@ -197,24 +199,24 @@ RowLayout {
 
             RowLayout {
                 Layout.fillWidth: true
-                Label { text: qsTr("Brightness"); Layout.preferredWidth: 76 }
+                Label { text: qsTr("Brightness"); Layout.preferredWidth: 76; elide: Text.ElideRight }
                 Slider {
                     Layout.fillWidth: true
                     from: 0; to: 1; value: root.v
                     onMoved: { root.v = value; root.commit() }
                 }
-                Label { text: Math.round(root.v * 100) + "%"; font.family: "monospace"; color: "#9a9aa2"; Layout.preferredWidth: 40 }
+                Label { text: Math.round(root.v * 100) + "%"; font.family: "monospace"; color: "#9a9aa2"; horizontalAlignment: Text.AlignRight; Layout.preferredWidth: 40 }
             }
             RowLayout {
                 Layout.fillWidth: true
-                Label { text: qsTr("Opacity"); Layout.preferredWidth: 76 }
+                Label { text: qsTr("Opacity"); Layout.preferredWidth: 76; elide: Text.ElideRight }
                 Slider {
                     objectName: "opacitySlider"
                     Layout.fillWidth: true
                     from: 0; to: 1; value: root.a
                     onMoved: { root.a = value; root.commit() }
                 }
-                Label { text: Math.round(root.a * 100) + "%"; font.family: "monospace"; color: "#9a9aa2"; Layout.preferredWidth: 40 }
+                Label { text: Math.round(root.a * 100) + "%"; font.family: "monospace"; color: "#9a9aa2"; horizontalAlignment: Text.AlignRight; Layout.preferredWidth: 40 }
             }
 
             // Exact numbers: hex, RGB, HSV.
@@ -222,7 +224,7 @@ RowLayout {
                 Layout.fillWidth: true
                 columns: 4
                 columnSpacing: 6
-                rowSpacing: 4
+                rowSpacing: 6
                 Label { text: qsTr("Hex") }
                 TextField {
                     objectName: "hexField"
@@ -246,6 +248,7 @@ RowLayout {
                     SpinBox {
                         required property int index
                         Layout.fillWidth: true
+                        Layout.preferredWidth: 1
                         from: 0; to: 255; editable: true
                         readonly property color c: Qt.hsva(root.h / 360, root.s, root.v, 1)
                         value: Math.round([c.r, c.g, c.b][index] * 255)
@@ -261,18 +264,21 @@ RowLayout {
                 Label { text: "H S V" }
                 SpinBox {
                     Layout.fillWidth: true
+                    Layout.preferredWidth: 1
                     from: 0; to: 359; editable: true; wrap: true
                     value: Math.round(root.h)
                     onValueModified: { root.h = value; root.commit() }
                 }
                 SpinBox {
                     Layout.fillWidth: true
+                    Layout.preferredWidth: 1
                     from: 0; to: 100; editable: true
                     value: Math.round(root.s * 100)
                     onValueModified: { root.s = value / 100; root.commit() }
                 }
                 SpinBox {
                     Layout.fillWidth: true
+                    Layout.preferredWidth: 1
                     from: 0; to: 100; editable: true
                     value: Math.round(root.v * 100)
                     onValueModified: { root.v = value / 100; root.commit() }
@@ -293,7 +299,7 @@ RowLayout {
                 Layout.fillWidth: true
                 spacing: 6
                 visible: (recent.colors || []).length > 0
-                Label { text: qsTr("Recent"); color: "#9a9aa2"; font.pixelSize: 11; height: 22; verticalAlignment: Text.AlignVCenter }
+                Label { text: qsTr("Recent"); color: "#9a9aa2"; font.pixelSize: 11; height: 28; verticalAlignment: Text.AlignVCenter }
                 Repeater {
                     model: recent.colors || []
                     delegate: swatchDot
@@ -321,15 +327,17 @@ RowLayout {
     Component {
         id: swatchDot
         AbstractButton {
+            id: dot
             required property var modelData
-            width: 22; height: 22
+            // 28px: a comfortable click target; 8 fit a row of the 300px popup.
+            width: 28; height: 28
             onClicked: { root.load(modelData); root.commit() }
             background: Item {
                 Checkers { anchors.fill: parent }
                 Rectangle {
                     anchors.fill: parent
                     color: modelData
-                    border.color: "#5a5a62"
+                    border.color: dot.hovered ? "white" : "#5a5a62"
                 }
             }
         }

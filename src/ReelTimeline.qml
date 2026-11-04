@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls.Material
+import QtQuick.Layouts
 
 // The edit laid out in time: clips with filmstrips and trim handles, then
 // lanes for captions, text overlays and music. Ctrl+scroll zooms.
@@ -19,6 +20,16 @@ Rectangle {
     readonly property real rulerH: 22
     readonly property real videoH: 76
     readonly property real laneH: 28
+    property real musicH: 52
+    // Lane stacking, shared by the gutter labels and the time-positioned
+    // blocks so the two can't drift apart: Video, Captions, Text, Music, Effects.
+    readonly property real laneGap: 6
+    readonly property real videoY: rulerH + laneGap
+    readonly property real captionsY: videoY + videoH + laneGap
+    readonly property real textY: captionsY + laneH + laneGap
+    readonly property real musicY: textY + laneH + laneGap
+    readonly property real effectsY: musicY + musicH + laneGap
+    implicitHeight: effectsY + laneH + 14
 
     // Keep the playhead in view while playing or stepping.
     onPlayheadChanged: {
@@ -34,24 +45,86 @@ Rectangle {
     signal captionsSelected()
     signal musicSelected()
 
-    // Lane names stay put while the lanes scroll.
-    Column {
+    // Scene coordinates avoid feedback as the timeline itself grows upward.
+    // Keep the handle outside the horizontal Flickable so it spans the view.
+    MouseArea {
+        id: musicResize
+        objectName: "musicResizeHandle"
+        visible: backend.music.set
         x: 0
-        y: root.rulerH + 6
+        y: root.musicY - 4
+        width: root.width
+        height: 8
+        z: 100
+        hoverEnabled: true
+        preventStealing: true
+        cursorShape: Qt.SizeVerCursor
+        property real pressY: 0
+        property real initialHeight: 52
+        onPressed: function(mouse) {
+            pressY = mapToItem(null, mouse.x, mouse.y).y
+            initialHeight = root.musicH
+        }
+        onPositionChanged: function(mouse) {
+            if (pressed) {
+                const delta = mapToItem(null, mouse.x, mouse.y).y - pressY
+                root.musicH = Math.max(52, Math.min(320, initialHeight - delta))
+            }
+        }
+        Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: parent.width
+            height: musicResize.containsMouse || musicResize.pressed ? 2 : 1
+            color: musicResize.containsMouse || musicResize.pressed ? theme.accent : "#526581"
+        }
+        Rectangle {
+            anchors.centerIn: parent
+            width: 32
+            height: 4
+            radius: 2
+            color: musicResize.containsMouse || musicResize.pressed ? theme.accent : "#8799b3"
+        }
+        ToolTip.visible: containsMouse && !pressed
+        ToolTip.text: qsTr("Drag up or down to resize the music waveform")
+    }
+
+    // Lane names stay put while the lanes scroll. The corner above them, beside
+    // the ruler, holds the zoom hint so it never covers a lane.
+    ColumnLayout {
+        anchors.left: parent.left
+        anchors.top: parent.top
         width: root.gutter
-        spacing: 6
+        spacing: root.laneGap
+
+        Label {
+            Layout.fillWidth: true
+            Layout.preferredHeight: root.rulerH
+            leftPadding: 12
+            rightPadding: 4
+            text: qsTr("Ctrl+scroll")
+            color: "#5e5e66"
+            font.pixelSize: 10
+            elide: Text.ElideRight
+            verticalAlignment: Text.AlignVCenter
+            ToolTip.visible: zoomHint.hovered
+            ToolTip.text: qsTr("Ctrl+scroll to zoom")
+            HoverHandler { id: zoomHint }
+        }
+
         Repeater {
             model: [{ label: qsTr("Video"), h: root.videoH }, { label: qsTr("Captions"), h: root.laneH },
-                    { label: qsTr("Text"), h: root.laneH }, { label: qsTr("Music"), h: root.laneH },
+                    { label: qsTr("Text"), h: root.laneH }, { label: qsTr("Music"), h: root.musicH },
                     { label: qsTr("Effects"), h: root.laneH }]
             delegate: Label {
                 required property var modelData
-                width: root.gutter
-                height: modelData.h
+                Layout.fillWidth: true
+                Layout.preferredHeight: modelData.h
                 text: modelData.label
                 color: "#8a8a92"
                 font.pixelSize: 12
                 leftPadding: 12
+                rightPadding: 4
+                elide: Text.ElideRight
                 verticalAlignment: Text.AlignVCenter
             }
         }
@@ -83,6 +156,22 @@ Rectangle {
             preventStealing: true
             onPressed: function(mouse) { root.seekRequested(mouse.x / root.pps) }
             onPositionChanged: function(mouse) { if (pressed) root.seekRequested(Math.max(0, mouse.x / root.pps)) }
+        }
+
+        // Faint lane tracks so each row reads as a row even when it's empty.
+        Repeater {
+            model: [{ y: root.videoY, h: root.videoH }, { y: root.captionsY, h: root.laneH },
+                    { y: root.textY, h: root.laneH }, { y: root.musicY, h: root.musicH },
+                    { y: root.effectsY, h: root.laneH }]
+            delegate: Rectangle {
+                required property var modelData
+                x: 0
+                y: modelData.y
+                width: flick.contentWidth
+                height: modelData.h
+                radius: Math.min(4, theme.radius)
+                color: Qt.rgba(1, 1, 1, 0.025)
+            }
         }
 
         // Ruler
@@ -119,7 +208,7 @@ Rectangle {
                 x: modelData.start * root.pps + dragOffset
                 z: dragOffset !== 0 ? 10 : 0
                 opacity: dragOffset !== 0 ? 0.8 : 1
-                y: root.rulerH + 6
+                y: root.videoY
                 width: Math.max(4, modelData.duration * root.pps - 2)
                 height: root.videoH
                 radius: Math.min(4, theme.radius)
@@ -153,15 +242,38 @@ Rectangle {
                     }
                 }
 
+                Rectangle {
+                    visible: !!clipItem.modelData.audio && !clipItem.modelData.still
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 2
+                    height: 28
+                    color: "#cc121820"
+                    Waveform {
+                        objectName: "clipWaveform" + clipItem.index
+                        anchors.fill: parent
+                        sourcePath: parent.visible ? (clipItem.modelData.path || "") : ""
+                        sourceStart: clipItem.modelData.in || 0
+                        speed: clipItem.modelData.speed || 1
+                        pixelsPerSecond: root.pps
+                        viewportStart: flick.contentX - clipItem.x
+                        viewportWidth: flick.width
+                    }
+                }
+
+                // Photo / speed badge, clear of the in-handle; hidden when the
+                // clip is too narrow to show it whole.
                 Label {
                     anchors.left: parent.left
                     anchors.bottom: parent.bottom
-                    anchors.margins: 6
+                    anchors.leftMargin: 12
+                    anchors.bottomMargin: 6
                     text: clipItem.modelData.still ? "▣" : clipItem.modelData.speed !== 1 ? clipItem.modelData.speed + "×" : ""
                     font.pixelSize: 11
                     font.bold: true
                     padding: 2
-                    visible: text.length > 0
+                    visible: text.length > 0 && clipItem.width >= width + 24
                     background: Rectangle { color: Qt.rgba(0, 0, 0, 0.6); radius: 2 }
                 }
 
@@ -243,7 +355,7 @@ Rectangle {
             delegate: Rectangle {
                 required property var modelData
                 x: modelData.start * root.pps
-                y: root.rulerH + 6 + root.videoH + 6
+                y: root.captionsY
                 width: Math.max(3, (modelData.end - modelData.start) * root.pps - 1)
                 height: root.laneH
                 radius: Math.min(4, theme.radius)
@@ -251,7 +363,9 @@ Rectangle {
                 clip: true
                 Label {
                     anchors.fill: parent
-                    anchors.leftMargin: 4
+                    anchors.leftMargin: 6
+                    anchors.rightMargin: 6
+                    visible: parent.width >= 16
                     verticalAlignment: Text.AlignVCenter
                     text: parent.modelData.words.map(w => w.text).join(" ")
                     font.pixelSize: 11
@@ -274,7 +388,7 @@ Rectangle {
                 objectName: "transition" + index
                 visible: (modelData.overlap || 0) > 0
                 x: (modelData.start + modelData.duration - (modelData.overlap || 0)) * root.pps
-                y: root.rulerH + 6 + root.videoH - 14
+                y: root.videoY + root.videoH - 14
                 z: 5
                 width: Math.max(10, (modelData.overlap || 0) * root.pps)
                 height: 12
@@ -297,7 +411,7 @@ Rectangle {
                 readonly property var modelData: backend.overlays[index] || ({})
                 required property int index
                 x: modelData.start * root.pps
-                y: root.rulerH + 6 + root.videoH + 6 + root.laneH + 6
+                y: root.textY
                 width: Math.max(3, (modelData.end - modelData.start) * root.pps - 1)
                 height: root.laneH
                 radius: Math.min(4, theme.radius)
@@ -305,7 +419,9 @@ Rectangle {
                 clip: true
                 Label {
                     anchors.fill: parent
-                    anchors.leftMargin: 4
+                    anchors.leftMargin: 6
+                    anchors.rightMargin: 6
+                    visible: parent.width >= 16
                     verticalAlignment: Text.AlignVCenter
                     text: parent.modelData.text
                     color: parent.index === root.selectedOverlay ? theme.accentForeground : "white"
@@ -370,7 +486,7 @@ Rectangle {
                 required property int index
                 readonly property bool selected: index === root.selectedEffect
                 x: modelData.start * root.pps
-                y: root.rulerH + 6 + root.videoH + 6 + (root.laneH + 6) * 3
+                y: root.effectsY
                 width: Math.max(3, (modelData.end - modelData.start) * root.pps - 1)
                 height: root.laneH
                 radius: Math.min(4, theme.radius)
@@ -378,7 +494,9 @@ Rectangle {
                 clip: true
                 Label {
                     anchors.fill: parent
-                    anchors.leftMargin: 4
+                    anchors.leftMargin: 6
+                    anchors.rightMargin: 6
+                    visible: parent.width >= 16
                     verticalAlignment: Text.AlignVCenter
                     text: "✦ " + (effectBar.modelData.label || "")
                     color: effectBar.selected ? theme.accentForeground : "white"
@@ -436,14 +554,32 @@ Rectangle {
         Rectangle {
             visible: backend.music.set
             x: 0
-            y: root.rulerH + 6 + root.videoH + 6 + (root.laneH + 6) * 2
+            y: root.musicY
             width: backend.duration * root.pps
-            height: root.laneH
+            height: root.musicH
             radius: Math.min(4, theme.radius)
             color: Qt.rgba(0.35, 0.55, 1, 0.35)
+            clip: true
+            Waveform {
+                objectName: "musicWaveform"
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 2
+                height: root.musicH - 20
+                sourcePath: backend.music.set ? backend.music.path : ""
+                sourceStart: backend.music.offset || 0
+                pixelsPerSecond: root.pps
+                viewportStart: flick.contentX
+                viewportWidth: flick.width
+            }
             Label {
-                anchors.fill: parent
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: 18
                 anchors.leftMargin: 6
+                anchors.rightMargin: 6
                 verticalAlignment: Text.AlignVCenter
                 text: "♪ " + backend.music.name
                 font.pixelSize: 11
@@ -467,14 +603,5 @@ Rectangle {
                 color: theme.accent
             }
         }
-    }
-
-    Label {
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        anchors.margins: 8
-        text: qsTr("Ctrl+scroll to zoom")
-        font.pixelSize: 11
-        color: "#5e5e66"
     }
 }

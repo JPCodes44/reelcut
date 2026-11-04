@@ -15,6 +15,8 @@ Rectangle {
     // A text overlay is selected: text effects apply to it instead of adding new text.
     property bool textSelected: false
     property bool clipWheelsOpen: true
+    // Width of the label column in the text cards, so their controls line up.
+    readonly property int labelWidth: 72
     property bool lookWheelsOpen: true
 
     // A heading that opens and closes the section under it.
@@ -65,13 +67,12 @@ Rectangle {
                 contentWidth: availableWidth
                 ColumnLayout {
                     width: parent.width
-                    spacing: 14
-                    anchors.margins: 18
+                    spacing: 12
                     Item { Layout.preferredHeight: 4 }
 
                     Label {
-                        Layout.leftMargin: 18
-                        Layout.rightMargin: 18
+                        Layout.leftMargin: 16
+                        Layout.rightMargin: 16
                         Layout.fillWidth: true
                         visible: root.clipData === null
                         text: backend.clips.length === 0 ? qsTr("Add clips to start.") : qsTr("Click a clip in the timeline to edit it.")
@@ -82,8 +83,8 @@ Rectangle {
                     ColumnLayout {
                         visible: root.clipData !== null
                         Layout.fillWidth: true
-                        Layout.leftMargin: 18
-                        Layout.rightMargin: 18
+                        Layout.leftMargin: 16
+                        Layout.rightMargin: 16
                         spacing: 12
 
                         Label {
@@ -95,8 +96,10 @@ Rectangle {
                         Label {
                             text: !root.clipData ? "" : root.clipData.still ? qsTr("Photo, %1x%2").arg(root.clipData.width).arg(root.clipData.height)
                                   : qsTr("%1 → %2, plays %3").arg(root.seconds(root.clipData.in)).arg(root.seconds(root.clipData.out)).arg(root.seconds(root.clipData.duration))
+                            Layout.fillWidth: true
                             color: "#9a9aa2"
                             font.pixelSize: 12
+                            wrapMode: Text.Wrap
                         }
 
                         ValueSlider {
@@ -110,10 +113,14 @@ Rectangle {
                         RowLayout {
                             visible: root.clipData !== null && root.clipData.still
                             Layout.fillWidth: true
-                            Label { text: qsTr("Motion"); Layout.fillWidth: true }
+                            spacing: 10
+                            Label { text: qsTr("Motion"); Layout.fillWidth: true; Layout.minimumWidth: 48; elide: Text.ElideRight }
                             ComboBox {
                                 id: motionBox
+                                Layout.fillWidth: true
                                 Layout.preferredWidth: 200
+                                Layout.maximumWidth: 200
+                                Layout.minimumWidth: 112
                                 textRole: "label"
                                 valueRole: "id"
                                 model: [{ id: "none", label: qsTr("Still") }, { id: "zoom-in", label: qsTr("Zoom in") },
@@ -127,10 +134,14 @@ Rectangle {
                         RowLayout {
                             visible: root.clipData !== null && root.selectedClip < backend.clips.length - 1
                             Layout.fillWidth: true
-                            Label { text: qsTr("Into next clip"); Layout.fillWidth: true }
+                            spacing: 10
+                            Label { text: qsTr("Into next clip"); Layout.fillWidth: true; Layout.minimumWidth: 48; elide: Text.ElideRight }
                             ComboBox {
                                 objectName: "transitionBox"
+                                Layout.fillWidth: true
                                 Layout.preferredWidth: 200
+                                Layout.maximumWidth: 200
+                                Layout.minimumWidth: 112
                                 textRole: "label"
                                 valueRole: "id"
                                 model: [{ id: "", label: qsTr("Cut") }].concat(backend.transitions)
@@ -142,10 +153,14 @@ Rectangle {
                         RowLayout {
                             visible: root.clipData !== null
                             Layout.fillWidth: true
-                            Label { text: qsTr("Body effect"); Layout.fillWidth: true }
+                            spacing: 10
+                            Label { text: qsTr("Body effect"); Layout.fillWidth: true; Layout.minimumWidth: 48; elide: Text.ElideRight }
                             ComboBox {
                                 objectName: "bodyBox"
+                                Layout.fillWidth: true
                                 Layout.preferredWidth: 200
+                                Layout.maximumWidth: 200
+                                Layout.minimumWidth: 112
                                 textRole: "label"
                                 valueRole: "id"
                                 model: [{ id: "", label: qsTr("None") }].concat(backend.bodyKinds)
@@ -222,6 +237,7 @@ Rectangle {
                             Layout.fillWidth: true
                             columns: 2
                             columnSpacing: 8
+                            rowSpacing: 8
                             Button { Layout.fillWidth: true; text: qsTr("Split at playhead"); onClicked: backend.split(root.playhead) }
                             Button {
                                 Layout.fillWidth: true
@@ -253,12 +269,13 @@ Rectangle {
                     }
 
                     Button {
-                        Layout.leftMargin: 18
-                        Layout.rightMargin: 18
+                        Layout.leftMargin: 16
+                        Layout.rightMargin: 16
                         Layout.fillWidth: true
                         text: qsTr("Add Videos or Photos")
                         onClicked: backend.addMedia()
                     }
+                    Item { Layout.preferredHeight: 4 }  // bottom breathing room when scrolled
                 }
             }
 
@@ -267,14 +284,14 @@ Rectangle {
                 contentWidth: availableWidth
                 ColumnLayout {
                     width: parent.width
-                    spacing: 14
+                    spacing: 12
                     Item { Layout.preferredHeight: 4 }
 
                     ColumnLayout {
                         Layout.fillWidth: true
-                        Layout.leftMargin: 18
-                        Layout.rightMargin: 18
-                        spacing: 10
+                        Layout.leftMargin: 16
+                        Layout.rightMargin: 16
+                        spacing: 12
                         visible: backend.wordCount === 0
                         Label {
                             Layout.fillWidth: true
@@ -303,16 +320,17 @@ Rectangle {
 
                     ColumnLayout {
                         Layout.fillWidth: true
-                        Layout.leftMargin: 18
-                        Layout.rightMargin: 18
+                        Layout.leftMargin: 16
+                        Layout.rightMargin: 16
                         spacing: 12
                         visible: backend.wordCount > 0
 
-                        Label { text: qsTr("Style") }
+                        Label { text: qsTr("Style"); font.bold: true }
                         GridLayout {
                             Layout.fillWidth: true
                             columns: 2
                             columnSpacing: 8
+                            rowSpacing: 8
                             Repeater {
                                 model: [{ id: "highlight", label: qsTr("Highlight") }, { id: "pop", label: qsTr("Pop") },
                                         { id: "bold", label: qsTr("Bold") }, { id: "box", label: qsTr("Box") }]
@@ -337,17 +355,44 @@ Rectangle {
                         }
                         ValueSlider {
                             label: qsTr("Up / down")
-                            from: 0.05; to: 0.95; resetValue: 0.68
+                            from: 0.05; to: 0.95
+                            customReset: true
+                            onReset: backend.resetCaptionPosition()
                             value: backend.captionY
                             valueText: Math.round(value * 100) + "%"
                             onMoved: function(v) { backend.setCaptionValue("y", v) }
                         }
                         ValueSlider {
                             label: qsTr("Left / right")
-                            from: 0; to: 1; resetValue: 0.5
+                            from: 0; to: 1
+                            customReset: true
+                            onReset: backend.resetCaptionPosition()
                             value: backend.captionX
                             valueText: Math.round(value * 100) + "%"
                             onMoved: function(v) { backend.setCaptionValue("x", v) }
+                        }
+                        // Captions follow the platform's spot until moved; this
+                        // puts moved captions back on it.
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Label {
+                                Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignVCenter
+                                wrapMode: Text.WordWrap
+                                color: "#9a9aa2"
+                                text: backend.captionAuto
+                                      ? qsTr("Placed for %1. Moves with the platform.").arg(backend.platform === "tiktok" ? "TikTok" : "Instagram")
+                                      : qsTr("Placed by hand.")
+                            }
+                            Button {
+                                objectName: "captionResetPosition"
+                                visible: !backend.captionAuto
+                                text: qsTr("Place for %1").arg(backend.platform === "tiktok" ? "TikTok" : "Instagram")
+                                flat: true
+                                Layout.minimumWidth: implicitWidth
+                                onClicked: backend.resetCaptionPosition()
+                            }
                         }
                         Label {
                             Layout.fillWidth: true
@@ -358,8 +403,17 @@ Rectangle {
                         }
 
                         RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
                             Label { text: qsTr("%n words", "", backend.wordCount); Layout.fillWidth: true }
-                            Label { text: qsTr("Click a word to fix it"); color: "#9a9aa2"; font.pixelSize: 12 }
+                            Label {
+                                Layout.fillWidth: true
+                                horizontalAlignment: Text.AlignRight
+                                elide: Text.ElideRight
+                                text: qsTr("Click a word to fix it")
+                                color: "#9a9aa2"
+                                font.pixelSize: 12
+                            }
                         }
 
                         // The transcript, line by line; a word becomes editable on click.
@@ -425,6 +479,7 @@ Rectangle {
                             Button { Layout.fillWidth: true; text: qsTr("Remove"); flat: true; onClicked: backend.clearCaptions() }
                         }
                     }
+                    Item { Layout.preferredHeight: 4 }
                 }
             }
 
@@ -437,8 +492,8 @@ Rectangle {
                     Item { Layout.preferredHeight: 4 }
 
                     Button {
-                        Layout.leftMargin: 18
-                        Layout.rightMargin: 18
+                        Layout.leftMargin: 16
+                        Layout.rightMargin: 16
                         Layout.fillWidth: true
                         text: qsTr("Add Text at Playhead")
                         enabled: backend.clips.length > 0
@@ -454,8 +509,8 @@ Rectangle {
                             required property int index
                             readonly property bool selected: index === root.selectedOverlay
                             Layout.fillWidth: true
-                            Layout.leftMargin: 12
-                            Layout.rightMargin: 12
+                            Layout.leftMargin: 16
+                            Layout.rightMargin: 16
                             implicitHeight: body.implicitHeight + 24
                             radius: theme.radius
                             color: "#1c1c21"
@@ -479,31 +534,38 @@ Rectangle {
                                     onTextChanged: if (activeFocus && text !== card.modelData.text)
                                                        backend.setOverlayValue(card.index, "text", text)
                                 }
+                                // Each row: a label in a fixed column, the control filling the rest.
                                 RowLayout {
                                     Layout.fillWidth: true
-                                    Label { text: qsTr("From") }
+                                    spacing: 10
+                                    Label { text: qsTr("Starts"); Layout.preferredWidth: root.labelWidth }
                                     SpinBox {
                                         id: startBox
+                                        Layout.fillWidth: true
                                         from: 0; to: Math.ceil(backend.duration * 10); editable: true
                                         value: Math.round(card.modelData.start * 10)
                                         textFromValue: function(v) { return (v / 10).toLocaleString(Qt.locale(), 'f', 1) }
                                         valueFromText: function(t) { return Math.round(Number.fromLocaleString(Qt.locale(), t) * 10) }
                                         onValueModified: { backend.checkpoint(); backend.setOverlayValue(card.index, "start", value / 10) }
-                                        Layout.preferredWidth: 130
                                     }
-                                    Label { text: qsTr("to") }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    Label { text: qsTr("Ends"); Layout.preferredWidth: root.labelWidth }
                                     SpinBox {
+                                        Layout.fillWidth: true
                                         from: 1; to: Math.ceil(backend.duration * 10) + 10; editable: true
                                         value: Math.round(card.modelData.end * 10)
                                         textFromValue: function(v) { return (v / 10).toLocaleString(Qt.locale(), 'f', 1) }
                                         valueFromText: function(t) { return Math.round(Number.fromLocaleString(Qt.locale(), t) * 10) }
                                         onValueModified: { backend.checkpoint(); backend.setOverlayValue(card.index, "end", value / 10) }
-                                        Layout.preferredWidth: 130
                                     }
                                 }
                                 RowLayout {
                                     Layout.fillWidth: true
-                                    Label { text: qsTr("Style") }
+                                    spacing: 10
+                                    Label { text: qsTr("Style"); Layout.preferredWidth: root.labelWidth }
                                     ComboBox {
                                         objectName: "overlayStyle" + card.index
                                         Layout.fillWidth: true
@@ -526,48 +588,47 @@ Rectangle {
                                 // Type: font (every installed family, each shown in itself), bold, italic.
                                 RowLayout {
                                     Layout.fillWidth: true
-                                    Label { text: qsTr("Font") }
-                                    ComboBox {
-                                        id: fontBox
+                                    spacing: 10
+                                    Label { text: qsTr("Font"); Layout.preferredWidth: root.labelWidth }
+                                    // Type to filter the fonts as you go (src/FontPicker.qml).
+                                    FontPicker {
                                         objectName: "overlayFont" + card.index
-                                        Layout.fillWidth: true
-                                        readonly property var families: [""].concat(Qt.fontFamilies())
-                                        model: families
-                                        displayText: card.modelData.font ? card.modelData.font
-                                                                         : qsTr("Default (%1)").arg(card.modelData.fontFamily)
-                                        currentIndex: count > 0 ? Math.max(0, families.indexOf(card.modelData.font || "")) : -1
-                                        font.family: card.modelData.fontFamily
-                                        delegate: ItemDelegate {
-                                            required property var modelData
-                                            required property int index
-                                            width: ListView.view ? ListView.view.width : 200
-                                            text: modelData === "" ? qsTr("Default") : modelData
-                                            font.family: modelData === "" ? fontBox.font.family : modelData
-                                            highlighted: fontBox.highlightedIndex === index
-                                        }
-                                        onActivated: function(i) {
+                                        value: card.modelData.font || ""
+                                        defaultFamily: card.modelData.defaultFont || ""
+                                        onPicked: function(family) {
                                             backend.checkpoint()
-                                            backend.setOverlayValue(card.index, "font", families[i])
+                                            backend.setOverlayValue(card.index, "font", family)
                                         }
                                     }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    Label { text: qsTr("Weight"); Layout.preferredWidth: root.labelWidth }
                                     Button {
                                         objectName: "overlayBold" + card.index
-                                        text: "B"
+                                        Layout.fillWidth: true
+                                        Layout.preferredWidth: 1
+                                        text: qsTr("Bold")
                                         font.bold: true
+                                        flat: !checked
+                                        highlighted: checked
                                         checkable: true
                                         checked: card.modelData.isBold === true
-                                        implicitWidth: 44
                                         onClicked: { backend.checkpoint(); backend.setOverlayValue(card.index, "bold", checked) }
                                         ToolTip.visible: hovered
                                         ToolTip.text: qsTr("Bold")
                                     }
                                     Button {
                                         objectName: "overlayItalic" + card.index
-                                        text: "I"
+                                        Layout.fillWidth: true
+                                        Layout.preferredWidth: 1
+                                        text: qsTr("Italic")
                                         font.italic: true
+                                        flat: !checked
+                                        highlighted: checked
                                         checkable: true
                                         checked: card.modelData.italic === true
-                                        implicitWidth: 44
                                         onClicked: { backend.checkpoint(); backend.setOverlayValue(card.index, "italic", checked) }
                                         ToolTip.visible: hovered
                                         ToolTip.text: qsTr("Italic")
@@ -575,29 +636,69 @@ Rectangle {
                                 }
                                 // Double-click a label to go back to the style's default.
                                 ValueSlider {
+                                    label: qsTr("Letter thickness")
+                                    from: 0; to: 20; stepSize: 0.5; resetValue: 0
+                                    value: card.modelData.thickness || 0
+                                    valueText: value.toFixed(1) + " px"
+                                    onMoved: function(v) { backend.setOverlayValue(card.index, "thickness", v) }
+                                }
+                                ValueSlider {
                                     label: qsTr("Outline thickness")
                                     from: 0; to: 30; stepSize: 0.5; resetValue: -1
                                     value: card.modelData.outlineWidthValue || 0
                                     valueText: value.toFixed(1) + " px" + (card.modelData.outlineWidth < 0 ? qsTr(" (default)") : "")
-                                    onMoved: function(v) { backend.setOverlayValue(card.index, "outlineWidth", v) }
-                                }
-                                ValueSlider {
-                                    label: qsTr("Shadow distance")
-                                    from: 0; to: 30; stepSize: 0.5; resetValue: -1
-                                    value: card.modelData.shadowDistanceValue || 0
-                                    valueText: value.toFixed(1) + " px" + (card.modelData.shadowDistance < 0 ? qsTr(" (default)") : "")
-                                    onMoved: function(v) { backend.setOverlayValue(card.index, "shadowDistance", v) }
-                                }
-                                ValueSlider {
-                                    label: qsTr("Letter spacing")
-                                    from: -20; to: 60; stepSize: 0.5; resetValue: 0
-                                    value: card.modelData.letterSpacing || 0
-                                    valueText: value.toFixed(1) + " px"
-                                    onMoved: function(v) { backend.setOverlayValue(card.index, "letterSpacing", v) }
+                                    onMoved: function(v) {
+                                        // A thickness needs a color to show: a transparent outline goes back to the default black.
+                                        if (Qt.color(card.modelData.outlineColor).a === 0)
+                                            backend.setOverlayValue(card.index, "outline", "default")
+                                        backend.setOverlayValue(card.index, "outlineWidth", v)
+                                    }
                                 }
                                 RowLayout {
                                     Layout.fillWidth: true
-                                    Label { text: qsTr("Entrance") }
+                                    spacing: 10
+                                    ValueSlider {
+                                        Layout.fillWidth: true
+                                        enabled: !card.modelData.noShadow
+                                        label: qsTr("Shadow distance")
+                                        from: 0; to: 30; stepSize: 0.5; resetValue: -1
+                                        value: card.modelData.shadowDistanceValue || 0
+                                        valueText: value.toFixed(1) + " px" + (card.modelData.shadowDistance < 0 ? qsTr(" (default)") : "")
+                                        onMoved: function(v) { backend.setOverlayValue(card.index, "shadowDistance", v) }
+                                    }
+                                    CheckBox {
+                                        objectName: "overlayNoShadow" + card.index
+                                        Layout.alignment: Qt.AlignBottom
+                                        text: qsTr("No shadow")
+                                        checked: card.modelData.noShadow === true
+                                        onClicked: { backend.checkpoint(); backend.setOverlayValue(card.index, "noShadow", checked) }
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    ValueSlider {
+                                        Layout.fillWidth: true
+                                        enabled: !card.modelData.spacingDefault
+                                        label: qsTr("Letter spacing")
+                                        from: -20; to: 60; stepSize: 0.5; resetValue: 0
+                                        value: card.modelData.letterSpacing || 0
+                                        valueText: card.modelData.spacingDefault ? qsTr("default") : value.toFixed(1) + " px"
+                                        onMoved: function(v) { backend.setOverlayValue(card.index, "letterSpacing", v) }
+                                    }
+                                    // Ticked: the font's own spacing. Unticked: the slider's, as last set.
+                                    CheckBox {
+                                        objectName: "overlaySpacingDefault" + card.index
+                                        Layout.alignment: Qt.AlignBottom
+                                        text: qsTr("Default")
+                                        checked: card.modelData.spacingDefault !== false
+                                        onClicked: { backend.checkpoint(); backend.setOverlayValue(card.index, "spacingDefault", checked) }
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    Label { text: qsTr("Entrance"); Layout.preferredWidth: root.labelWidth }
                                     ComboBox {
                                         Layout.fillWidth: true
                                         textRole: "label"
@@ -642,6 +743,7 @@ Rectangle {
                                     onMoved: function(v) { backend.setOverlayValue(card.index, "y", v) }
                                 }
                                 Button {
+                                    Layout.fillWidth: true
                                     text: qsTr("Delete")
                                     flat: true
                                     Material.foreground: "#ff8a80"
@@ -650,6 +752,7 @@ Rectangle {
                             }
                         }
                     }
+                    Item { Layout.preferredHeight: 4 }
                 }
             }
 
@@ -663,16 +766,16 @@ Rectangle {
 
                     ColumnLayout {
                         Layout.fillWidth: true
-                        Layout.leftMargin: 18
-                        Layout.rightMargin: 18
+                        Layout.leftMargin: 16
+                        Layout.rightMargin: 16
                         spacing: 12
 
-                        Label { text: qsTr("Filters") }
+                        Label { text: qsTr("Filters"); font.bold: true }
                         GridLayout {
                             Layout.fillWidth: true
                             columns: 4
-                            columnSpacing: 6
-                            rowSpacing: 6
+                            columnSpacing: 8
+                            rowSpacing: 8
                             Repeater {
                                 model: [{ id: "", label: qsTr("None"), swatch: ["#7a7a80", "#7a7a80", "#7a7a80"] }].concat(backend.filters)
                                 delegate: Rectangle {
@@ -689,29 +792,32 @@ Rectangle {
                                     Accessible.role: Accessible.Button
                                     Accessible.name: modelData.label
                                     // Skin, sky and foliage, as this look turns them.
-                                    Row {
-                                        x: 6; y: 6
-                                        width: parent.width - 12
-                                        height: 22
-                                        Repeater {
-                                            model: tile.modelData.swatch
-                                            delegate: Rectangle {
-                                                required property var modelData
-                                                width: parent.width / 3
-                                                height: parent.height
-                                                color: modelData
+                                    ColumnLayout {
+                                        anchors.fill: parent
+                                        anchors.margins: 6
+                                        spacing: 4
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: 22
+                                            spacing: 0
+                                            Repeater {
+                                                model: tile.modelData.swatch
+                                                delegate: Rectangle {
+                                                    required property var modelData
+                                                    Layout.fillWidth: true
+                                                    Layout.fillHeight: true
+                                                    color: modelData
+                                                }
                                             }
                                         }
-                                    }
-                                    Label {
-                                        anchors.left: parent.left
-                                        anchors.right: parent.right
-                                        anchors.bottom: parent.bottom
-                                        anchors.margins: 6
-                                        text: tile.modelData.label
-                                        elide: Text.ElideRight
-                                        font.pixelSize: 11
-                                        color: tile.chosen ? "white" : "#c8c8cf"
+                                        Item { Layout.fillHeight: true }
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: tile.modelData.label
+                                            elide: Text.ElideRight
+                                            font.pixelSize: 11
+                                            color: tile.chosen ? "white" : "#c8c8cf"
+                                        }
                                     }
                                     TapHandler { onTapped: backend.setFilter(tile.modelData.id) }
                                 }
@@ -725,11 +831,12 @@ Rectangle {
                             onMoved: function(v) { backend.setLookValue("filterAmount", v) }
                         }
 
-                        Label { text: qsTr("Presets"); Layout.topMargin: 6 }
+                        Label { text: qsTr("Presets"); font.bold: true; Layout.topMargin: 8 }
                         GridLayout {
                             Layout.fillWidth: true
                             columns: 3
-                            columnSpacing: 6
+                            columnSpacing: 8
+                            rowSpacing: 8
                             Repeater {
                                 model: [
                                     { id: "Natural", label: qsTr("Natural") }, { id: "Warm", label: qsTr("Warm") },
@@ -764,7 +871,7 @@ Rectangle {
                             grade: backend.look.grade
                         }
 
-                        Label { text: qsTr("LUT"); Layout.topMargin: 6 }
+                        Label { text: qsTr("LUT"); font.bold: true; Layout.topMargin: 8 }
                         Label {
                             Layout.fillWidth: true
                             text: backend.look.lut.length > 0 ? backend.look.lutName : qsTr("Any .cube LUT works, including ones made in DaVinci Resolve. It's applied on export.")
@@ -778,6 +885,7 @@ Rectangle {
                             Button { Layout.fillWidth: true; text: qsTr("Remove"); flat: true; visible: backend.look.lut.length > 0; onClicked: backend.clearLut() }
                         }
                     }
+                    Item { Layout.preferredHeight: 4 }
                 }
             }
 
@@ -791,11 +899,11 @@ Rectangle {
 
                     ColumnLayout {
                         Layout.fillWidth: true
-                        Layout.leftMargin: 18
-                        Layout.rightMargin: 18
+                        Layout.leftMargin: 16
+                        Layout.rightMargin: 16
                         spacing: 12
 
-                        Label { text: qsTr("Music") ; font.bold: true }
+                        Label { text: qsTr("Music"); font.bold: true }
                         Label {
                             Layout.fillWidth: true
                             text: backend.music.set ? backend.music.name : qsTr("No music yet.")
@@ -826,6 +934,7 @@ Rectangle {
                                 onMoved: function(v) { backend.setMusicValue("offset", v) }
                             }
                             Switch {
+                                Layout.fillWidth: true
                                 text: qsTr("Lower the music when someone talks")
                                 checked: backend.music.duck
                                 onToggled: { backend.checkpoint(); backend.setMusicValue("duck", checked) }
@@ -833,13 +942,14 @@ Rectangle {
                         }
                         Label {
                             Layout.fillWidth: true
-                            Layout.topMargin: 10
+                            Layout.topMargin: 8
                             text: qsTr("Exports are leveled to -14 LUFS, the loudness Instagram and TikTok play at.")
                             color: "#9a9aa2"
                             wrapMode: Text.Wrap
                             font.pixelSize: 12
                         }
                     }
+                    Item { Layout.preferredHeight: 4 }
                 }
             }
             // ---- Effects ----
@@ -852,8 +962,8 @@ Rectangle {
 
                     ColumnLayout {
                         Layout.fillWidth: true
-                        Layout.leftMargin: 18
-                        Layout.rightMargin: 18
+                        Layout.leftMargin: 16
+                        Layout.rightMargin: 16
                         spacing: 12
 
                         Label {
@@ -866,8 +976,8 @@ Rectangle {
                         GridLayout {
                             Layout.fillWidth: true
                             columns: 3
-                            columnSpacing: 6
-                            rowSpacing: 6
+                            columnSpacing: 8
+                            rowSpacing: 8
                             Repeater {
                                 model: backend.effectKinds
                                 delegate: Button {
@@ -916,8 +1026,10 @@ Rectangle {
                         ColumnLayout {
                             Layout.fillWidth: true
                             visible: root.effectData !== null
-                            spacing: 10
+                            spacing: 12
                             Label {
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
                                 text: root.effectData ? root.effectData.label : ""
                                 font.pixelSize: 16
                                 font.bold: true
@@ -953,10 +1065,12 @@ Rectangle {
                                 Layout.fillWidth: true
                                 text: qsTr("Delete Effect")
                                 flat: true
+                                Material.foreground: "#ff8a80"
                                 onClicked: backend.removeEffect(root.selectedEffect)
                             }
                         }
                     }
+                    Item { Layout.preferredHeight: 4 }
                 }
             }
         }

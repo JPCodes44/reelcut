@@ -63,7 +63,7 @@ QImage render(const Overlay &overlay) {
     font.setPixelSize(overlay.size);
     font.setBold(overlay.boldOf());
     font.setItalic(overlay.italic);
-    font.setLetterSpacing(QFont::AbsoluteSpacing, overlay.letterSpacing);
+    font.setLetterSpacing(QFont::AbsoluteSpacing, overlay.letterSpacingOf());
     const int flags = Qt::AlignHCenter | Qt::TextWordWrap;
     // Lines wrap at 94% of the frame, like the preview's Text.
     const QRect block = QFontMetrics(font).boundingRect(QRect(0, 0, qRound(Project::Width * 0.94), 100000), flags,
@@ -97,16 +97,22 @@ QImage render(const Overlay &overlay) {
         p.setFont(font);
         // An outline: the text drawn around itself in a ring, then the fill on top.
         // (QPainter is scaled, so fractions of a pixel still land FlatScale times finer.)
-        const double ring = overlay.outlineWidthOf();
-        if (outline.alpha() > 0 && ring > 0) {
-            p.setPen(outline);
-            // Rings out to the full width, so a thick outline has no gaps.
-            for (double r = ring; r > 0.01; r -= 1.5)
+        // Rings of copies out to a radius, so a wide stroke has no gaps.
+        auto rings = [&](double radius, const QColor &color) {
+            p.setPen(color);
+            for (double r = radius; r > 0.01; r -= 1.0)
                 for (int i = 0; i < 24; ++i) {
                     const double a = i * 3.14159265 / 12;
                     p.drawText(QRectF(textRect).translated(r * std::cos(a), r * std::sin(a)), flags, overlay.text);
                 }
-        }
+        };
+        // Letter thickness: the fill drawn out to half of it around every stroke;
+        // the outline goes outside that.
+        const double half = overlay.thickness / 2;
+        if (outline.alpha() > 0 && overlay.outlineWidthOf() > 0)
+            rings(half + overlay.outlineWidthOf(), outline);
+        if (half > 0)
+            rings(half, fill);
         p.setPen(fill);
         p.drawText(textRect, flags, overlay.text);
     }
@@ -130,7 +136,9 @@ QImage render(const Overlay &overlay) {
     const QColor shadowColor = QColor::fromString(overlay.colorOf("shadow"));
     QImage shadow(w, h, QImage::Format_ARGB32_Premultiplied);
     shadow.fill(Qt::transparent);
-    if (shadowColor.alpha() > 0) {
+    // At distance 0 the blurred shadow sits right under the text, a soft glow;
+    // only the "No shadow" box turns it off.
+    if (shadowColor.alpha() > 0 && !overlay.noShadow) {
         QVector<float> alpha(w * h);
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x)

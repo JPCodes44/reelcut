@@ -7,6 +7,8 @@ Item {
     id: root
     property real time: 0
     property real scaleFactor: 1
+    // Snap guides for dragging captions and text (see EditBox.snap).
+    property var snap: null
     property bool editable: true
     // Entrances play only while playing; paused, everything sits at its final
     // size and place, so it can be grabbed where it looks to be.
@@ -106,6 +108,8 @@ Item {
             objectName: "captionBox"
             anchors.fill: parent
             anchors.margins: -6
+            snap: root.snap
+            snapInset: 6
             visible: root.editable
             selected: win.selectionKind === "captions"
             property real startX
@@ -151,15 +155,18 @@ Item {
             // Outline ring offsets in preview pixels; none without an outline, or
             // behind a plain box (BorderStyle 3 draws the box instead).
             readonly property real outlineWidth: (modelData.outlineWidthValue || 0) * root.scaleFactor
-            readonly property var outlineOffsets: {
-                if (outlineColor.a === 0 || outlineWidth <= 0 || (hasBox && !fisheye))
-                    return []
+            // Letter thickness: half of it each side of every stroke, in the fill color.
+            readonly property real half: (modelData.thickness || 0) / 2 * root.scaleFactor
+            function ring(radius) {
                 const list = []
-                for (let r = outlineWidth; r > 0.01; r -= 1.5)
+                for (let r = radius; r > 0.01; r -= 1)
                     for (let i = 0; i < 16; ++i)
                         list.push([r * Math.cos(i * Math.PI / 8), r * Math.sin(i * Math.PI / 8)])
                 return list
             }
+            readonly property var outlineOffsets: outlineColor.a === 0 || outlineWidth <= 0 || (hasBox && !fisheye)
+                                                  ? [] : ring(half + outlineWidth)
+            readonly property var thickOffsets: half > 0 ? ring(half) : []
             width: label.width
             height: label.height
             x: modelData.x * root.width - width / 2
@@ -191,7 +198,7 @@ Item {
                     renderType: Text.CurveRendering
                     // ASS draws a hard shadow the shadow distance down and right.
                     readonly property real d: (overlay.modelData.shadowDistanceValue || 0) * root.scaleFactor
-                    visible: !overlay.fisheye && overlay.shadowColor.a > 0 && d > 0
+                    visible: !overlay.fisheye && overlay.shadowColor.a > 0 && d > 0 && !overlay.modelData.noShadow
                     x: d
                     y: d
                     width: label.width
@@ -204,7 +211,7 @@ Item {
                 // The outline: copies of the text in rings out to its width, the
                 // same way the fisheye export draws it. (Text.Outline is 1 px.)
                 Repeater {
-                    model: overlay.outlineOffsets
+                    model: overlay.outlineOffsets.concat(overlay.thickOffsets.map(function(o) { return [o[0], o[1], true] }))
                     Text {
                         // Glyph outlines drawn as curves: sharp at any size and zoom.
                         renderType: Text.CurveRendering
@@ -216,7 +223,8 @@ Item {
                         horizontalAlignment: label.horizontalAlignment
                         wrapMode: label.wrapMode
                         font: label.font
-                        color: overlay.outlineColor
+                        // the thickness copies (third entry) come after the outline, in the fill color
+                        color: modelData.length > 2 ? overlay.fillColor : overlay.outlineColor
                     }
                 }
                 Text {
@@ -231,7 +239,7 @@ Item {
                     font.family: overlay.modelData.fontFamily || backend.captionFont
                     font.bold: overlay.modelData.isBold === undefined ? !overlay.fisheye : overlay.modelData.isBold
                     font.italic: overlay.modelData.italic === true
-                    font.letterSpacing: (overlay.modelData.letterSpacing || 0) * root.scaleFactor
+                    font.letterSpacing: (overlay.modelData.letterSpacingValue || 0) * root.scaleFactor
                     // Fisheye text is an image at true pixel size in the export, so no caption scale.
                     font.pixelSize: Math.max(1, Math.round(overlay.modelData.size
                                                            * (overlay.fisheye ? root.scaleFactor : root.fontScale)))
@@ -271,8 +279,9 @@ Item {
                 // One screen pixel, in the lens's 0..1 coordinates, for the 4-sample average.
                 property point px: Qt.point(1 / Math.max(1, width * Screen.devicePixelRatio),
                                             1 / Math.max(1, height * Screen.devicePixelRatio))
-                property vector4d shadowColor: Qt.vector4d(overlay.shadowColor.r, overlay.shadowColor.g,
-                                                           overlay.shadowColor.b, overlay.shadowColor.a)
+                // The "No shadow" box turns it off (FisheyeText::render does the same).
+                property vector4d shadowColor: Qt.vector4d(overlay.shadowColor.r, overlay.shadowColor.g, overlay.shadowColor.b,
+                                                           overlay.modelData.noShadow ? 0 : overlay.shadowColor.a)
                 fragmentShader: "qrc:/shaders/fisheye.frag.qsb"
                 // Images can't pop or slide in the export, so every entrance is a fade
                 // (and slide also rises).
@@ -286,6 +295,8 @@ Item {
                 objectName: "overlayBox" + overlay.index
                 anchors.fill: parent
                 anchors.margins: -6
+                snap: root.snap
+                snapInset: 6
                 visible: root.editable
                 selected: win.selectionKind === "overlay" && win.selectedOverlay === overlay.index
                 property real startX

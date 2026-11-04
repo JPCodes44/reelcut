@@ -53,8 +53,8 @@ QString position(double x, double y) {
     return QString("\\an5\\pos(%1,%2)").arg(qRound(x * Project::Width)).arg(qRound(y * Project::Height));
 }
 
-QString dialogue(double start, double end, const QString &style, const QString &text) {
-    return QString("Dialogue: 0,%1,%2,%3,,0,0,0,,%4\n").arg(assTime(start), assTime(end), style, text);
+QString dialogue(double start, double end, const QString &style, const QString &text, int layer = 0) {
+    return QString("Dialogue: %1,%2,%3,%4,,0,0,0,,%5\n").arg(layer).arg(assTime(start), assTime(end), style, text);
 }
 }  // namespace
 
@@ -181,8 +181,8 @@ QString assDocument(const Project &project, const QString &accent) {
         // Type: font, weight, slant, letter spacing (\fsp, in pixels).
         tags += QString("\\fn%1\\b%2\\i%3").arg(QString(overlay.fontOf()).remove('\\').remove('}'))
                     .arg(overlay.boldOf() ? 1 : 0).arg(overlay.italic ? 1 : 0);
-        if (overlay.letterSpacing != 0)
-            tags += QString("\\fsp%1").arg(num(overlay.letterSpacing, 1));
+        if (overlay.letterSpacingOf() != 0)
+            tags += QString("\\fsp%1").arg(num(overlay.letterSpacingOf(), 1));
         if (overlay.animation == "fade")
             tags += QString("\\pos(%1,%2)\\fad(250,150)").arg(x).arg(y);
         else if (overlay.animation == "pop")
@@ -197,16 +197,27 @@ QString assDocument(const Project &project, const QString &accent) {
         const QColor shadow = QColor::fromString(overlay.colorOf("shadow"));
         const QColor box = QColor::fromString(overlay.colorOf("box"));
         tags += colorTag(1, fill);
+        // Letter thickness is a border in the fill color, half of it each side of
+        // every stroke; an outline then goes outside that, so it's drawn as a
+        // wider border underneath and the thickened letters on a layer above.
+        const double half = overlay.thickness / 2;
+        const bool outlined = box.alpha() == 0 && outline.alpha() > 0 && overlay.outlineWidthOf() > 0;
+        const QString thick = colorTag(3, fill) + QString("\\bord%1\\shad0").arg(num(half, 2));
+        QString base = tags;
         if (box.alpha() > 0)
-            tags += colorTag(3, box);  // the box replaces the outline
-        else if (outline.alpha() > 0 && overlay.outlineWidthOf() > 0)
-            tags += colorTag(3, outline) + QString("\\bord%1").arg(num(overlay.outlineWidthOf(), 1));
+            base += colorTag(3, box);  // the box replaces the outline
+        else if (outlined)
+            base += colorTag(3, outline) + QString("\\bord%1").arg(num(overlay.outlineWidthOf() + half, 2));
+        else if (half > 0)
+            base += colorTag(3, fill) + QString("\\bord%1").arg(num(half, 2));
         else
-            tags += "\\bord0";
-        if (shadow.alpha() > 0 && overlay.shadowDistanceOf() > 0)
-            tags += colorTag(4, shadow) + QString("\\shad%1").arg(num(overlay.shadowDistanceOf(), 1));
+            base += "\\bord0";
+        if (shadow.alpha() > 0 && overlay.shadowDistanceOf() > 0 && !overlay.noShadow)
+            base += colorTag(4, shadow) + QString("\\shad%1").arg(num(overlay.shadowDistanceOf(), 1));
         ass += dialogue(overlay.start, overlay.end, box.alpha() > 0 ? "HookBox" : "Hook",
-                        "{" + tags + "}" + escape(overlay.text));
+                        "{" + base + "}" + escape(overlay.text));
+        if (half > 0 && (outlined || box.alpha() > 0))
+            ass += dialogue(overlay.start, overlay.end, "Hook", "{" + tags + thick + "}" + escape(overlay.text), 1);
     }
     return ass;
 }

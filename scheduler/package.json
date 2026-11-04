@@ -1,0 +1,19 @@
+{
+  "name": "reelcut-scheduler",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "convex dev",
+    "deploy": "convex deploy",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "convex": "^1.29.0"
+  },
+  "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
+    "convex-test": "^0.0.38",
+    "typescript": "^5.6.0",
+    "vitest": "^3.2.0"
+  }
+}

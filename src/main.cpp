@@ -27,6 +27,7 @@
 #include "portalfilepicker.h"
 #include "theme.h"
 #include "thumbprovider.h"
+#include "waveformprovider.h"
 #include "translator.h"
 
 namespace {
@@ -131,6 +132,7 @@ int main(int argc, char *argv[]) {
     QQmlApplicationEngine engine;
     // The engine takes ownership of the image provider.
     engine.addImageProvider("thumbs", thumbs);
+    engine.addImageProvider("waveforms", new WaveformProvider());
     QObject::connect(&translator, &Translator::changed, &engine, &QQmlEngine::retranslate);
     engine.rootContext()->setContextProperty("translator", &translator);
     engine.rootContext()->setContextProperty("theme", &theme);

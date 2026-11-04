@@ -265,7 +265,8 @@ QJsonObject McpServer::summary(const Call &call, bool withWords) const {
                                     {"outline", o.colorOf("outline")}, {"shadow", o.colorOf("shadow")},
                                     {"box", o.colorOf("box")}, {"font", o.fontOf()}, {"bold", o.boldOf()},
                                     {"italic", o.italic}, {"outline_width", o.outlineWidthOf()},
-                                    {"shadow_distance", o.shadowDistanceOf()}, {"letter_spacing", o.letterSpacing}});
+                                    {"shadow_distance", o.shadowDistanceOf()}, {"letter_spacing", o.letterSpacingOf()},
+                                    {"no_shadow", o.noShadow}, {"thickness", o.thickness}});
     }
     QJsonArray effects;
     for (int i = 0; i < p.effects.size(); ++i) {
@@ -276,7 +277,7 @@ QJsonObject McpServer::summary(const Call &call, bool withWords) const {
     QJsonArray lines;
     for (const CaptionLine &line : groupLines(p.words))
         lines.append(QJsonObject{{"start", line.start}, {"end", line.end}, {"text", line.text()}});
-    QJsonObject captions{{"style", p.captionStyle}, {"x", p.captionX}, {"position", p.captionY},
+    QJsonObject captions{{"style", p.captionStyle}, {"x", p.captionX}, {"position", p.captionY}, {"follows_platform", p.captionAuto},
                          {"size", p.captionScale}, {"word_count", int(p.words.size())},
                          {"lines", lines}};
     if (withWords) {
@@ -375,7 +376,7 @@ void McpServer::defineTools() {
                 for (const QJsonValue &file : call.args.value("clips").toArray())
                     call.project.clips.append(clipFromFile(absolute(file.toString())));
                 if (call.args.contains("platform"))
-                    call.project.platform = call.args.value("platform").toString();
+                    call.project.setPlatform(call.args.value("platform").toString());
                 QString error;
                 if (!save(path, call.project, &error))
                     throw ToolError{error};
@@ -419,7 +420,7 @@ void McpServer::defineTools() {
 
     addTool("set_platform", "Design for Instagram Reels or TikTok (changes the safe zones shown and the file name).",
             {{"platform", enumProp({"instagram", "tiktok"}, "The platform.")}}, {"platform"}, true, [this](Call &call) {
-                call.project.platform = call.args.value("platform").toString() == "tiktok" ? "tiktok" : "instagram";
+                call.project.setPlatform(call.args.value("platform").toString());
                 return json(summary(call));
             });
 
@@ -571,8 +572,8 @@ void McpServer::defineTools() {
             {{"style", enumProp({"highlight", "pop", "bold", "box"},
                                 "highlight: line with the spoken word in the accent color; pop: one word at a time; "
                                 "bold: plain white line; box: white text on a dark box.")},
-             {"position", prop("number", "Vertical center, 0.05 (top) to 0.95 (bottom). Default 0.68.")},
-             {"x", prop("number", "Horizontal center, 0 (left) to 1 (right). Default 0.5.")},
+             {"position", prop("number", "Vertical center, 0.05 (top) to 0.95 (bottom). Default: just above the platform's own caption area (0.68 Instagram, 0.65 TikTok), following the platform until set.")},
+             {"x", prop("number", "Horizontal center, 0 (left) to 1 (right). Default: the middle of the platform's safe zone.")},
              {"size", prop("number", "Size, 0.5 to 2 times normal. Default 1.")},
              {"words", QJsonObject{{"type", "array"},
                                    {"description", "Replace all caption words, each {text, start, end} in timeline seconds."},
@@ -659,9 +660,13 @@ void McpServer::defineTools() {
             {"bold", prop("boolean", "Bold. Plain text is bold by default, fisheye is not.")},
             {"italic", prop("boolean", "Italic. Default false.")},
             {"outline_width", prop("number", "Outline thickness in pixels at 1080x1920, 0 to 30; -1 for the "
-                                             "style's default (plain 8, fisheye 3).")},
+                                             "style's default (plain 8, fisheye 0).")},
             {"shadow_distance", prop("number", "How far the shadow falls, in pixels, 0 to 30; -1 for the default.")},
-            {"letter_spacing", prop("number", "Extra pixels between letters, -20 to 60. Default 0.")}};
+            {"letter_spacing", prop("number", "Extra pixels between letters, -20 to 60, or \"default\" for the "
+                                              "font's own spacing (the default).")},
+            {"no_shadow", prop("boolean", "True turns the shadow off entirely. Default false.")},
+            {"thickness", prop("number", "Makes the letters themselves heavier, in their fill color: pixels at "
+                                         "1080x1920, 0 to 20. Default 0. Any outline goes outside it.")}};
     };
     auto applyOverlay = [](Project &p, int index, const QJsonObject &args) {
         if (args.contains("end"))
@@ -672,7 +677,8 @@ void McpServer::defineTools() {
                                                   {"outline", "outline"}, {"shadow", "shadow"}, {"box", "box"},
                                                   {"font", "font"}, {"bold", "bold"}, {"italic", "italic"},
                                                   {"outline_width", "outlineWidth"}, {"shadow_distance", "shadowDistance"},
-                                                  {"letter_spacing", "letterSpacing"}};
+                                                  {"letter_spacing", "letterSpacing"}, {"no_shadow", "noShadow"},
+                                                  {"thickness", "thickness"}};
         for (const auto &key : keys)
             if (args.contains(key.first) && !p.setOverlayValue(index, key.second, args.value(key.first).toVariant()))
                 throw ToolError{QString("Invalid %1.").arg(key.first)};

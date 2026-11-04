@@ -31,6 +31,7 @@ ColumnLayout {
         }
         Button {
             objectName: "resetGrade"
+            Layout.alignment: Qt.AlignVCenter
             text: qsTr("Reset All")
             flat: true
             enabled: root.grade && !root.grade.neutral
@@ -39,8 +40,11 @@ ColumnLayout {
     }
 
     GridLayout {
+        id: wheels
         Layout.fillWidth: true
-        columns: 2
+        // Two wheels a row when there's room, else stack them.
+        columns: width >= 2 * 140 + columnSpacing ? 2 : 1
+        uniformCellWidths: true
         columnSpacing: 12
         rowSpacing: 12
         ColorWheel {

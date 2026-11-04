@@ -1,6 +1,9 @@
 #include "backend.h"
 
+#include <QClipboard>
 #include <QColor>
+#include <QDBusConnection>
+#include <QDBusMessage>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
@@ -8,17 +11,22 @@
 #include <QFont>
 #include <QFontMetricsF>
 #include <QFutureWatcher>
+#include <QGuiApplication>
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QThread>
 #include <QtConcurrent>
 
 #include "captions.h"
+#include "instagramapi.h"
+#include "postscheduler.h"
+#include "posting.h"
 #include "filepicker.h"
 #include "bodyeffects.h"
 #include "effects.h"
@@ -53,6 +61,34 @@ QString freePath(const QString &folder, const QString &base, const QString &suff
 
 Backend::Backend(FilePicker *picker, ThumbProvider *thumbs, Theme *theme, QObject *parent, const QString &stateDir)
     : QObject(parent), m_picker(picker), m_thumbs(thumbs), m_theme(theme), m_stateDir(stateDir) {
+    m_instagram = new InstagramApi(this);
+    if (!stateDir.isEmpty())
+        m_instagram->stateDir = stateDir;  // tests keep their own account file
+    connect(m_instagram, &InstagramApi::accountChanged, this, &Backend::instagramChanged);
+    connect(m_instagram, &InstagramApi::connectFinished, this, [this](bool ok, const QString &message) {
+        setMessage(message, !ok);
+        emit instagramConnected(ok, message);
+    });
+    connect(m_instagram, &InstagramApi::progress, this, &Backend::postProgress);
+    connect(m_instagram, &InstagramApi::published, this, [this](bool ok, const QString &message, const QUrl &link) {
+        setMessage(ok ? message : message + "\n" + tr("The caption is copied; post it by hand from the page."), !ok);
+        if (!ok)
+            openForHand("instagram");  // the manual way still works
+        emit postPublished(ok, message, link);
+    });
+    m_scheduler = new PostScheduler(this);
+    if (!stateDir.isEmpty())
+        m_scheduler->stateDir = stateDir;
+    connect(m_scheduler, &PostScheduler::configChanged, this, &Backend::schedulerChanged);
+    connect(m_scheduler, &PostScheduler::postsChanged, this, &Backend::schedulerChanged);
+    connect(m_scheduler, &PostScheduler::progress, this, &Backend::postProgress);
+    connect(m_scheduler, &PostScheduler::scheduled, this, [this](bool ok, const QString &message) {
+        setMessage(message, !ok);
+        emit postScheduled(ok, message);
+    });
+    connect(m_scheduler, &PostScheduler::changed, this, [this](bool ok, const QString &message) {
+        setMessage(message, !ok);
+    });
     m_reloadDebounce = new QTimer(this);
     m_reloadDebounce->setSingleShot(true);
     m_reloadDebounce->setInterval(120);
@@ -133,7 +169,10 @@ QVariantList Backend::overlays() const {
                                 {"shadowColor", o.colorOf("shadow")}, {"boxColor", o.colorOf("box")},
                                 {"font", o.font}, {"bold", o.bold}, {"italic", o.italic},
                                 {"outlineWidth", o.outlineWidth}, {"shadowDistance", o.shadowDistance},
-                                {"letterSpacing", o.letterSpacing}, {"fontFamily", o.fontOf()},
+                                {"letterSpacing", o.letterSpacing}, {"spacingDefault", o.spacingDefault},
+                                {"letterSpacingValue", o.letterSpacingOf()}, {"fontFamily", o.fontOf()},
+                                {"noShadow", o.noShadow}, {"thickness", o.thickness},
+                                {"defaultFont", [&o] { Overlay d = o; d.font.clear(); return d.fontOf(); }()},
                                 {"isBold", o.boldOf()}, {"outlineWidthValue", o.outlineWidthOf()},
                                 {"shadowDistanceValue", o.shadowDistanceOf()}});
     }
@@ -777,7 +816,16 @@ void Backend::setPlatform(const QString &platform) {
     if (platform == m_project.platform)
         return;
     checkpoint();
-    m_project.platform = platform;
+    m_project.setPlatform(platform);
+    changed();
+}
+
+void Backend::resetCaptionPosition() {
+    if (m_project.captionAuto)
+        return;
+    checkpoint();
+    m_project.captionAuto = true;
+    m_project.setPlatform(m_project.platform);
     changed();
 }
 
@@ -949,6 +997,273 @@ void Backend::exportVideo() {
     m_picker->save(FilePicker::Export, QUrl::fromLocalFile(freePath(folder, title() + suffix, ".mp4")));
 }
 
+QVariantMap Backend::checkPost(const QString &platform, const QString &caption, const QString &hashtags) const {
+    const Posting::Target *target = Posting::find(platform);
+    const QString text = Posting::text(caption, hashtags);
+    // Instagram counts every hashtag in the post, including any typed in the caption.
+    static const QRegularExpression tag("#[\\p{L}\\p{N}_]+");
+    const int tags = int(text.count(tag));
+    QStringList problems;
+    if (target && text.size() > target->maxChars)
+        problems << tr("%1 allows %2 characters; this is %3.").arg(target->label).arg(target->maxChars).arg(text.size());
+    if (target && target->maxHashtags > 0 && tags > target->maxHashtags)
+        problems << tr("%1 allows %2 hashtags; this has %3.").arg(target->label).arg(target->maxHashtags).arg(tags);
+    return {{"text", text}, {"chars", int(text.size())}, {"maxChars", target ? target->maxChars : 0},
+            {"hashtags", tags}, {"maxHashtags", target ? target->maxHashtags : 0},
+            {"tags", Posting::hashtags(hashtags)}, {"problems", problems}, {"ok", target && problems.isEmpty()}};
+}
+
+QString Backend::instagramUser() const {
+    return m_instagram->connected() ? m_instagram->username() : QString();
+}
+
+void Backend::connectInstagram(const QString &token) {
+    m_instagram->connectToken(token);
+}
+
+void Backend::disconnectInstagram() {
+    m_instagram->disconnect();
+}
+
+void Backend::openLink(const QUrl &url) {
+    if (openUrl)
+        openUrl(url);
+    else
+        QDesktopServices::openUrl(url);
+}
+
+// The by-hand way: the file shown to drag in, the site open in the browser.
+void Backend::openForHand(const QString &platform) {
+    const Posting::Target *target = Posting::find(platform);
+    if (!target || m_postFile.isEmpty())
+        return;
+    showPostVideo();
+    openLink(QUrl(target->url));
+}
+
+void Backend::setPostText(const QString &caption, const QString &hashtags, bool newUndoStep) {
+    if (m_project.postCaption == caption && m_project.postHashtags == hashtags)
+        return;
+    if (newUndoStep)
+        checkpoint();
+    m_project.postCaption = caption;
+    m_project.postHashtags = hashtags;
+    changed();
+}
+
+void Backend::post(const QString &platform, const QString &caption, const QString &hashtags, bool publish,
+                   double publishAtMs) {
+    const Posting::Target *target = Posting::find(platform);
+    if (!target || busy() || !checkPost(platform, caption, hashtags).value("ok").toBool())
+        return;
+    const QDateTime when = publishAtMs > 0 ? QDateTime::fromMSecsSinceEpoch(qint64(publishAtMs)) : QDateTime();
+    if (when.isValid()) {
+        if (platform != "instagram" || !publish || !m_instagram->connected()) {
+            setMessage(tr("Scheduling needs a connected Instagram account."), true);
+            return;
+        }
+        if (!m_scheduler->configured()) {
+            setMessage(tr("The scheduler isn't set up yet."), true);
+            return;
+        }
+        if (when < QDateTime::currentDateTime().addSecs(-60)) {
+            setMessage(tr("That time has already passed."), true);
+            return;
+        }
+    }
+    if (m_project.clips.isEmpty()) {
+        setMessage(tr("Add a clip first."), true);
+        return;
+    }
+    for (const Clip &clip : m_project.clips)
+        if (!QFileInfo::exists(clip.path)) {
+            setMessage(tr("%1 is missing, so the reel can't be exported.").arg(clip.path), true);
+            return;
+        }
+    // Remember what was typed, and frame for that platform's safe zones.
+    if (m_project.postCaption != caption || m_project.postHashtags != hashtags || m_project.platform != platform) {
+        checkpoint();
+        m_project.postCaption = caption;
+        m_project.postHashtags = hashtags;
+        m_project.platform = platform;
+        changed();
+    }
+    QString folder = !postFolder.isEmpty() ? postFolder : QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+    if (!QDir(folder).exists())
+        folder = QDir::homePath();
+    const QString output = freePath(folder, title() + "-" + platform, ".mp4");
+    const QString text = Posting::text(caption, hashtags);
+    m_afterExport = [this, target, text, publish, when](const QString &file) {
+        m_postFile = file;
+        // On the clipboard either way, in case it's finished by hand.
+        QGuiApplication::clipboard()->setText(text);
+        if (when.isValid()) {
+            m_scheduler->schedule(file, title(), text, when,
+                                  {m_instagram->userId(), m_instagram->username(), m_instagram->token(),
+                                   m_instagram->apiBase()});
+            return;
+        }
+        if (publish && target->id == "instagram" && m_instagram->connected()) {
+            m_instagram->publish(file, text);
+            return;
+        }
+        openForHand(target->id);
+        setMessage(tr("%1 is open. Drag in %2, then paste the caption.").arg(target->label, fileName(file)), false);
+        emit postOpened(target->id, file, target->steps);
+    };
+    runExport(output, "h264_nvenc");
+}
+
+namespace {
+
+// "9", "9am", "9:30", "9:30 pm", "21:30" -> a time of day.
+QTime readTime(QString t) {
+    t = t.trimmed().toLower().remove(' ').remove('.');
+    static const QRegularExpression pattern("^(\\d{1,2})(?::(\\d{2}))?(am|pm|a|p)?$");
+    const QRegularExpressionMatch m = pattern.match(t);
+    if (!m.hasMatch())
+        return {};
+    int hour = m.captured(1).toInt();
+    const int minute = m.captured(2).isEmpty() ? 0 : m.captured(2).toInt();
+    const QString half = m.captured(3);
+    if (!half.isEmpty()) {
+        if (hour < 1 || hour > 12)
+            return {};
+        hour = hour % 12 + (half.startsWith('p') ? 12 : 0);
+    }
+    return QTime(hour, minute);
+}
+
+// "today", "tomorrow", "fri", "friday", "2026-11-05", "11/5", "nov 5" -> a date.
+QDate readDate(const QString &d, const QDate &today) {
+    const QString s = d.trimmed().toLower();
+    if (s.isEmpty() || s == "today")
+        return today;
+    if (s == "tomorrow" || s == "tmr" || s == "tmrw")
+        return today.addDays(1);
+    for (int day = 1; day <= 7; ++day) {
+        const QString name = QLocale(QLocale::English).dayName(day).toLower();
+        if (s == name || (s.size() >= 3 && name.startsWith(s))) {
+            const int ahead = (day - today.dayOfWeek() + 7) % 7;
+            return today.addDays(ahead == 0 ? 7 : ahead);
+        }
+    }
+    for (const char *format : {"yyyy-MM-dd", "yyyy/MM/dd", "yyyy-M-d"}) {
+        const QDate date = QDate::fromString(s, format);
+        if (date.isValid())
+            return date;
+    }
+    // Without a year: this year, or next if that's already gone.
+    for (const char *format : {"M/d", "MMM d", "MMMM d", "d MMM", "d MMMM"}) {
+        QDate date = QLocale(QLocale::English).toDate(s + " " + QString::number(today.year()),
+                                                       QString(format) + " yyyy");
+        if (date.isValid())
+            return date < today ? date.addYears(1) : date;
+    }
+    return {};
+}
+
+}  // namespace
+
+QVariantMap Backend::parseWhen(const QString &text) const {
+    const QDateTime now = QDateTime::currentDateTime();
+    QVariantMap out{{"ok", false}, {"ms", 0.0}, {"label", QString()}, {"problem", QString()}};
+    QString s = text.simplified();
+    // "at" is optional: "tomorrow at 9am".
+    s.replace(QRegularExpression("\\s+at\\s+", QRegularExpression::CaseInsensitiveOption), " ");
+    if (s.isEmpty()) {
+        out["problem"] = tr("Type when to post, like \"tomorrow 9am\".");
+        return out;
+    }
+    // The time is the last word (or two, for "9:30 pm"); the rest is the date.
+    QStringList words = s.split(' ');
+    QTime time;
+    QString datePart;
+    for (int take = qMin(2, int(words.size())); take >= 1 && !time.isValid(); --take) {
+        time = readTime(words.mid(words.size() - take).join(' '));
+        if (time.isValid())
+            datePart = words.mid(0, words.size() - take).join(' ');
+    }
+    if (!time.isValid()) {
+        out["problem"] = tr("Add a time, like 9am or 18:30.");
+        return out;
+    }
+    const QDate date = readDate(datePart, now.date());
+    if (!date.isValid()) {
+        out["problem"] = tr("Couldn't read the day \"%1\". Try tomorrow, fri or 2026-11-05.").arg(datePart);
+        return out;
+    }
+    QDateTime when(date, time);
+    // A bare time that's already passed today means tomorrow.
+    if (datePart.isEmpty() && when <= now)
+        when = when.addDays(1);
+    const qint64 secs = now.secsTo(when);
+    if (secs < -60) {
+        out["problem"] = tr("That time has already passed.");
+        return out;
+    }
+    if (secs > 75LL * 24 * 3600) {
+        out["problem"] = tr("Instagram posts can be scheduled up to 75 days ahead.");
+        return out;
+    }
+    QString in;
+    if (secs < 3600)
+        in = tr("in %n minute(s)", "", int(qMax<qint64>(1, (secs + 59) / 60)));
+    else if (secs < 48 * 3600)
+        in = tr("in %n hour(s)", "", int((secs + 1800) / 3600));
+    else
+        in = tr("in %n day(s)", "", int((secs + 43200) / 86400));
+    out["ok"] = true;
+    out["ms"] = double(when.toMSecsSinceEpoch());
+    out["label"] = QLocale().toString(when, "dddd, MMM d 'at' h:mm AP") + " · " + in;
+    return out;
+}
+
+QString Backend::suggestWhen(const QString &text, int minutes) const {
+    QDateTime when;
+    const QVariantMap parsed = parseWhen(text);
+    if (!text.isEmpty() && parsed.value("ok").toBool())
+        when = QDateTime::fromMSecsSinceEpoch(qint64(parsed.value("ms").toDouble())).addSecs(qint64(minutes) * 60);
+    else {
+        const QDateTime now = QDateTime::currentDateTime();
+        when = QDateTime(now.date(), QTime(now.time().hour(), 0)).addSecs(2 * 3600);
+    }
+    return when.toString("yyyy-MM-dd HH:mm");
+}
+
+bool Backend::schedulerReady() const { return m_scheduler->configured(); }
+QVariantList Backend::scheduledPosts() const { return m_scheduler->posts(); }
+QString Backend::schedulerError() const { return m_scheduler->lastError(); }
+void Backend::setupScheduler(const QString &url, const QString &key) { m_scheduler->configure(url, key); }
+void Backend::refreshScheduled() { m_scheduler->refresh(); }
+void Backend::cancelScheduled(const QString &id) { m_scheduler->cancel(id); }
+void Backend::rescheduleScheduled(const QString &id, double publishAtMs) {
+    m_scheduler->reschedule(id, QDateTime::fromMSecsSinceEpoch(qint64(publishAtMs)));
+}
+void Backend::retryScheduled(const QString &id) { m_scheduler->retry(id, m_instagram->token()); }
+void Backend::removeScheduled(const QString &id) { m_scheduler->remove(id); }
+
+void Backend::copyPostText() {
+    QGuiApplication::clipboard()->setText(Posting::text(m_project.postCaption, m_project.postHashtags));
+}
+
+void Backend::showPostVideo() {
+    if (m_postFile.isEmpty())
+        return;
+    if (revealFile) {
+        revealFile(m_postFile);
+        return;
+    }
+    // The file manager opens with the video selected, ready to drag; if it
+    // doesn't speak FileManager1, the folder opens instead.
+    QDBusMessage call = QDBusMessage::createMethodCall("org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
+                                                       "org.freedesktop.FileManager1", "ShowItems");
+    call << QStringList{QUrl::fromLocalFile(m_postFile).toString()} << QString();
+    const QDBusMessage reply = QDBusConnection::sessionBus().call(call, QDBus::Block, 3000);
+    if (reply.type() == QDBusMessage::ErrorMessage)
+        QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(m_postFile).absolutePath()));
+}
+
 void Backend::runExport(const QString &output, const QString &encoder) {
     // Body effects need their person masks before ffmpeg can use them.
     for (const Clip &clip : m_project.clips) {
@@ -973,6 +1288,8 @@ void Backend::runExport(const QString &output, const QString &encoder) {
         if (ok) {
             m_lastExport = output;
             setMessage(tr("Exported %1.").arg(fileName(output)), false);
+            if (auto after = std::exchange(m_afterExport, nullptr))
+                after(output);
             return;
         }
         QFile::remove(output);
@@ -983,6 +1300,7 @@ void Backend::runExport(const QString &output, const QString &encoder) {
             runExport(output, "libx264");
             return;
         }
+        m_afterExport = nullptr;
         setMessage(tr("Export failed:\n%1").arg(tail(errors)), true);
     };
     m_job.start("ffmpeg", exportArgs(m_project, options), m_project.duration(), m_work->path());

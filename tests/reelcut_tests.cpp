@@ -1,9 +1,14 @@
+#include <QClipboard>
 #include <QDir>
 #include <QFile>
+#include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QProcess>
 #include <QTemporaryDir>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <QUrlQuery>
 #include <QtTest>
 
 #include <functional>
@@ -14,6 +19,8 @@
 #include <QQuickWindow>
 
 #include "backend.h"
+#include "waveformprovider.h"
+#include "thumbprovider.h"
 #include "captions.h"
 #include "colorgrade.h"
 #include "bodyeffects.h"
@@ -24,7 +31,10 @@
 #include "filters.h"
 #include "fisheyetext.h"
 #include "jobs.h"
+#include "instagramapi.h"
+#include "postscheduler.h"
 #include "mcpserver.h"
+#include "posting.h"
 #include "media.h"
 #include "project.h"
 #include "silence.h"
@@ -61,10 +71,399 @@ bool runFfmpeg(const QStringList &args) {
 }
 }  // namespace
 
+
+// A stand-in for graph.instagram.com and Meta's upload host, on localhost:
+// answers the calls InstagramApi makes and remembers them.
+class FakeInstagram : public QObject {
+public:
+    struct Call { QString method, path; QUrlQuery query; QByteArray body; QHash<QString, QString> headers; };
+    QTcpServer server;
+    QVector<Call> calls;
+    QString containerStatus = "FINISHED";
+    int inProgressFor = 1;  // status checks that say IN_PROGRESS first
+    bool acceptToken = true;
+    bool unified = false;
+    int assignedAccounts = 1;
+
+    FakeInstagram() {
+        server.listen(QHostAddress::LocalHost);
+        connect(&server, &QTcpServer::newConnection, this, [this] {
+            while (QTcpSocket *socket = server.nextPendingConnection()) {
+                auto *buffer = new QByteArray;
+                connect(socket, &QTcpSocket::readyRead, socket, [this, socket, buffer] {
+                    buffer->append(socket->readAll());
+                    const int headerEnd = buffer->indexOf("\r\n\r\n");
+                    if (headerEnd < 0)
+                        return;
+                    const QList<QByteArray> lines = buffer->left(headerEnd).split('\n');
+                    Call call;
+                    const QList<QByteArray> first = lines.first().trimmed().split(' ');
+                    call.method = first.value(0);
+                    const QUrl url("http://x" + QString::fromUtf8(first.value(1)));
+                    call.path = url.path();
+                    call.query = QUrlQuery(url);
+                    for (int i = 1; i < lines.size(); ++i) {
+                        const int colon = lines[i].indexOf(':');
+                        if (colon > 0)
+                            call.headers.insert(QString(lines[i].left(colon)).toLower(), lines[i].mid(colon + 1).trimmed());
+                    }
+                    const int length = call.headers.value("content-length").toInt();
+                    if (buffer->size() < headerEnd + 4 + length)
+                        return;
+                    call.body = buffer->mid(headerEnd + 4, length);
+                    if (call.headers.value("content-type").startsWith("application/x-www-form-urlencoded"))
+                        call.query = QUrlQuery(QString::fromUtf8(call.body));
+                    calls << call;
+                    const QJsonObject reply = answer(call);
+                    QByteArray body = QJsonDocument(reply).toJson(QJsonDocument::Compact);
+                    // The account id as Instagram sends it: a bare 17-digit number,
+                    // which JSON doubles can't hold exactly.
+                    if (!unified && call.path == "/me" && acceptToken && !reply.contains("error"))
+                        body = R"({"user_id":17841400000000001,"username":"reelcut_test"})";
+                    const QByteArray status = reply.contains("error") ? "400 Bad Request" : "200 OK";
+                    socket->write("HTTP/1.1 " + status + "\r\nContent-Type: application/json\r\nContent-Length: "
+                                  + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                    socket->disconnectFromHost();
+                    delete buffer;
+                });
+            }
+        });
+    }
+    QString base() const { return QString("http://127.0.0.1:%1").arg(server.serverPort()); }
+    QJsonObject answer(const Call &c) {
+        const QString expectedToken = unified ? "EAA-test-token" : "good-token";
+        if (c.query.queryItemValue("access_token") != expectedToken && !c.path.startsWith("/upload"))
+            return {{"error", QJsonObject{{"message", "Invalid OAuth access token."}}}};
+        if (unified && c.path == "/me/assigned_instagram_accounts") {
+            if (!acceptToken)
+                return {{"error", QJsonObject{{"message", "nope"}}}};
+            QJsonArray accounts;
+            for (int i = 0; i < assignedAccounts; ++i)
+                accounts.append(QJsonObject{{"id", QString::number(17841400000000001LL + i)}, {"username", "unified_test"}});
+            return {{"data", accounts}};
+        }
+        if (unified && c.path == "/me")
+            return {{"error", QJsonObject{{"message", "me is a system user, not an Instagram account"}}}};
+        if (c.path == "/me")
+            return acceptToken ? QJsonObject{{"user_id", 17841400000000001.0}, {"username", "reelcut_test"}}
+                               : QJsonObject{{"error", QJsonObject{{"message", "nope"}}}};
+        if (c.method == "POST" && c.path.endsWith("/media"))
+            return {{"id", "C1"}, {"uri", base() + "/upload/C1"}};
+        if (c.path.startsWith("/upload/"))
+            return {{"success", c.headers.value("authorization") == "OAuth " + expectedToken}};
+        if (c.path == "/C1")
+            return {{"status_code", inProgressFor-- > 0 ? "IN_PROGRESS" : containerStatus}, {"status", "Error: bad video"}};
+        if (c.method == "POST" && c.path.endsWith("/media_publish"))
+            return {{"id", "M1"}};
+        if (c.path == "/M1")
+            return {{"permalink", "https://www.instagram.com/reel/abc/"}};
+        return {{"error", QJsonObject{{"message", "unexpected " + c.path}}}};
+    }
+};
+
+
+// A stand-in for the scheduler's Convex deployment (scheduler/), on
+// localhost: its HTTP function API and file upload, remembering the calls.
+class FakeConvex : public QObject {
+public:
+    struct Call { QString path, function; QJsonObject args; QByteArray body; QString contentType; };
+    QTcpServer server;
+    QVector<Call> calls;
+    QJsonArray posts;
+    QString key = "0123456789abcdef-key";
+
+    FakeConvex() {
+        server.listen(QHostAddress::LocalHost);
+        connect(&server, &QTcpServer::newConnection, this, [this] {
+            while (QTcpSocket *socket = server.nextPendingConnection()) {
+                auto *buffer = new QByteArray;
+                connect(socket, &QTcpSocket::readyRead, socket, [this, socket, buffer] {
+                    buffer->append(socket->readAll());
+                    const int headerEnd = buffer->indexOf("\r\n\r\n");
+                    if (headerEnd < 0)
+                        return;
+                    const QList<QByteArray> lines = buffer->left(headerEnd).split('\n');
+                    QHash<QString, QString> headers;
+                    for (int i = 1; i < lines.size(); ++i) {
+                        const int colon = lines[i].indexOf(':');
+                        if (colon > 0)
+                            headers.insert(QString(lines[i].left(colon)).toLower(), lines[i].mid(colon + 1).trimmed());
+                    }
+                    const int length = headers.value("content-length").toInt();
+                    if (buffer->size() < headerEnd + 4 + length)
+                        return;
+                    Call call;
+                    call.path = QUrl("http://x" + QString::fromUtf8(lines.first().split(' ').value(1))).path();
+                    call.body = buffer->mid(headerEnd + 4, length);
+                    call.contentType = headers.value("content-type");
+                    const QJsonObject request = QJsonDocument::fromJson(call.body).object();
+                    call.function = request.value("path").toString();
+                    call.args = request.value("args").toObject();
+                    calls << call;
+                    const QByteArray body = QJsonDocument(answer(call)).toJson(QJsonDocument::Compact);
+                    socket->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                                  + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                    socket->disconnectFromHost();
+                    delete buffer;
+                });
+            }
+        });
+    }
+    QString base() const { return QString("http://127.0.0.1:%1").arg(server.serverPort()); }
+    static QJsonObject ok(const QJsonValue &value) { return {{"status", "success"}, {"value", value}}; }
+    static QJsonObject err(const QString &data) {
+        return {{"status", "error"}, {"errorMessage", "Server Error"}, {"errorData", data}};
+    }
+    QJsonObject answer(const Call &c) {
+        if (c.path == "/upload")
+            return {{"storageId", "kg2storage"}};
+        if (c.args.value("secret").toString() != key)
+            return err("Wrong scheduler key.");
+        if (c.function == "posts:uploadUrl")
+            return ok(base() + "/upload");
+        if (c.function == "posts:schedule") {
+            QJsonObject post{{"id", "p" + QString::number(posts.size() + 1)}, {"title", c.args.value("title")},
+                             {"caption", c.args.value("caption")}, {"publishAt", c.args.value("publishAt")},
+                             {"status", "scheduled"}, {"username", c.args.value("username")}};
+            posts.append(post);
+            return ok(post);
+        }
+        if (c.function == "posts:list")
+            return ok(posts);
+        if (c.function == "posts:cancel") {
+            for (int i = 0; i < posts.size(); ++i)
+                if (posts[i].toObject().value("id") == c.args.value("id")) {
+                    QJsonObject p = posts[i].toObject();
+                    p["status"] = "cancelled";
+                    posts[i] = p;
+                    return ok(p);
+                }
+            return err("No such post.");
+        }
+        return err("unexpected " + c.function);
+    }
+};
+
 class ReelcutTests : public QObject {
     Q_OBJECT
 
 private slots:
+    void musicWaveformResizesByDraggingItsTopEdge()
+    {
+        QTemporaryDir dir, state;
+        QImage photo(64, 64, QImage::Format_RGB32);
+        photo.fill(Qt::white);
+        QVERIFY(photo.save(dir.filePath("photo.png")));
+        QVERIFY(runFfmpeg({"-v", "error", "-f", "lavfi", "-i", "sine=duration=2", dir.filePath("music.wav")}));
+        Project project;
+        project.clips = {media::clipFor(media::probe(dir.filePath("photo.png")), 2)};
+        project.music.path = dir.filePath("music.wav");
+        write(dir.filePath("resize.reel"), QJsonDocument(project.toJson(dir.path())).toJson());
+        if (QQuickStyle::name() != "Material") QQuickStyle::setStyle("Material");
+        Theme theme(dir.path());
+        auto *thumbs = new ThumbProvider();
+        Backend backend(nullptr, thumbs, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("resize.reel")));
+        const QJsonObject before = backend.project().toJson(dir.path());
+        QQmlApplicationEngine engine;
+        engine.addImageProvider("thumbs", thumbs);
+        engine.addImageProvider("waveforms", new WaveformProvider());
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.loadData(R"(
+            import QtQuick
+            import QtQuick.Window
+            Window {
+                visible: true; width: 800; height: 700
+                ReelTimeline {
+                    objectName: "resizeTimeline"
+                    anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+                    height: implicitHeight
+                }
+            }
+        )", QUrl("qrc:/ResizeWaveformTest.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        auto *timeline = window->findChild<QQuickItem *>("resizeTimeline");
+        auto *handle = window->findChild<QQuickItem *>("musicResizeHandle");
+        QVERIFY2(handle, "The music lane needs a draggable resize edge");
+        QVERIFY(timeline);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QTest::qWait(100);
+        auto drag = [&](int delta) {
+            const QPointF from = handle->mapToScene(QPointF(handle->width() / 2, handle->height() / 2));
+            QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, from.toPoint());
+            for (int step = 1; step <= 8; ++step) {
+                QTest::mouseMove(window, (from + QPointF(0, delta * step / 8.0)).toPoint());
+                QTest::qWait(10);
+            }
+            QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, (from + QPointF(0, delta)).toPoint());
+            QTest::qWait(30);
+        };
+        const double initialHeight = timeline->height();
+        drag(-90);
+        const double expanded = timeline->property("musicH").toDouble();
+        QVERIFY(expanded > 120);
+        QVERIFY(timeline->height() > initialHeight + 70);
+        drag(60);
+        QVERIFY(timeline->property("musicH").toDouble() < expanded - 40);
+        drag(80);
+        QCOMPARE(timeline->property("musicH").toDouble(), 52.0);
+        drag(-400);
+        QCOMPARE(timeline->property("musicH").toDouble(), 320.0);
+        auto *wave = timeline->findChild<QQuickItem *>("musicWaveform");
+        QVERIFY(wave);
+        QCOMPARE(wave->height(), 300.0);
+        QCOMPARE(backend.project().toJson(dir.path()), before);
+    }
+
+    void waveformPlacesNativeSamplesAtHighZoom()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("native.wav");
+        QVERIFY(runFfmpeg({"-v", "error", "-f", "lavfi", "-i",
+            "aevalsrc=if(eq(n\\,500)+eq(n\\,590)\\,0.9\\,0):s=48000:d=0.0125", "-c:a", "pcm_f32le", path}));
+        const QImage image = waveform::render(path, 0, 0.0125, {512, 40});
+        QCOMPARE(image.size(), QSize(512, 40));
+        auto peak = [&](int x) {
+            int count = 0;
+            for (int y = 0; y < 40; ++y) count += qAlpha(image.pixel(x, y)) > 0;
+            return count;
+        };
+        QVERIFY(peak(426) > 10);
+        QVERIFY(peak(503) > 10);
+        QCOMPARE(peak(500), 0);
+        const QImage enlarged = waveform::render(path, 0.0103, 0.001, {512, 40});
+        QCOMPARE(enlarged.size(), QSize(512, 40)); // more pixels than native samples
+    }
+    void timelineWaveformsFollowMusicAndClipEdits()
+    {
+        if (QQuickStyle::name() != "Material") QQuickStyle::setStyle("Material");
+        QTemporaryDir dir, state;
+        const QString path = dir.filePath("source.mp4");
+        QVERIFY(runFfmpeg({"-v", "error", "-f", "lavfi", "-i", "color=s=160x240:d=2",
+            "-f", "lavfi", "-i", "sine=frequency=400:duration=2", "-shortest", path}));
+        Project project;
+        project.clips = {media::clipFor(media::probe(path))};
+        project.clips[0].in = 0.2;
+        project.clips[0].out = 1.8;
+        project.clips[0].speed = 2;
+        project.music.path = path;
+        project.music.offset = 0.3;
+        write(dir.filePath("waveforms.reel"), QJsonDocument(project.toJson(dir.path())).toJson());
+        Theme theme(dir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("waveforms.reel")));
+        QQmlApplicationEngine engine;
+        engine.addImageProvider("waveforms", new WaveformProvider());
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.loadData("import QtQuick\nItem { width: 800; height: 278; ReelTimeline { anchors.fill: parent } }",
+            QUrl("qrc:/TimelineWaveformTest.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *root = qobject_cast<QQuickItem *>(engine.rootObjects().first());
+        std::function<QQuickItem *(QQuickItem *, const QString &)> find = [&](QQuickItem *item, const QString &name) -> QQuickItem * {
+            if (item->objectName() == name) return item;
+            for (auto *child : item->childItems()) if (auto *hit = find(child, name)) return hit;
+            return nullptr;
+        };
+        auto *music = find(root, "musicWaveform");
+        auto *video = find(root, "clipWaveform0");
+        QVERIFY(music && video);
+        QCOMPARE(music->property("sourcePath").toString(), path);
+        QCOMPARE(music->property("sourceStart").toDouble(), 0.3);
+        QCOMPARE(video->property("sourceStart").toDouble(), 0.2);
+        QCOMPARE(video->property("speed").toDouble(), 2.0);
+        backend.setMusicValue("offset", 0.5);
+        backend.setClipValue(0, "in", 0.4);
+        backend.setClipValue(0, "speed", 0.5);
+        QTRY_COMPARE(music->property("sourceStart").toDouble(), 0.5);
+        QTRY_COMPARE(video->property("sourceStart").toDouble(), 0.4);
+        QTRY_COMPARE(video->property("speed").toDouble(), 0.5);
+    }
+
+    void waveformTilesLoadAndFollowZoomAndOffset()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("audio # % é.wav");
+        QVERIFY(runFfmpeg({"-v", "error", "-f", "lavfi", "-i", "sine=frequency=400:duration=2", path}));
+        QQmlApplicationEngine engine;
+        engine.addImageProvider("waveforms", new WaveformProvider());
+        engine.rootContext()->setContextProperty("testAudioPath", path);
+        engine.loadData(R"(
+            import QtQuick
+            import QtQuick.Window
+            Window {
+                visible: true; width: 640; height: 100
+                Waveform {
+                    objectName: "testWaveform"
+                    width: 100000; height: 80
+                    sourcePath: testAudioPath
+                    sourceStart: 0.2
+                    pixelsPerSecond: 1000
+                    viewportWidth: 640
+                }
+            }
+        )", QUrl("qrc:/WaveformTest.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *wave = engine.rootObjects().first()->findChild<QQuickItem *>("testWaveform");
+        QVERIFY(wave);
+        auto images = [&] {
+            QList<QQuickItem *> result;
+            for (auto *child : wave->childItems())
+                if (child->property("source").isValid()) result.append(child);
+            return result;
+        };
+        QTRY_COMPARE(images().size(), 3); // bounded to viewport plus one preload tile
+        QQuickItem *image = images().first();
+        QTRY_COMPARE_WITH_TIMEOUT(image->property("status").toInt(), 1, 10000);
+        QUrlQuery query(image->property("source").toUrl());
+        QCOMPARE(query.queryItemValue("path", QUrl::FullyDecoded), path);
+        QCOMPARE(query.queryItemValue("start").toDouble(), 0.2);
+        QCOMPARE(query.queryItemValue("duration").toDouble(), 0.512);
+        QVERIFY(wave->setProperty("sourceStart", 0.4));
+        QVERIFY(wave->setProperty("pixelsPerSecond", 2000));
+        QTRY_COMPARE(QUrlQuery(image->property("source").toUrl()).queryItemValue("duration").toDouble(), 0.256);
+        QCOMPARE(QUrlQuery(image->property("source").toUrl()).queryItemValue("start").toDouble(), 0.4);
+        QTRY_COMPARE_WITH_TIMEOUT(image->property("status").toInt(), 1, 10000);
+        QVERIFY(wave->setProperty("viewportStart", 20000));
+        QTRY_VERIFY(images().size() <= 4);
+    }
+
+    void waveformPreservesPeaksAndStereo()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("stereo # % é.wav");
+        // One-sample opposite-phase impulses: averaging would hide them.
+        QVERIFY(runFfmpeg({"-v", "error", "-f", "lavfi", "-i",
+            "aevalsrc=if(eq(n\\,12000)\\,0.9\\,0)|if(eq(n\\,12000)\\,-0.9\\,0):s=48000:d=1",
+            "-c:a", "pcm_f32le", path}));
+        const QImage image = waveform::render(path, 0, 1, {200, 80});
+        QCOMPARE(image.size(), QSize(200, 80));
+        QCOMPARE(waveform::render(path, 0, 1, {200, 800}).size(), QSize(200, 800));
+        int top = 0, bottom = 0;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 47; x <= 52; ++x)
+                if (qAlpha(image.pixel(x, y)) > 0) (y < 40 ? top : bottom)++;
+        QVERIFY2(top > 10 && bottom > 10, "Short peaks in both channels must survive aggregation");
+        const QImage trimmed = waveform::render(path, 0.2, 0.1, {200, 80});
+        int middle = 0;
+        for (int y = 0; y < 80; ++y)
+            for (int x = 95; x <= 105; ++x) middle += qAlpha(trimmed.pixel(x, y)) > 0;
+        QVERIFY2(middle > 10, "Source offset and duration must move the impulse to the center");
+    }
+
+    void waveformSilenceTailAndCancellation()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("short.wav");
+        QVERIFY(runFfmpeg({"-v", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "0.1", path}));
+        const QImage image = waveform::render(path, 0, 1, {400, 40});
+        QCOMPARE(image.size(), QSize(400, 40));
+        QCOMPARE(waveform::render(path, 0.2, 1, {400, 40}).size(), QSize(400, 40));
+        QVERIFY(waveform::render(path, 0, 1, {400, 40}, "#ffffff", [] { return true; }).isNull());
+        QVERIFY(waveform::render(dir.filePath("missing.wav"), 0, 1, {400, 40}).isNull());
+    }
     // Theme and translator, from the Omarchy app template.
 
     void themeFallsBack()
@@ -145,6 +544,51 @@ private slots:
         QCOMPARE(p.clips[1].in, 5.0);
         QCOMPARE(p.clips[1].out, 10.0);
         QCOMPARE(p.clips[1].zoom, 1.5);
+    }
+
+    // Captions sit on the platform's home spot and follow it until moved by
+    // hand; moved captions stay put but are kept out of the new app's buttons.
+    void captionsFollowThePlatform()
+    {
+        Project p;
+        const QPointF instagram = Project::captionHome("instagram");
+        const QPointF tiktok = Project::captionHome("tiktok");
+        QVERIFY(instagram != tiktok);
+        QVERIFY(tiktok.y() < instagram.y());   // TikTok's own text starts higher
+        QVERIFY(tiktok.x() < 0.5 && instagram.x() < 0.5);  // clear of the right-hand buttons
+        QCOMPARE(p.captionX, instagram.x());
+        QCOMPARE(p.captionY, instagram.y());
+        QVERIFY(p.captionAuto);
+
+        p.setPlatform("tiktok");
+        QCOMPARE(p.captionX, tiktok.x());
+        QCOMPARE(p.captionY, tiktok.y());
+
+        // Moved by hand: switching keeps the spot...
+        QVERIFY(p.setCaptionValue("y", 0.3));
+        QVERIFY(!p.captionAuto);
+        p.setPlatform("instagram");
+        QCOMPARE(p.captionY, 0.3);
+        // ...unless it would sit under the app's text: then it's pulled back in.
+        QVERIFY(p.setCaptionValue("y", 0.95));
+        p.setPlatform("tiktok");
+        QVERIFY(p.captionY <= (1920 - 480 - 90) / 1920.0 + 1e-9);
+
+        // Saved and loaded, the choice sticks.
+        const Project back = Project::fromJson(p.toJson());
+        QVERIFY(!back.captionAuto);
+        QCOMPARE(back.captionY, p.captionY);
+
+        // A file from before this, with captions on the old fixed default,
+        // counts as never moved and goes to the platform's spot.
+        QJsonObject old = Project().toJson();
+        old.remove("captionAuto");
+        old["captionX"] = 0.5;
+        old["captionY"] = 0.68;
+        old["platform"] = "tiktok";
+        const Project legacy = Project::fromJson(old);
+        QVERIFY(legacy.captionAuto);
+        QCOMPARE(legacy.captionY, tiktok.y());
     }
 
     void jsonRoundTripsWithRelativePaths()
@@ -1169,6 +1613,88 @@ private slots:
         QCOMPARE(backend.project().clips.size(), 1);
     }
 
+    // Dragged text snaps to the frame's center and thirds; holding Ctrl turns
+    // snapping off. The picture's pan snaps back to centered.
+    void previewDragSnapsToGuides()
+    {
+        QTemporaryDir dir, state, themeDir;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1600x1200",
+                           "-frames:v", "1", dir.filePath("photo.jpg")}));
+        Project p;
+        p.clips = {media::clipFor(media::probe(dir.filePath("photo.jpg")), 4.0)};
+        p.clips[0].motion = "none";
+        p.clips[0].zoom = 1.5;
+        p.overlays = {{"snap me", 0, 4, 0.5, 0.42, 96, "none"}};
+        p.overlays[0].x = 0.5;
+        write(dir.filePath("snap.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+
+        QQuickStyle::setStyle("Material");
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("snap.reel")));
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.load(QUrl("qrc:/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360, 860);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, 1.0));
+        QTest::qWait(300);
+
+        std::function<QQuickItem *(QQuickItem *, const QString &)> find = [&](QQuickItem *item, const QString &name) -> QQuickItem * {
+            if (item->objectName() == name)
+                return item;
+            for (QQuickItem *child : item->childItems())
+                if (QQuickItem *found = find(child, name))
+                    return found;
+            return nullptr;
+        };
+        // Mouse events sent straight to the window so a drag can hold Ctrl.
+        auto send = [&](QEvent::Type type, QPoint pos, Qt::MouseButtons buttons, Qt::KeyboardModifiers mods) {
+            QMouseEvent e(type, QPointF(pos), window->mapToGlobal(QPointF(pos)), Qt::LeftButton, buttons, mods);
+            QCoreApplication::sendEvent(window, &e);
+        };
+        auto drag = [&](QPoint from, QPoint to, Qt::KeyboardModifiers mods) {
+            send(QEvent::MouseButtonPress, from, Qt::LeftButton, mods);
+            for (int i = 1; i <= 8; ++i) {
+                send(QEvent::MouseMove, from + (to - from) * i / 8, Qt::LeftButton, mods);
+                QTest::qWait(15);
+            }
+            send(QEvent::MouseButtonRelease, to, Qt::NoButton, mods);
+            QTest::qWait(30);
+        };
+        auto *box = find(window->contentItem(), "overlayBox0");
+        QVERIFY(box && box->isVisible());
+        const QPoint text = box->mapToScene(QPointF(box->width() / 2, box->height() / 2)).toPoint();
+
+        // A small nudge right stays on the vertical center line.
+        drag(text, text + QPoint(5, 0), Qt::NoModifier);
+        QTRY_COMPARE(backend.project().overlays[0].x, 0.5);
+
+        // With Ctrl held the same nudge moves it off center.
+        drag(text, text + QPoint(5, 0), Qt::ControlModifier);
+        QTRY_VERIFY(backend.project().overlays[0].x > 0.505);
+
+        // Dragging it near the middle of the frame snaps it onto y = 0.5.
+        auto *frameBox = find(window->contentItem(), "clipBox");
+        QVERIFY(frameBox);
+        const double frameH = frameBox->height();
+        const QPoint now = box->mapToScene(QPointF(box->width() / 2, box->height() / 2)).toPoint();
+        const int toMiddle = int(std::round((0.5 - backend.project().overlays[0].y) * frameH)) + 4;
+        drag(now, now + QPoint(0, toMiddle), Qt::NoModifier);
+        QTRY_VERIFY(std::abs(backend.project().overlays[0].y - 0.5) < 1e-6);
+
+        // The picture's pan comes back to exactly centered when dragged near it.
+        const QPoint picture = frameBox->mapToScene(QPointF(frameBox->width() / 2, frameBox->height() - 40)).toPoint();
+        drag(picture, picture + QPoint(-4, 0), Qt::NoModifier);
+        QTRY_COMPARE(backend.project().clips[0].panX, 0.0);
+        drag(picture, picture + QPoint(-4, 0), Qt::ControlModifier);
+        QTRY_VERIFY(backend.project().clips[0].panX > 0.0);
+    }
+
     // The real window, offscreen: everything on the picture moves and resizes
     // with the mouse, one undo step per gesture, Ctrl+Z / Ctrl+Y.
     void previewItemsDragAndResize()
@@ -1824,8 +2350,25 @@ private slots:
         hex->setProperty("text", "#3366FF");
         QMetaObject::invokeMethod(hex, "editingFinished");
         QTRY_COMPARE(backend.project().overlays[0].fill, QString("#ff3366ff"));
-        // Font, bold and italic controls are on the card.
-        QVERIFY(findItem(window->contentItem(), "overlayFont0"));
+        // The font picker filters as you type; Enter picks the first match.
+        auto *fontButton = findItem(window->contentItem(), "overlayFont0");
+        QVERIFY(fontButton);
+        QMetaObject::invokeMethod(fontButton, "clicked");
+        QObject *fontPopup = fontButton->findChild<QObject *>("fontPopup");
+        QVERIFY(fontPopup);
+        QTRY_VERIFY(fontPopup->property("opened").toBool());
+        const int everything = fontButton->property("matches").toList().size();
+        QVERIFY(everything > 5);
+        for (char ch : QByteArray("liberation mo"))
+            QTest::keyClick(window, ch);
+        QTRY_COMPARE(fontButton->property("query").toString(), QString("liberation mo"));
+        const QVariantList narrowed = fontButton->property("matches").toList();
+        QVERIFY(narrowed.size() >= 1 && narrowed.size() < everything);
+        for (const QVariant &f : narrowed)
+            QVERIFY2(f.toString().contains("Liberation Mono", Qt::CaseInsensitive), qPrintable(f.toString()));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(backend.project().overlays[0].font, narrowed.first().toString());
+        QTRY_VERIFY(!fontPopup->property("visible").toBool());
         auto *bold = findItem(window->contentItem(), "overlayBold0");
         QVERIFY(bold);
         QVERIFY(bold->property("checked").toBool());  // plain text is bold by default
@@ -1872,7 +2415,8 @@ private slots:
         o.style = "fisheye";
         QCOMPARE(o.fontOf(), QString("Liberation Serif"));
         QVERIFY(!o.boldOf());
-        QCOMPARE(o.outlineWidthOf(), 3.0);
+        QCOMPARE(o.outlineWidthOf(), 0.0);
+        QCOMPARE(o.colorOf("outline"), QString("#ff000000"));  // ready for the thickness slider
 
         Project p;
         p.clips = {clip(0, 4)};
@@ -1928,6 +2472,90 @@ private slots:
         f.outlineWidth = 14;
         const int thick = blue(FisheyeText::render(f));
         QVERIFY2(thick > thin * 2, qPrintable(QString("thin %1 thick %2").arg(thin).arg(thick)));
+        // No outline, shadow distance 0: the shadow is a soft glow under the
+        // letters; only "No shadow" removes it.
+        Overlay bare;
+        bare.text = "BARE";
+        bare.style = "fisheye";
+        bare.size = 140;
+        bare.y = 0.5;
+        bare.outlineWidth = 0;
+        bare.shadowDistance = 0;
+        auto darkAround = [](const QImage &img) {
+            int dark = 0;
+            for (int y = 700; y < 1220; y += 2)
+                for (int x = 0; x < 1080; x += 2) {
+                    const QRgb px = img.pixel(x, y);
+                    dark += qAlpha(px) > 20 && qGray(qUnpremultiply(px)) < 80;
+                }
+            return dark;
+        };
+        QVERIFY(darkAround(FisheyeText::render(bare)) > 0);
+        bare.noShadow = true;
+        QCOMPARE(darkAround(FisheyeText::render(bare)), 0);
+        // Plain text: no \shad tag with the box ticked.
+        Project ns;
+        ns.clips = {clip(0, 2)};
+        const int n = ns.addOverlay("no shadow", 0, 1);
+        ns.setOverlayValue(n, "shadow", "#ff000000");
+        QVERIFY(assDocument(ns, "#FF0000").contains("\\shad5"));
+        QVERIFY(ns.setOverlayValue(n, "noShadow", true));
+        QVERIFY(!assDocument(ns, "#FF0000").contains("\\shad"));
+        QVERIFY(Project::fromJson(ns.toJson(QDir::tempPath()), QDir::tempPath()).overlays[n].noShadow);
+
+        // Letter thickness: the letters get heavier in their own color.
+        Overlay heavy;
+        heavy.text = "thin";
+        heavy.style = "fisheye";
+        heavy.size = 140;
+        heavy.y = 0.5;
+        heavy.noShadow = true;
+        auto yellow = [](const QImage &img) {
+            int n = 0;
+            for (int y = 700; y < 1220; y += 2)
+                for (int x = 0; x < 1080; x += 2) {
+                    const QRgb px = img.pixel(x, y);
+                    n += qAlpha(px) > 200 && qRed(px) > 200 && qGreen(px) > 200 && qBlue(px) < 80;
+                }
+            return n;
+        };
+        const int light = yellow(FisheyeText::render(heavy));
+        heavy.thickness = 10;
+        const int bolder = yellow(FisheyeText::render(heavy));
+        QVERIFY2(bolder > light * 1.3, qPrintable(QString("light %1 heavy %2").arg(light).arg(bolder)));
+        // Plain text: a fill-colored border, and with an outline a second layer on top.
+        QVERIFY(ns.setOverlayValue(n, "thickness", 6));
+        const QString layered = assDocument(ns, "#FF0000");
+        QVERIFY2(layered.contains("\\bord11") && layered.contains("Dialogue: 1,"), qPrintable(layered.right(500)));
+        QVERIFY(layered.contains("\\3c&HFFFFFF&\\3a&H00&\\bord3"));
+        QVERIFY(ns.setOverlayValue(n, "outline", "transparent"));
+        const QString noOutline = assDocument(ns, "#FF0000");
+        QVERIFY(!noOutline.contains("Dialogue: 1,"));
+        QVERIFY(noOutline.contains("\\3c&HFFFFFF&\\3a&H00&\\bord3"));
+        QCOMPARE(Project::fromJson(ns.toJson(QDir::tempPath()), QDir::tempPath()).overlays[n].thickness, 6.0);
+        QVERIFY(ns.setOverlayValue(n, "outline", "default"));
+        QVERIFY(ns.setOverlayValue(n, "thickness", 0));
+
+        // Letter spacing's Default box: ticked uses the font's spacing but keeps
+        // the number; setting a number unticks it.
+        QVERIFY(ns.overlays[n].spacingDefault);
+        QVERIFY(ns.setOverlayValue(n, "letterSpacing", 8));
+        QVERIFY(!ns.overlays[n].spacingDefault);
+        QVERIFY(assDocument(ns, "#FF0000").contains("\\fsp8"));
+        QVERIFY(ns.setOverlayValue(n, "spacingDefault", true));
+        QCOMPARE(ns.overlays[n].letterSpacingOf(), 0.0);
+        QCOMPARE(ns.overlays[n].letterSpacing, 8.0);
+        QVERIFY(!assDocument(ns, "#FF0000").contains("\\fsp"));
+        QVERIFY(ns.setOverlayValue(n, "spacingDefault", false));
+        QCOMPARE(ns.overlays[n].letterSpacingOf(), 8.0);
+        // Saved projects from before the box keep their spacing on.
+        QJsonObject old = ns.toJson(QDir::tempPath());
+        QJsonArray list = old["overlays"].toArray();
+        QJsonObject first = list[n].toObject();
+        first.remove("spacingDefault");
+        list[n] = first;
+        old["overlays"] = list;
+        QCOMPARE(Project::fromJson(old, QDir::tempPath()).overlays[n].letterSpacingOf(), 8.0);
         // And it can be set from the MCP tools.
         QTemporaryDir dir, state;
         const QString source = dir.filePath("source.mp4");
@@ -1943,6 +2571,553 @@ private slots:
         QVERIFY(saved.overlays[0].italic);
         QCOMPARE(saved.overlays[0].outlineWidth, 4.0);
         QCOMPARE(saved.overlays[0].letterSpacing, 2.0);
+    }
+
+    // ---- Posting ----
+
+    void socialPreviewEditingAndLayout()
+    {
+        QTemporaryDir state, themeDir;
+        QQuickStyle::setStyle("Material");
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.load(QUrl("qrc:/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360, 900);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *chrome = findItem(window->contentItem(), "socialPreview");
+        QVERIFY(chrome);
+        QVERIFY(chrome->isVisible());
+        QCOMPARE(chrome->property("tiktok").toBool(), false);
+        backend.setPlatform("tiktok");
+        QTRY_COMPARE(chrome->property("tiktok").toBool(), true);
+        auto *toggle = findItem(window->contentItem(), "showAppUi");
+        QVERIFY(toggle);
+        toggle->setProperty("checked", false);
+        QTRY_VERIFY(!chrome->isVisible());
+        toggle->setProperty("checked", true);
+        QTRY_VERIFY(chrome->isVisible());
+        QMetaObject::invokeMethod(findItem(window->contentItem(), "editPostText"), "clicked");
+        auto *caption = findItem(window->contentItem(), "previewPostCaption");
+        auto *tags = findItem(window->contentItem(), "previewPostHashtags");
+        QVERIFY(caption && tags);
+        caption->setProperty("text", QString("A long caption ").repeated(50));
+        tags->setProperty("text", "travel, #sunset #Travel");
+        QTRY_COMPARE(backend.postCaption(), caption->property("text").toString());
+        QCOMPARE(backend.postHashtags(), QString("travel, #sunset #Travel"));
+        auto *tagLabel = findItem(chrome, "socialHashtags");
+        QVERIFY(tagLabel);
+        QCOMPARE(tagLabel->property("text").toString(), QString("#travel #sunset"));
+        const Project restored = Project::fromJson(backend.project().toJson(state.path()), state.path());
+        QCOMPARE(restored.postCaption, backend.postCaption());
+        QCOMPARE(restored.postHashtags, backend.postHashtags());
+        backend.undo();
+        QCOMPARE(backend.postCaption(), QString());
+        QCOMPARE(backend.postHashtags(), QString());
+        backend.redo();
+        QCOMPARE(backend.postCaption(), caption->property("text").toString());
+        for (const QString &platform : {QString("instagram"), QString("tiktok")}) {
+            backend.setPlatform(platform);
+        for (const QSize size : {QSize(1360, 900), QSize(1000, 700), QSize(1800, 1050)}) {
+            window->resize(size);
+            QTest::qWait(80);
+            for (const QString &name : {QString("socialTop"), QString("socialBody"), QString("socialNav")}) {
+                auto *part = findItem(chrome, name);
+                QVERIFY(part);
+                const QRectF rect = part->mapRectToItem(chrome, part->boundingRect());
+                QVERIFY2(rect.left() >= -1 && rect.top() >= -1 && rect.right() <= chrome->width() + 1
+                         && rect.bottom() <= chrome->height() + 1, qPrintable(name));
+            }
+            auto *nav = findItem(chrome, "socialNav");
+            const qreal cellWidth = nav->width() / 5;
+            for (int i = 0; i < 5; ++i) {
+                auto *cell = findItem(nav, "socialNavCell" + QString::number(i));
+                QVERIFY(cell);
+                QVERIFY2(qAbs(cell->width() - cellWidth) < 1,
+                         qPrintable(QString("%1 cell %2: %3, expected %4").arg(platform).arg(i).arg(cell->width()).arg(cellWidth)));
+            }
+        }
+        }
+    }
+
+    void postTextAndLimits()
+    {
+        QCOMPARE(Posting::hashtags("#food travel, #Food #new-york;;  ##x"),
+                 (QStringList{"#food", "#travel", "#newyork", "#x"}));
+        QCOMPARE(Posting::text("  Hello there  ", "a b"), QString("Hello there\n\n#a #b"));
+        QCOMPARE(Posting::text("", "a"), QString("#a"));
+        QCOMPARE(Posting::text("Only words", ""), QString("Only words"));
+        QVERIFY(Posting::find("tiktok") && Posting::find("instagram"));
+        QVERIFY(!Posting::find("myspace"));
+
+        QTemporaryDir state, themeDir;
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVariantMap check = backend.checkPost("instagram", "hi #one", "two three");
+        QVERIFY(check.value("ok").toBool());
+        QCOMPARE(check.value("hashtags").toInt(), 3);  // counts the one in the caption too
+        QStringList many;
+        for (int i = 0; i < 31; ++i)
+            many << QString("t%1").arg(i);
+        check = backend.checkPost("instagram", "", many.join(' '));
+        QVERIFY(!check.value("ok").toBool());
+        QVERIFY(backend.checkPost("tiktok", "", many.join(' ')).value("ok").toBool());  // no hashtag cap
+        QVERIFY(!backend.checkPost("tiktok", QString(2300, 'a'), "").value("ok").toBool());
+    }
+
+    void postExportsOpensAndCopies()
+    {
+        QTemporaryDir dir, state, themeDir, movies;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360",
+                           "-frames:v", "1", dir.filePath("photo.jpg")}));
+        Project p;
+        p.clips = {media::clipFor(media::probe(dir.filePath("photo.jpg")), 1.0)};
+        write(dir.filePath("e.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+
+        QQuickStyle::setStyle("Material");
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("e.reel")));
+        QUrl opened;
+        QString revealed;
+        backend.openUrl = [&](const QUrl &url) { opened = url; };
+        backend.revealFile = [&](const QString &file) { revealed = file; };
+        backend.postFolder = movies.path();  // not the real ~/Videos
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.load(QUrl("qrc:/Main.qml"));
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360, 900);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        // Post opens the dialog; pick TikTok, type, Next.
+        auto *postButton = findItem(window->contentItem(), "postButton");
+        QVERIFY(postButton);
+        QMetaObject::invokeMethod(postButton, "clicked");
+        QQuickItem *caption = nullptr;
+        QTRY_VERIFY((caption = findItem(window->contentItem(), "postCaption")) != nullptr);
+        auto *tiktok = findItem(window->contentItem(), "postTo-tiktok");
+        QVERIFY(tiktok);
+        QMetaObject::invokeMethod(tiktok, "clicked");
+        caption->setProperty("text", "My trip");
+        QObject *postDialog = window->findChild<QObject *>("postDialog");
+        QVERIFY(postDialog);
+        findItem(window->contentItem(), "postHashtags")->setProperty("text", "travel, #sun");
+        auto *next = findItem(window->contentItem(), "postNext");
+        QTRY_VERIFY(next->isEnabled());
+        QSignalSpy ready(&backend, &Backend::postOpened);
+        QMetaObject::invokeMethod(next, "clicked");
+        QVERIFY(ready.wait(120000));
+
+        // The video was exported, TikTok's upload page opened, the file shown,
+        // the text copied, and what was typed saved with the project.
+        const QString file = ready.first().at(1).toString();
+        QVERIFY(QFileInfo::exists(file));
+        QCOMPARE(file, QDir(movies.path()).filePath("e-tiktok.mp4"));
+        QCOMPARE(opened, QUrl("https://www.tiktok.com/tiktokstudio/upload"));
+        QCOMPARE(revealed, file);
+        QCOMPARE(QGuiApplication::clipboard()->text(), QString("My trip\n\n#travel #sun"));
+        QCOMPARE(backend.project().postHashtags, QString("travel, #sun"));
+        QCOMPARE(backend.project().platform, QString("tiktok"));
+        QTRY_COMPARE(postDialog->property("stage").toString(), QString("ready"));
+        QFile::remove(file);
+    }
+
+    void scheduleTimesReadTheWayPeopleTypeThem()
+    {
+        QTemporaryDir state, themeDir;
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        const QDateTime now = QDateTime::currentDateTime();
+        auto at = [&](const QString &text) {
+            const QVariantMap m = backend.parseWhen(text);
+            return m.value("ok").toBool() ? QDateTime::fromMSecsSinceEpoch(qint64(m.value("ms").toDouble()))
+                                          : QDateTime();
+        };
+        const QDate tomorrow = now.date().addDays(1);
+        QCOMPARE(at("tomorrow 9am"), QDateTime(tomorrow, QTime(9, 0)));
+        QCOMPARE(at("Tomorrow at 9:30 PM"), QDateTime(tomorrow, QTime(21, 30)));
+        QCOMPARE(at("tomorrow 18:05"), QDateTime(tomorrow, QTime(18, 5)));
+        QCOMPARE(at(tomorrow.toString("yyyy-MM-dd") + " 07:15"), QDateTime(tomorrow, QTime(7, 15)));
+        // A weekday is the next one, never today.
+        const QDateTime friday = at("fri 10am");
+        QCOMPARE(friday.date().dayOfWeek(), 5);
+        QVERIFY(friday.date() > now.date() && friday.date() <= now.date().addDays(7));
+        // A bare time already gone today means tomorrow.
+        const QTime earlier = now.time().addSecs(-3600);
+        if (earlier < now.time()) {
+            QCOMPARE(at(earlier.toString("HH:mm")).date(), tomorrow);
+        }
+        QVERIFY(backend.parseWhen("tomorrow 9am").value("label").toString().contains("in "));
+
+        // What can't be posted at.
+        QVERIFY(!at("yesterday 9am").isValid());
+        QVERIFY(!at("tomorrow").isValid());
+        QVERIFY(backend.parseWhen("tomorrow").value("problem").toString().contains("time"));
+        QVERIFY(!at(now.date().addDays(-2).toString("yyyy-MM-dd") + " 10:00").isValid());
+        QVERIFY(backend.parseWhen(now.date().addDays(90).toString("yyyy-MM-dd") + " 10:00")
+                    .value("problem").toString().contains("75 days"));
+        QVERIFY(!at("tomorrow 25:00").isValid());
+        QVERIFY(!at("tomorrow 13pm").isValid());
+        QVERIFY(!at("").isValid());
+
+        // The suggestion is a whole hour, an hour or two out; the buttons move it.
+        const QDateTime suggested = at(backend.suggestWhen());
+        QVERIFY(suggested.isValid());
+        QCOMPARE(suggested.time().minute(), 0);
+        QVERIFY(now.secsTo(suggested) >= 3600 && now.secsTo(suggested) <= 7200);
+        QCOMPARE(at(backend.suggestWhen("tomorrow 9am", 60)), QDateTime(tomorrow, QTime(10, 0)));
+        QCOMPARE(at(backend.suggestWhen("tomorrow 9am", 1440)), QDateTime(tomorrow.addDays(1), QTime(9, 0)));
+    }
+
+    void schedulerUploadsTheVideoAndSchedulesItAsTheAccount()
+    {
+        QTemporaryDir state, dir;
+        FakeConvex convex;
+        PostScheduler scheduler;
+        scheduler.stateDir = state.path();
+        QSignalSpy refreshed(&scheduler, &PostScheduler::postsChanged);
+        scheduler.configure(convex.base() + "/", convex.key);
+        QVERIFY(scheduler.configured());
+        QVERIFY(refreshed.wait(5000));
+        QCOMPARE(QFileInfo(scheduler.configFile()).permissions() & (QFile::ReadOther | QFile::ReadGroup),
+                 QFileDevice::Permissions());
+
+        write(dir.filePath("reel.mp4"), QByteArray(5000, 'v'));
+        const QDateTime when = QDateTime::currentDateTime().addDays(1);
+        QSignalSpy done(&scheduler, &PostScheduler::scheduled);
+        convex.calls.clear();
+        scheduler.schedule(dir.filePath("reel.mp4"), "trip", "My trip\n\n#travel", when,
+                           {"17841400000000001", "reelcut_test", "good-token", "https://graph.instagram.com"});
+        QVERIFY(done.wait(5000));
+        QVERIFY2(done.first().at(0).toBool(), qPrintable(done.first().at(1).toString()));
+        QCOMPARE(convex.calls.at(0).function, QString("posts:uploadUrl"));
+        QCOMPARE(convex.calls.at(1).path, QString("/upload"));
+        QCOMPARE(convex.calls.at(1).contentType, QString("video/mp4"));
+        QCOMPARE(convex.calls.at(1).body.size(), 5000);
+        const FakeConvex::Call &sched = convex.calls.at(2);
+        QCOMPARE(sched.function, QString("posts:schedule"));
+        QCOMPARE(sched.args.value("secret").toString(), convex.key);
+        QCOMPARE(sched.args.value("storageId").toString(), QString("kg2storage"));
+        QCOMPARE(sched.args.value("caption").toString(), QString("My trip\n\n#travel"));
+        QCOMPARE(sched.args.value("igUserId").toString(), QString("17841400000000001"));  // exactly, as text
+        QCOMPARE(sched.args.value("token").toString(), QString("good-token"));
+        QCOMPARE(qint64(sched.args.value("publishAt").toDouble()), when.toMSecsSinceEpoch());
+        QTRY_COMPARE(scheduler.posts().size(), 1);
+
+        // Cancelling goes through and the list follows.
+        scheduler.cancel("p1");
+        QTRY_COMPARE(scheduler.posts().first().toMap().value("status").toString(), QString("cancelled"));
+
+        // A wrong key says so.
+        scheduler.configure(convex.base(), "wrong-key-0000000000");
+        QTRY_COMPARE(scheduler.lastError(), QString("Wrong scheduler key."));
+        done.clear();
+        scheduler.schedule(dir.filePath("reel.mp4"), "trip", "x", when, {"1", "u", "t", "https://graph.instagram.com"});
+        QVERIFY(done.wait(5000));
+        QVERIFY(!done.first().at(0).toBool());
+        QVERIFY(done.first().at(1).toString().contains("Wrong scheduler key"));
+    }
+
+    void postDialogSchedulesAnInstagramReel()
+    {
+        QTemporaryDir dir, state, themeDir, movies;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360",
+                           "-frames:v", "1", dir.filePath("photo.jpg")}));
+        Project p;
+        p.clips = {media::clipFor(media::probe(dir.filePath("photo.jpg")), 1.0)};
+        write(dir.filePath("s.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+
+        FakeInstagram instagram;
+        FakeConvex convex;
+        QQuickStyle::setStyle("Material");
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        backend.openUrl = [](const QUrl &) {};
+        backend.revealFile = [](const QString &) {};
+        backend.postFolder = movies.path();
+        backend.instagram()->graphBase = instagram.base();
+        QSignalSpy connected(backend.instagram(), &InstagramApi::connectFinished);
+        backend.connectInstagram("good-token");
+        QVERIFY(connected.wait(5000));
+        backend.setupScheduler(convex.base(), convex.key);
+        QVERIFY(backend.schedulerReady());
+        QVERIFY(backend.openFile(dir.filePath("s.reel")));
+
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.load(QUrl("qrc:/Main.qml"));
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360, 900);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        QMetaObject::invokeMethod(findItem(window->contentItem(), "postButton"), "clicked");
+        QQuickItem *caption = nullptr;
+        QTRY_VERIFY((caption = findItem(window->contentItem(), "postCaption")) != nullptr);
+        QMetaObject::invokeMethod(findItem(window->contentItem(), "postTo-instagram"), "clicked");
+        caption->setProperty("text", "Later");
+        QObject *dialog = window->findChild<QObject *>("postDialog");
+        auto *later = findItem(window->contentItem(), "postScheduleLater");
+        QVERIFY(later);
+        QTRY_VERIFY(later->isVisible() && later->isEnabled());
+        later->setProperty("checked", true);
+        QMetaObject::invokeMethod(later, "toggled");
+        QTRY_VERIFY(dialog->property("scheduling").toBool());
+        auto *when = findItem(window->contentItem(), "postWhen");
+        auto *next = findItem(window->contentItem(), "postNext");
+        QCOMPARE(next->property("text").toString(), QString("Schedule"));
+        // A time that can't be used holds the button.
+        when->setProperty("text", "yesterday 9am");
+        QTRY_VERIFY(!next->isEnabled());
+        when->setProperty("text", "tomorrow 9am");
+        QTRY_VERIFY(next->isEnabled());
+
+        QSignalSpy scheduled(&backend, &Backend::postScheduled);
+        convex.calls.clear();
+        QMetaObject::invokeMethod(next, "clicked");
+        QVERIFY(scheduled.wait(120000));
+        QVERIFY2(scheduled.first().at(0).toBool(), qPrintable(scheduled.first().at(1).toString()));
+        QTRY_COMPARE(dialog->property("stage").toString(), QString("scheduled"));
+
+        const auto sched = std::find_if(convex.calls.begin(), convex.calls.end(),
+                                        [](const FakeConvex::Call &c) { return c.function == "posts:schedule"; });
+        QVERIFY(sched != convex.calls.end());
+        QCOMPARE(qint64(sched->args.value("publishAt").toDouble()),
+                 QDateTime(QDate::currentDate().addDays(1), QTime(9, 0)).toMSecsSinceEpoch());
+        QCOMPARE(sched->args.value("caption").toString(), QString("Later"));
+        QCOMPARE(sched->args.value("username").toString(), QString("reelcut_test"));
+        QCOMPARE(sched->args.value("igUserId").toString(), QString("17841400000000001"));
+        // Nothing went to Instagram now: that's the scheduler's job at 9am.
+        for (const auto &call : instagram.calls)
+            QVERIFY2(!call.path.endsWith("/media") && !call.path.endsWith("/media_publish"), qPrintable(call.path));
+        QTRY_COMPARE(backend.scheduledPosts().size(), 1);
+        QTRY_VERIFY(findItem(window->contentItem(), "scheduledPost") != nullptr);
+    }
+
+    void instagramUnifiedLoginConnectsAndPublishes()
+    {
+        QTemporaryDir state, dir;
+        FakeInstagram fake;
+        fake.unified = true;
+        InstagramApi api;
+        api.stateDir = state.path();
+        api.graphBase = fake.base();
+        api.pollIntervalMs = 20;
+        QSignalSpy connected(&api, &InstagramApi::connectFinished);
+        api.connectToken("  EAA-test-token\n");
+        QVERIFY(connected.wait(5000));
+        QVERIFY2(connected.first().at(0).toBool(), qPrintable(connected.first().at(1).toString()));
+        QCOMPARE(api.username(), QString("unified_test"));
+        QCOMPARE(fake.calls.first().path, QString("/me/assigned_instagram_accounts"));
+        QCOMPARE(fake.calls.first().query.queryItemValue("fields"), QString("id,username"));
+
+        write(dir.filePath("reel.mp4"), QByteArray(5000, 'v'));
+        QSignalSpy done(&api, &InstagramApi::published);
+        fake.calls.clear();
+        api.publish(dir.filePath("reel.mp4"), "Unified test");
+        QVERIFY(done.wait(10000));
+        QVERIFY2(done.first().at(0).toBool(), qPrintable(done.first().at(1).toString()));
+        QCOMPARE(fake.calls.first().path, QString("/17841400000000001/media"));
+        QCOMPARE(done.first().at(2).toUrl(), QUrl("https://www.instagram.com/reel/abc/"));
+
+        // Both rejected token routes must preserve the working connection.
+        for (const QString &badToken : {QString("bad-token"), QString("EAA-bad-token")}) {
+            connected.clear();
+            api.connectToken(badToken);
+            QVERIFY(connected.wait(5000));
+            QVERIFY(!connected.first().at(0).toBool());
+            QCOMPARE(api.username(), QString("unified_test"));
+            done.clear();
+            api.publish(dir.filePath("reel.mp4"), "Still connected");
+            QVERIFY(done.wait(10000));
+            QVERIFY(done.first().at(0).toBool());
+        }
+
+        // Reload an older token: Unified Login has a different renewal API.
+        QFile account(api.accountFile());
+        QVERIFY(account.open(QIODevice::ReadOnly));
+        QJsonObject saved = QJsonDocument::fromJson(account.readAll()).object();
+        account.close();
+        saved["issued"] = QDateTime::currentDateTimeUtc().addDays(-8).toString(Qt::ISODate);
+        write(api.accountFile(), QJsonDocument(saved).toJson());
+        fake.calls.clear();
+        InstagramApi again;
+        again.stateDir = state.path();
+        again.graphBase = fake.base();
+        again.pollIntervalMs = 20;
+        QTRY_VERIFY(again.connected());
+        QCOMPARE(again.username(), QString("unified_test"));
+        QSignalSpy reloadedDone(&again, &InstagramApi::published);
+        again.publish(dir.filePath("reel.mp4"), "After restart");
+        QVERIFY(reloadedDone.wait(10000));
+        QVERIFY(reloadedDone.first().at(0).toBool());
+        QCOMPARE(fake.calls.first().path, QString("/17841400000000001/media"));
+        for (const auto &call : fake.calls)
+            QVERIFY(!call.path.contains("refresh_access_token"));
+    }
+
+    void instagramUnifiedLoginRejectsAmbiguousAccounts_data()
+    {
+        QTest::addColumn<int>("count");
+        QTest::newRow("no account") << 0;
+        QTest::newRow("multiple accounts") << 2;
+    }
+
+    void instagramUnifiedLoginRejectsAmbiguousAccounts()
+    {
+        QFETCH(int, count);
+        QTemporaryDir state;
+        FakeInstagram fake;
+        fake.unified = true;
+        fake.assignedAccounts = count;
+        InstagramApi api;
+        api.stateDir = state.path();
+        api.graphBase = fake.base();
+        QSignalSpy connected(&api, &InstagramApi::connectFinished);
+        api.connectToken("EAA-test-token");
+        QVERIFY(connected.wait(5000));
+        QVERIFY(!connected.first().at(0).toBool());
+        QVERIFY(connected.first().at(1).toString().contains(count ? "more than one" : "no Instagram", Qt::CaseInsensitive));
+        QVERIFY(!api.connected());
+        QVERIFY(!QFileInfo::exists(api.accountFile()));
+    }
+
+    // Instagram's API, against a stand-in server: connect, then publish a reel.
+    void instagramPublishesThroughItsApi()
+    {
+        QTemporaryDir state, dir;
+        FakeInstagram fake;
+        InstagramApi api;
+        api.stateDir = state.path();
+        api.graphBase = fake.base();
+        api.pollIntervalMs = 20;
+
+        QSignalSpy connected(&api, &InstagramApi::connectFinished);
+        api.connectToken("bad-token");
+        QVERIFY(connected.wait(5000));
+        QVERIFY(!connected.takeFirst().at(0).toBool());
+        QVERIFY(!api.connected());
+        api.connectToken("good-token");
+        QVERIFY(connected.wait(5000));
+        QVERIFY2(connected.first().at(0).toBool(), qPrintable(connected.first().at(1).toString()));
+        QCOMPARE(api.username(), QString("reelcut_test"));
+        // Kept for next time, readable only by you.
+        const auto perms = QFile::permissions(api.accountFile());
+        QVERIFY(perms & QFileDevice::ReadOwner);
+        QVERIFY(!(perms & (QFileDevice::ReadGroup | QFileDevice::ReadOther | QFileDevice::WriteGroup | QFileDevice::WriteOther)));
+        InstagramApi again;
+        again.stateDir = state.path();
+        QTRY_VERIFY(again.connected());
+
+        write(dir.filePath("reel.mp4"), QByteArray(5000, 'v'));
+        QSignalSpy done(&api, &InstagramApi::published);
+        fake.calls.clear();
+        api.publish(dir.filePath("reel.mp4"), "My trip\n\n#travel");
+        QVERIFY(done.wait(10000));
+        QVERIFY2(done.first().at(0).toBool(), qPrintable(done.first().at(1).toString()));
+        QCOMPARE(done.first().at(2).toUrl(), QUrl("https://www.instagram.com/reel/abc/"));
+        // The calls, in order, as the API wants them.
+        const auto &c = fake.calls;
+        QCOMPARE(c[0].path, QString("/17841400000000001/media"));
+        QCOMPARE(c[0].query.queryItemValue("media_type"), QString("REELS"));
+        QCOMPARE(c[0].query.queryItemValue("upload_type"), QString("resumable"));
+        QCOMPARE(c[0].query.queryItemValue("caption", QUrl::FullyDecoded), QString("My trip\n\n#travel"));
+        QCOMPARE(c[1].path, QString("/upload/C1"));
+        QCOMPARE(c[1].body.size(), 5000);
+        QCOMPARE(c[1].headers.value("file_size"), QString("5000"));
+        QCOMPARE(c[2].path, QString("/C1"));  // IN_PROGRESS
+        QCOMPARE(c[3].path, QString("/C1"));  // FINISHED
+        QCOMPARE(c[4].path, QString("/17841400000000001/media_publish"));
+        QCOMPARE(c[4].query.queryItemValue("creation_id"), QString("C1"));
+        QCOMPARE(c[5].path, QString("/M1"));
+
+        // Instagram refusing the video stops with its reason.
+        fake.containerStatus = "ERROR";
+        fake.inProgressFor = 0;
+        done.clear();
+        api.publish(dir.filePath("reel.mp4"), "x");
+        QVERIFY(done.wait(10000));
+        QVERIFY(!done.first().at(0).toBool());
+        QVERIFY(done.first().at(1).toString().contains("bad video"));
+
+        api.disconnect();
+        QVERIFY(!api.connected());
+        QVERIFY(!QFileInfo::exists(api.accountFile()));
+    }
+
+    void postDialogPublishesToInstagram()
+    {
+        QTemporaryDir dir, state, themeDir, movies;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360",
+                           "-frames:v", "1", dir.filePath("photo.jpg")}));
+        Project p;
+        p.clips = {media::clipFor(media::probe(dir.filePath("photo.jpg")), 1.0)};
+        write(dir.filePath("e.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+        FakeInstagram fake;
+
+        QQuickStyle::setStyle("Material");
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("e.reel")));
+        QUrl opened;
+        backend.openUrl = [&](const QUrl &url) { opened = url; };
+        backend.revealFile = [](const QString &) {};
+        backend.postFolder = movies.path();
+        backend.instagram()->graphBase = fake.base();
+        backend.instagram()->pollIntervalMs = 20;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.load(QUrl("qrc:/Main.qml"));
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360, 900);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        // Connect through the dialog's Connect page.
+        QMetaObject::invokeMethod(findItem(window->contentItem(), "postButton"), "clicked");
+        QObject *dialog = window->findChild<QObject *>("postDialog");
+        QVERIFY(dialog);
+        QTRY_VERIFY(findItem(window->contentItem(), "postTo-instagram"));
+        QMetaObject::invokeMethod(findItem(window->contentItem(), "postTo-instagram"), "clicked");
+        QMetaObject::invokeMethod(findItem(window->contentItem(), "instagramConnect"), "clicked");
+        QTRY_COMPARE(dialog->property("stage").toString(), QString("connect"));
+        findItem(window->contentItem(), "instagramToken")->setProperty("text", "good-token");
+        QMetaObject::invokeMethod(findItem(window->contentItem(), "instagramConnectGo"), "clicked");
+        QTRY_COMPARE(backend.instagramUser(), QString("reelcut_test"));
+        QTRY_COMPARE(dialog->property("stage").toString(), QString("write"));
+        QVERIFY(dialog->property("publishing").toBool());
+
+        // Publish: export, then the API, then the post's link.
+        findItem(window->contentItem(), "postCaption")->setProperty("text", "Hello");
+        QSignalSpy published(&backend, &Backend::postPublished);
+        QMetaObject::invokeMethod(findItem(window->contentItem(), "postNext"), "clicked");
+        QVERIFY(published.wait(120000));
+        QVERIFY2(published.first().at(0).toBool(), qPrintable(published.first().at(1).toString()));
+        QTRY_COMPARE(dialog->property("stage").toString(), QString("published"));
+        QVERIFY(dialog->property("publishedOk").toBool());
+        QVERIFY(opened.isEmpty());  // no browser: the API posted it
+        QCOMPARE(fake.calls.last().path, QString("/M1"));
+
+        // When Instagram refuses it, the by-hand way opens instead.
+        fake.containerStatus = "ERROR";
+        fake.inProgressFor = 0;
+        dialog->setProperty("stage", "write");
+        published.clear();
+        QMetaObject::invokeMethod(findItem(window->contentItem(), "postNext"), "clicked");
+        QVERIFY(published.wait(120000));
+        QVERIFY(!published.first().at(0).toBool());
+        QCOMPARE(opened, QUrl("https://www.instagram.com/"));
+        backend.disconnectInstagram();
     }
 
     void mcpManagesEffects()

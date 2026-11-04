@@ -154,6 +154,7 @@ ApplicationWindow {
                     Label {
                         text: qsTr("%n clips", "", backend.clips.length) + " · " + timeText(backend.duration)
                         color: backend.duration > 90 ? "#ff8a65" : win.dim
+                        elide: Text.ElideRight
                         ToolTip.visible: backend.duration > 90 && overDuration.hovered
                         ToolTip.text: qsTr("Longer than 90 seconds. Reels and TikToks perform best when short.")
                         HoverHandler { id: overDuration }
@@ -164,6 +165,7 @@ ApplicationWindow {
                         model: [{ id: "instagram", label: qsTr("Instagram") }, { id: "tiktok", label: qsTr("TikTok") }]
                         delegate: Button {
                             required property var modelData
+                            Layout.minimumWidth: implicitWidth
                             text: modelData.label
                             checkable: true
                             flat: true
@@ -173,11 +175,12 @@ ApplicationWindow {
                         }
                     }
                     ToolSeparator {}
-                    ToolButton { text: qsTr("Undo"); enabled: backend.canUndo; onClicked: backend.undo() }
-                    ToolButton { text: qsTr("Redo"); enabled: backend.canRedo; onClicked: backend.redo() }
-                    ToolButton { text: qsTr("Open"); onClicked: confirm.ask(qsTr("Open another project?"), function() { backend.open() }) }
-                    ToolButton { text: qsTr("Save"); onClicked: backend.save() }
+                    ToolButton { Layout.minimumWidth: implicitWidth; text: qsTr("Undo"); enabled: backend.canUndo; onClicked: backend.undo() }
+                    ToolButton { Layout.minimumWidth: implicitWidth; text: qsTr("Redo"); enabled: backend.canRedo; onClicked: backend.redo() }
+                    ToolButton { Layout.minimumWidth: implicitWidth; text: qsTr("Open"); onClicked: confirm.ask(qsTr("Open another project?"), function() { backend.open() }) }
+                    ToolButton { Layout.minimumWidth: implicitWidth; text: qsTr("Save"); onClicked: backend.save() }
                     Button {
+                        Layout.minimumWidth: implicitWidth
                         text: qsTr("Photo Set")
                         flat: true
                         enabled: backend.clips.length > 0 && !backend.busy
@@ -187,6 +190,18 @@ ApplicationWindow {
                         onClicked: backend.exportPhotos()
                     }
                     Button {
+                        objectName: "postButton"
+                        Layout.minimumWidth: implicitWidth
+                        text: qsTr("Post")
+                        flat: true
+                        enabled: backend.clips.length > 0 && !backend.busy
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("Export and open TikTok or Instagram, ready to post")
+                        onClicked: postDialog.openFor("")
+                    }
+                    Button {
+                        Layout.minimumWidth: implicitWidth
                         text: qsTr("Export")
                         highlighted: true
                         enabled: backend.clips.length > 0 && !backend.busy
@@ -235,7 +250,8 @@ ApplicationWindow {
             ReelTimeline {
                 id: timeline
                 Layout.fillWidth: true
-                Layout.preferredHeight: 254
+                Layout.preferredHeight: implicitHeight
+                Layout.minimumHeight: implicitHeight  // follows the resized music lane
                 playhead: win.playhead
                 selectedClip: win.selectedClip
                 selectedOverlay: win.selectedOverlay
@@ -273,20 +289,24 @@ ApplicationWindow {
         Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.bottom: parent.bottom
-            anchors.bottomMargin: 236
-            width: 460
-            height: 64
+            // Floats over the preview, just above the timeline.
+            anchors.bottomMargin: timeline.height + 16
+            width: Math.min(460, parent.width - 32)
+            height: busyRow.implicitHeight + 24
             radius: theme.radius
             color: "#232328"
             border.color: win.line
             visible: backend.busy
             RowLayout {
+                id: busyRow
                 anchors.fill: parent
-                anchors.margins: 14
+                anchors.margins: 12
                 spacing: 12
                 ColumnLayout {
                     Layout.fillWidth: true
-                    Label { text: backend.busyText; font.bold: true }
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: 4
+                    Label { Layout.fillWidth: true; text: backend.busyText; font.bold: true; elide: Text.ElideRight }
                     ProgressBar {
                         Layout.fillWidth: true
                         indeterminate: backend.progress < 0
@@ -303,8 +323,8 @@ ApplicationWindow {
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.top: parent.top
             anchors.topMargin: 64
-            width: Math.min(620, toastText.implicitWidth + 120)
-            height: toastText.implicitHeight + 28
+            width: Math.min(620, parent.width - 32, toastRow.implicitWidth + 24)
+            height: toastRow.implicitHeight + 24
             radius: theme.radius
             color: backend.messageIsError ? "#4a1d1d" : "#232328"
             border.color: backend.messageIsError ? "#c75050" : win.line
@@ -312,9 +332,10 @@ ApplicationWindow {
             onVisibleChanged: if (visible && !backend.messageIsError) toastTimer.restart()
             Timer { id: toastTimer; interval: 4500; onTriggered: if (!backend.messageIsError) backend.dismissMessage() }
             RowLayout {
+                id: toastRow
                 anchors.fill: parent
-                anchors.margins: 14
-                spacing: 10
+                anchors.margins: 12
+                spacing: 8
                 Label {
                     id: toastText
                     Layout.fillWidth: true
@@ -351,6 +372,8 @@ ApplicationWindow {
             Label { id: confirmText }
             onAccepted: action()
         }
+
+        PostDialog { id: postDialog }
 
         HelpOverlay {
             anchors.fill: parent

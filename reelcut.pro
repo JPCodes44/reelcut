@@ -5,6 +5,7 @@ TARGET = reelcut
 TEMPLATE = app
 
 HEADERS += \
+    src/waveformprovider.h \
     src/backend.h \
     src/bodyeffects.h \
     src/captions.h \
@@ -20,6 +21,8 @@ HEADERS += \
     src/segment.h \
     src/fisheyetext.h \
     src/colorgrade.h \
+    src/posting.h \
+    src/instagramapi.h src/postscheduler.h \
     src/silence.h \
     src/theme.h \
     src/thumbprovider.h \
@@ -28,6 +31,7 @@ HEADERS += \
     src/translator.h
 
 SOURCES += \
+    src/waveformprovider.cpp \
     src/main.cpp \
     src/backend.cpp \
     src/bodyeffects.cpp \
@@ -43,6 +47,8 @@ SOURCES += \
     src/segment.cpp \
     src/fisheyetext.cpp \
     src/colorgrade.cpp \
+    src/posting.cpp \
+    src/instagramapi.cpp src/postscheduler.cpp \
     src/silence.cpp \
     src/theme.cpp \
     src/thumbprovider.cpp \

@@ -2,6 +2,7 @@
 
 #include <QJsonObject>
 #include <QPair>
+#include <QPointF>
 #include <QString>
 #include <QVariant>
 #include <QVector>
@@ -73,12 +74,16 @@ struct Overlay {
     bool italic = false;
     double outlineWidth = -1;   // pixels at 1080x1920, 0..30
     double shadowDistance = -1; // pixels at 1080x1920, 0..30
-    double letterSpacing = 0;   // extra pixels between letters, -20..60
+    double letterSpacing = 0;   // extra pixels between letters, -20..60, when not spacingDefault
+    bool spacingDefault = true; // the "Default" box: the font's own spacing, letterSpacing kept for later
+    bool noShadow = false;      // the "No shadow" box: no shadow whatever its color
+    double thickness = 0;       // letters made heavier in their own fill color, pixels 0..20
 
     QString fontOf() const;
     bool boldOf() const;
     double outlineWidthOf() const;
     double shadowDistanceOf() const;
+    double letterSpacingOf() const { return spacingDefault ? 0.0 : letterSpacing; }
 
     static QStringList colorParts();
     // "" or "default" for the style's default, "transparent", or any color
@@ -129,11 +134,26 @@ struct Project {
     QVector<Effect> effects;
     QVector<Word> words;
     QString captionStyle = "highlight";  // bold, highlight, pop, box
-    double captionX = 0.5;
-    double captionY = 0.68;
+    // Captions start at the platform's home spot (captionHome) and follow it
+    // when the platform changes, until they're moved by hand.
+    // = captionHome("instagram"): the middle of its safe zone, 190px above it.
+    double captionX = (40 + 950) / 2 / 1080.0;
+    double captionY = (1500 - 190) / 1920.0;
+    bool captionAuto = true;
     double captionScale = 1.0;  // 0.5 to 2 times the style's size
     Look look;
     QString platform = "instagram";      // instagram, tiktok
+
+    // Where captions sit by default on a platform, as frame fractions (center):
+    // in the middle of the safe zone across, and just above the app's own
+    // caption and description area. The safe zone matches Preview.qml.
+    static QPointF captionHome(const QString &platform);
+    // Changes the platform. Captions on their home spot move to the new one;
+    // captions placed by hand stay, nudged back inside the new safe zone.
+    void setPlatform(const QString &name);
+    // The last caption and hashtags typed for posting (src/posting.h).
+    QString postCaption;
+    QString postHashtags;
 
     // Frame size and rate of every export.
     static constexpr int Width = 1080;
