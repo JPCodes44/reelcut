@@ -57,7 +57,7 @@ void whenDone(QNetworkReply *reply, const std::function<void(const QJsonObject &
 
 }  // namespace
 
-InstagramApi::InstagramApi(QObject *parent) : QObject(parent), m_net(new QNetworkAccessManager(this)) {
+InstagramApi::InstagramApi(QObject *parent) : Publisher(parent), m_net(new QNetworkAccessManager(this)) {
     QTimer::singleShot(0, this, [this] {
         load();
         refreshIfOld();

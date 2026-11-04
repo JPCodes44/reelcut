@@ -5,6 +5,8 @@
 #include <QString>
 #include <QUrl>
 
+#include "publisher.h"
+
 class QNetworkAccessManager;
 class QNetworkReply;
 
@@ -20,14 +22,19 @@ class QNetworkReply;
 //   5. GET  /<post>            permalink, to open it
 // Legacy Instagram tokens are renewed weekly; Unified Login tokens must be
 // renewed through Meta when their configured lifetime ends.
-class InstagramApi : public QObject {
+class InstagramApi : public Publisher {
     Q_OBJECT
 public:
     explicit InstagramApi(QObject *parent = nullptr);
 
+    QString platform() const override { return "instagram"; }
+    QString account() const override { return m_username; }
+    // Publishes now; scheduling Instagram is the scheduler's job (src/postscheduler.h).
+    void publish(const PostRequest &post) override { publish(post.file, post.text); }
+
     // Where the token is kept, readable only by you.
     QString accountFile() const;
-    bool connected() const { return !m_token.isEmpty(); }
+    bool connected() const override { return !m_token.isEmpty(); }
     QString username() const { return m_username; }
     // What a scheduled post needs to publish as this account later.
     QString token() const { return m_token; }
@@ -39,7 +46,7 @@ public:
     void disconnect();
     // Publishes `file` as a reel with `caption`. Signals progress, then published.
     void publish(const QString &file, const QString &caption);
-    bool busy() const { return m_busy; }
+    bool busy() const override { return m_busy; }
 
     // Tests point these at a stand-in server.
     QString graphBase;  // optional API override; otherwise selected for the token
@@ -47,10 +54,7 @@ public:
     int pollIntervalMs = 3000;
 
 signals:
-    void accountChanged();
     void connectFinished(bool ok, const QString &message);
-    void progress(const QString &text, double fraction);
-    void published(bool ok, const QString &message, const QUrl &permalink);
 
 private:
     bool usesUnifiedLogin() const;

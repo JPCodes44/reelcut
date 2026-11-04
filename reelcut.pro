@@ -22,7 +22,7 @@ HEADERS += \
     src/fisheyetext.h \
     src/colorgrade.h \
     src/posting.h \
-    src/instagramapi.h src/postscheduler.h \
+    src/publisher.h src/instagramapi.h src/postscheduler.h \
     src/silence.h \
     src/theme.h \
     src/thumbprovider.h \
@@ -48,7 +48,7 @@ SOURCES += \
     src/fisheyetext.cpp \
     src/colorgrade.cpp \
     src/posting.cpp \
-    src/instagramapi.cpp src/postscheduler.cpp \
+    src/publisher.cpp src/instagramapi.cpp src/postscheduler.cpp \
     src/silence.cpp \
     src/theme.cpp \
     src/thumbprovider.cpp \
