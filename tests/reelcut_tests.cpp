@@ -3683,6 +3683,90 @@ private slots:
         QCOMPARE(again.scheduledPosts().size(), 2);
     }
 
+    void postDialogCrossPosts()
+    {
+        QTemporaryDir dir, state, themeDir, movies;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360",
+                           "-frames:v", "1", dir.filePath("photo.jpg")}));
+        Project p;
+        p.clips = {media::clipFor(media::probe(dir.filePath("photo.jpg")), 4.0)};
+        write(dir.filePath("e.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+        seedAccounts(state.path());
+        FakeInstagram instagram;
+        FakeFacebook facebook;
+        facebook.processingFor = 0;
+        FakeGoogle google;
+
+        QQuickStyle::setStyle("Material");
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("e.reel")));
+        backend.openUrl = [](const QUrl &) {};
+        backend.revealFile = [](const QString &) {};
+        backend.postFolder = movies.path();
+        backend.instagram()->graphBase = instagram.base();
+        backend.instagram()->pollIntervalMs = 10;
+        backend.facebook()->graphBase = facebook.base();
+        backend.facebook()->pollIntervalMs = 10;
+        backend.youtube()->tokenUrl = google.base() + "/token";
+        backend.youtube()->apiBase = google.base() + "/youtube/v3";
+        backend.youtube()->uploadBase = google.base() + "/upload/youtube/v3";
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.load(QUrl("qrc:/Main.qml"));
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360, 900);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QTRY_COMPARE(backend.youtubeChannel(), QString("JP Runs"));
+
+        QMetaObject::invokeMethod(findItem(window->contentItem(), "postButton"), "clicked");
+        QObject *dialog = window->findChild<QObject *>("postDialog");
+        QTRY_VERIFY(findItem(window->contentItem(), "postTo-facebook"));
+        auto click = [&](const QString &name) { QMetaObject::invokeMethod(findItem(window->contentItem(), name), "clicked"); };
+        auto selected = [&] { return dialog->property("selected").toStringList(); };
+        QCOMPARE(selected(), QStringList{"instagram"});
+        click("postTo-instagram");  // the only one: stays
+        QCOMPARE(selected(), QStringList{"instagram"});
+        click("postTo-youtube");
+        click("postTo-facebook");
+        QCOMPARE(selected(), (QStringList{"instagram", "facebook", "youtube"}));
+        click("postTo-tiktok");  // by hand only: on its own
+        QCOMPARE(selected(), QStringList{"tiktok"});
+        click("postTo-instagram");
+        QCOMPARE(selected(), QStringList{"instagram"});
+        click("postTo-facebook");
+        click("postTo-youtube");
+        QVERIFY(dialog->property("publishing").toBool());
+
+        // YouTube needs a title: the field is there, and empty holds Next.
+        auto *title = findItem(window->contentItem(), "postTitle");
+        QVERIFY(title && title->isVisible());
+        auto *next = findItem(window->contentItem(), "postNext");
+        title->setProperty("text", "");
+        findItem(window->contentItem(), "postCaption")->setProperty("text", "Everywhere");
+        QTRY_VERIFY(!next->isEnabled());
+        title->setProperty("text", "Everywhere at once");
+        QTRY_VERIFY(next->isEnabled());
+        QCOMPARE(next->property("text").toString(), QString("Publish"));
+
+        QSignalSpy published(&backend, &Backend::postPublished);
+        QMetaObject::invokeMethod(next, "clicked");
+        QVERIFY(published.wait(120000));
+        QVERIFY2(published.first().at(0).toBool(), qPrintable(published.first().at(1).toString()));
+        QTRY_COMPARE(dialog->property("stage").toString(), QString("published"));
+        QCOMPARE(dialog->property("results").toList().size(), 3);
+        QCOMPARE(google.metadata.value("snippet").toObject().value("title").toString(), QString("Everywhere at once"));
+
+        // Without a Facebook Page connected, several can't go at once.
+        backend.disconnectFacebook();
+        dialog->setProperty("stage", "write");
+        QTRY_VERIFY(dialog->property("blocked").toBool());
+        QTRY_VERIFY(!next->isEnabled());
+        QVERIFY(findItem(window->contentItem(), "facebookConnect"));
+    }
+
     void mcpManagesEffects()
     {
         QTemporaryDir dir, state;
