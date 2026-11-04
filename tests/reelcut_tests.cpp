@@ -3549,6 +3549,140 @@ private slots:
         QVERIFY(!revoked.connected());
     }
 
+    // Accounts as they sit on disk once connected, for tests that start there.
+    static void seedAccounts(const QString &state)
+    {
+        QVERIFY(Net::savePrivate(state + "/instagram.json",
+                                 {{"token", "good-token"}, {"userId", "17841400000000001"}, {"username", "reelcut_test"},
+                                  {"issued", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}}));
+        QVERIFY(Net::savePrivate(state + "/facebook.json",
+                                 {{"pageId", "1000000000000001"}, {"pageName", "Page 1"}, {"pageToken", "page-token-1"}}));
+        QVERIFY(Net::savePrivate(state + "/youtube.json",
+                                 {{"clientId", "cid.apps.googleusercontent.com"}, {"clientSecret", "csecret"},
+                                  {"refreshToken", "1//refresh"}, {"channelId", "UC123"}, {"channelTitle", "JP Runs"}}));
+    }
+
+    void checkPostsMergesLimits()
+    {
+        QTemporaryDir dir, state, themeDir;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360",
+                           "-frames:v", "1", dir.filePath("photo.jpg")}));
+        Project p;
+        p.clips = {media::clipFor(media::probe(dir.filePath("photo.jpg")), 1.0)};
+        write(dir.filePath("e.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("e.reel")));
+
+        QVariantMap check = backend.checkPosts({"instagram", "youtube"}, "Hi", "a b", "A title");
+        QVERIFY2(check.value("ok").toBool(), qPrintable(check.value("problems").toStringList().join("; ")));
+        QCOMPARE(check.value("maxChars").toInt(), 2200);   // the stricter of 2200 and 5000
+        QCOMPARE(check.value("maxHashtags").toInt(), 30);  // of 30 and 60
+        QVERIFY(backend.checkPosts({"youtube"}, "Hi", "", "  ").value("problems").toStringList().contains("YouTube needs a title."));
+        QVERIFY(!backend.checkPosts({"youtube"}, "Hi", "", QString(101, 'x')).value("ok").toBool());
+        QVERIFY(!backend.checkPosts({"youtube"}, "a <b>", "", "Title").value("ok").toBool());
+        QVERIFY(backend.checkPosts({"instagram"}, "a <b>", "", "").value("ok").toBool());  // only YouTube minds
+        // A one-second reel is too short for Facebook.
+        check = backend.checkPosts({"facebook"}, "Hi", "", "");
+        QVERIFY(!check.value("ok").toBool());
+        QVERIFY(check.value("problems").toStringList().join(" ").contains("at least 3 seconds"));
+        QVERIFY(!backend.checkPosts({}, "Hi", "", "").value("ok").toBool());
+
+        // Scheduling windows.
+        const double now = double(QDateTime::currentMSecsSinceEpoch());
+        QVERIFY(!backend.checkWhen({"facebook"}, now + 5 * 60000).value("ok").toBool());
+        QVERIFY(backend.checkWhen({"facebook", "youtube"}, now + 60 * 60000).value("ok").toBool());
+        QVERIFY(!backend.checkWhen({"facebook"}, now + 30.0 * 24 * 3600000).value("ok").toBool());
+        QVERIFY(!backend.checkWhen({"instagram"}, now + 60 * 60000).value("ok").toBool());  // no scheduler set up
+    }
+
+    void crossPostsToEveryCheckedPlatform()
+    {
+        QTemporaryDir dir, state, themeDir, movies;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360",
+                           "-frames:v", "1", dir.filePath("photo.jpg")}));
+        Project p;
+        p.clips = {media::clipFor(media::probe(dir.filePath("photo.jpg")), 4.0)};
+        write(dir.filePath("e.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+        seedAccounts(state.path());
+        FakeInstagram instagram;
+        FakeFacebook facebook;
+        facebook.processingFor = 0;
+        FakeGoogle google;
+
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("e.reel")));
+        QUrl opened;
+        backend.openUrl = [&](const QUrl &url) { opened = url; };
+        backend.revealFile = [](const QString &) {};
+        backend.postFolder = movies.path();
+        backend.instagram()->graphBase = instagram.base();
+        backend.instagram()->pollIntervalMs = 10;
+        backend.facebook()->graphBase = facebook.base();
+        backend.facebook()->pollIntervalMs = 10;
+        backend.youtube()->tokenUrl = google.base() + "/token";
+        backend.youtube()->apiBase = google.base() + "/youtube/v3";
+        backend.youtube()->uploadBase = google.base() + "/upload/youtube/v3";
+        QTRY_COMPARE(backend.youtubeChannel(), QString("JP Runs"));
+        QCOMPARE(backend.facebookPage(), QString("Page 1"));
+        QCOMPARE(backend.instagramUser(), QString("reelcut_test"));
+
+        // One export, then each platform in the usual order.
+        QSignalSpy each(&backend, &Backend::platformPosted);
+        QSignalSpy all(&backend, &Backend::postPublished);
+        backend.postTo({"youtube", "instagram", "facebook"}, "Hello", "trip", "My run");
+        QVERIFY(all.wait(120000));
+        QVERIFY2(all.first().at(0).toBool(), qPrintable(all.first().at(1).toString()));
+        QCOMPARE(each.size(), 3);
+        QCOMPARE(each.at(0).at(0).toString(), QString("instagram"));
+        QCOMPARE(each.at(1).at(0).toString(), QString("facebook"));
+        QCOMPARE(each.at(2).at(0).toString(), QString("youtube"));
+        QCOMPARE(each.at(2).at(3).toUrl(), QUrl("https://youtube.com/shorts/VID1"));
+        QVERIFY(QFileInfo::exists(QDir(movies.path()).filePath("e-post.mp4")));
+        QCOMPARE(QDir(movies.path()).entryList({"*.mp4"}).size(), 1);
+        QCOMPARE(google.metadata.value("snippet").toObject().value("title").toString(), QString("My run"));
+        QCOMPARE(google.metadata.value("snippet").toObject().value("description").toString(), QString("Hello\n\n#trip #Shorts"));
+        QVERIFY(opened.isEmpty());
+        QCOMPARE(backend.project().platform, QString("instagram"));  // several: the design stays as it was
+
+        // Facebook failing doesn't stop YouTube; its page opens to finish by hand.
+        facebook.failWith = "Unsupported duration";
+        each.clear();
+        all.clear();
+        backend.postTo({"facebook", "youtube"}, "Again", "", "Again");
+        QVERIFY(all.wait(120000));
+        QVERIFY(!all.first().at(0).toBool());
+        QCOMPARE(each.size(), 2);
+        QVERIFY(!each.at(0).at(1).toBool());
+        QVERIFY(each.at(1).at(1).toBool());
+        QCOMPARE(opened, QUrl("https://www.facebook.com/reels/create"));
+        facebook.failWith.clear();
+
+        // Too soon for Facebook: refused before anything is exported.
+        all.clear();
+        const double soon = double(QDateTime::currentMSecsSinceEpoch() + 5 * 60000);
+        backend.postTo({"facebook"}, "Soon", "", "", soon);
+        QVERIFY(backend.message().contains("10 minutes"));
+        QVERIFY(!backend.busy());
+
+        // Scheduled on Facebook and YouTube: they hold it, and it's listed.
+        QSignalSpy scheduled(&backend, &Backend::postScheduled);
+        const double later = double(QDateTime::currentMSecsSinceEpoch() + 2 * 24 * 3600000LL);
+        backend.postTo({"facebook", "youtube"}, "Later", "", "Later", later);
+        QVERIFY(scheduled.wait(120000));
+        QVERIFY2(scheduled.first().at(0).toBool(), qPrintable(scheduled.first().at(1).toString()));
+        QCOMPARE(facebook.finishedState, QString("scheduled"));
+        QCOMPARE(google.metadata.value("status").toObject().value("privacyStatus").toString(), QString("private"));
+        QStringList listed;
+        for (const QVariant &v : backend.scheduledPosts())
+            listed << v.toMap().value("platform").toString();
+        QCOMPARE(listed, (QStringList{"facebook", "youtube"}));
+        // Remembered after a restart.
+        Backend again(nullptr, nullptr, &theme, nullptr, state.path());
+        QCOMPARE(again.scheduledPosts().size(), 2);
+    }
+
     void mcpManagesEffects()
     {
         QTemporaryDir dir, state;

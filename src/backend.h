@@ -16,8 +16,11 @@
 
 #include "jobs.h"
 #include "project.h"
+#include "publisher.h"
 
+class FacebookApi;
 class FilePicker;
+class YouTubeApi;
 class QNetworkAccessManager;
 class QNetworkReply;
 class Theme;
@@ -70,6 +73,9 @@ class Backend : public QObject {
     Q_PROPERTY(QString postHashtags READ postHashtags NOTIFY projectChanged)
     // The Instagram account Reelcut can publish to through Instagram's API, or empty.
     Q_PROPERTY(QString instagramUser READ instagramUser NOTIFY instagramChanged)
+    // The Facebook Page and YouTube channel Reelcut publishes to, or empty.
+    Q_PROPERTY(QString facebookPage READ facebookPage NOTIFY accountsChanged)
+    Q_PROPERTY(QString youtubeChannel READ youtubeChannel NOTIFY accountsChanged)
     // Scheduled posts (src/postscheduler.h): whether the backend is set up, and what's on it.
     Q_PROPERTY(bool schedulerReady READ schedulerReady NOTIFY schedulerChanged)
     Q_PROPERTY(QVariantList scheduledPosts READ scheduledPosts NOTIFY schedulerChanged)
@@ -212,6 +218,18 @@ public:
     // for then instead of publishing now.
     Q_INVOKABLE void post(const QString &platform, const QString &caption, const QString &hashtags,
                           bool publish = false, double publishAtMs = 0);
+    // Several platforms at once (instagram, facebook, youtube), each through
+    // its API: checkPost for each, merged, plus YouTube's title rules. Gives
+    // what checkPost does, with the strictest limits of the platforms given.
+    Q_INVOKABLE QVariantMap checkPosts(const QStringList &platforms, const QString &caption, const QString &hashtags,
+                                       const QString &title) const;
+    // Whether every one of the platforms can post at that time: ok and problem.
+    Q_INVOKABLE QVariantMap checkWhen(const QStringList &platforms, double publishAtMs) const;
+    // Exports once, then publishes (or, with publishAtMs, schedules) on each
+    // platform in turn: platformPosted for each, then postPublished or
+    // postScheduled for all. One failing doesn't stop the others.
+    Q_INVOKABLE void postTo(const QStringList &platforms, const QString &caption, const QString &hashtags,
+                            const QString &title, double publishAtMs = 0);
     // A typed time to post at: "2026-11-05 18:30", "tomorrow 9am", "today 6:30pm", "fri 9:00".
     // Gives ok, ms, label ("Thursday, Nov 5 at 6:30 PM · in 13 hours") and problem.
     Q_INVOKABLE QVariantMap parseWhen(const QString &text) const;
@@ -229,6 +247,22 @@ public:
     class PostScheduler *scheduler() const { return m_scheduler; }
     Q_INVOKABLE void connectInstagram(const QString &token);
     Q_INVOKABLE void disconnectInstagram();
+    // Facebook: a Meta user token, or the connected Instagram one when it's a
+    // Meta (Unified Login) token. Several Pages come back through facebookPages.
+    Q_INVOKABLE void connectFacebook(const QString &token);
+    Q_INVOKABLE bool canConnectFacebookWithInstagram() const;
+    Q_INVOKABLE void connectFacebookWithInstagram();
+    Q_INVOKABLE void chooseFacebookPage(const QString &id);
+    Q_INVOKABLE void disconnectFacebook();
+    QString facebookPage() const;
+    // YouTube: opens Google's sign-in for the OAuth client given.
+    Q_INVOKABLE void connectYouTube(const QString &clientId, const QString &clientSecret);
+    Q_INVOKABLE void disconnectYouTube();
+    QString youtubeChannel() const;
+    // The API client for a platform, or null (TikTok has none).
+    Publisher *publisher(const QString &platform) const;
+    FacebookApi *facebook() const { return m_facebook; }
+    YouTubeApi *youtube() const { return m_youtube; }
     Q_INVOKABLE void openLink(const QUrl &url);
     QString instagramUser() const;
     void openForHand(const QString &platform);
@@ -251,6 +285,13 @@ signals:
     void postOpened(const QString &platform, const QString &file, const QString &steps);
     void instagramChanged();
     void instagramConnected(bool ok, const QString &message);
+    void accountsChanged();
+    void facebookConnected(bool ok, const QString &message);
+    // More than one Page: id and name of each, for chooseFacebookPage.
+    void facebookPages(const QVariantList &pages);
+    void youtubeConnected(bool ok, const QString &message);
+    // One platform of a postTo finished: how it went and where the post is.
+    void platformPosted(const QString &platform, bool ok, const QString &message, const QUrl &link);
     // Publishing through the API: what's happening (fraction -1 when unknown), then the result.
     void postProgress(const QString &text, double fraction);
     void postPublished(bool ok, const QString &message, const QUrl &link);
@@ -300,6 +341,23 @@ private:
     QString m_postFile;
     class InstagramApi *m_instagram = nullptr;
     class PostScheduler *m_scheduler = nullptr;
+    FacebookApi *m_facebook = nullptr;
+    YouTubeApi *m_youtube = nullptr;
+
+    // The postTo in progress: the platforms still to go, what to post, and
+    // how each finished so far (platform, ok, message, link).
+    void postNext();
+    void platformDone(const QString &platform, bool ok, const QString &message, const QUrl &link);
+    bool readyToExport();
+    QStringList m_postQueue;
+    QString m_posting;  // the platform being posted to now
+    PostRequest m_postRequest;
+    QVariantList m_postResults;
+    // Facebook and YouTube posts scheduled from here, held by the platforms
+    // themselves: remembered to list until their time.
+    QVariantList m_directScheduled;
+    QString directScheduledFile() const;
+    void loadDirectScheduled();
 
     QHash<QString, int> m_thumbKeys;
     QString m_stateDir;
