@@ -1,6 +1,6 @@
 # Reelcut
 
-Make vertical reels for Instagram and TikTok on Omarchy: cut your clips, caption them automatically, give them a look, add music, and export an MP4 that's ready to post.
+Make vertical reels for Instagram, Facebook, YouTube Shorts and TikTok on Omarchy: cut your clips, caption them automatically, give them a look, add music, and export an MP4 that's ready to post.
 
 ![Reelcut editing a reel](docs/screenshot.png)
 
@@ -9,7 +9,7 @@ Make vertical reels for Instagram and TikTok on Omarchy: cut your clips, caption
 - **Photos and slideshows**: drop in photos (JPG, PNG, WebP, HEIC) and they become slides with a duration and an optional slow zoom or pan. Export the slideshow as a video, or as a **photo set** for TikTok photo posts: one 1080×1920 JPG per slide with the text and look drawn in, numbered in order. Post the set in TikTok's photo mode and pick the sound in the app (TikTok's library sounds can only be added there).
 - **Cut**: drop in videos, split at the playhead, trim with the handles, reorder, change speed from 0.25× to 4×.
 - **Transitions**: 15 transitions between clips (dissolve, dip to black, flash, wipes, slides, iris, clock, zoom, pixelate, blur and more), with a live preview. [How they work](docs/effects.md#2-transitions-two-pictures-and-a-progress-value).
-- **Social preview**: switch Instagram/TikTok to preview its app chrome. Click the caption or **Caption and tags** to edit the saved posting text; **Show app UI** hides the chrome. Text wraps inside layout containers and the app UI never appears in exports.
+- **Social preview**: switch between Instagram, Facebook, YouTube and TikTok to preview that app's chrome and safe zones. Click the caption or **Caption and tags** to edit the saved posting text; **Show app UI** hides the chrome. Text wraps inside layout containers and the app UI never appears in exports.
 - **Frame**: every clip fills the 9:16 frame; zoom and pan landscape footage to pick what shows.
 - **Cut silences**: one click removes the pauses from a talking clip.
 - **Body effects**: background blur, color pop, spotlight, neon outline or a solid backdrop behind the person in a clip. A small segmentation model (OpenCV, downloaded once, about 6 MB) finds the person on your computer. [How they work](docs/effects.md#4-body-effects-a-mask-from-a-segmentation-model).
@@ -18,7 +18,15 @@ Make vertical reels for Instagram and TikTok on Omarchy: cut your clips, caption
 - **Effects**: 13 video effects on their own track (shake, zoom pulse, strobe, VHS, RGB split, glitch, vignette, blur, film grain, mono flicker, invert, mirror, light trails), each with intensity and speed. [How they work](docs/effects.md#3-video-effects-a-track-of-timed-filters).
 - **Look**: a library of 20 filters with a strength slider, exposure, contrast, saturation and temperature, six presets, and any `.cube` LUT (including ones from DaVinci Resolve). [How the filters work](docs/effects.md).
 - **Music**: a music track that ducks under speech, and loudness leveled to -14 LUFS.
-- **Post and schedule**: publish a reel straight to a connected Instagram Creator or Business account, or tick **Schedule for later**, type a time (`tomorrow 9am`, `fri 18:30`) and it goes out then, even if your computer is off. Scheduling runs on a small Convex backend you deploy yourself; see [scheduler/README.md](scheduler/README.md).
+- **Post and schedule**: publish a reel straight to a connected Instagram Creator or Business account, a Facebook Page and a YouTube channel, one at a time or all at once from a single export. Tick **Schedule for later**, type a time (`tomorrow 9am`, `fri 18:30`) and it goes out then, even if your computer is off. Facebook (10 minutes to 29 days ahead) and YouTube hold scheduled posts themselves; Instagram's API can't schedule, so its posts go through a small Convex backend you deploy yourself (see [scheduler/README.md](scheduler/README.md)). TikTok is posted by hand: Reelcut exports, opens the upload page and copies the caption.
+
+### Connecting accounts
+
+Each account is connected once from the post dialog and kept in a file under `~/.config/reelcut` that only you can read.
+
+- **Instagram**: a Creator or Business account and a token from your Meta app (Instagram product).
+- **Facebook**: Reels post to a **Page**, not a personal profile. Give the same Meta app the `pages_show_list`, `pages_read_engagement` and `pages_manage_posts` permissions, then use your Instagram connection or paste a user token; Reelcut keeps only the Page's token. Reels must be 3 to 90 seconds.
+- **YouTube**: in Google Cloud, enable the YouTube Data API v3, set up the OAuth consent screen (publish it to *In production*, or Google signs you out every 7 days) and create an OAuth client of type **Desktop app**. Paste its client ID and secret and sign in in the browser. Uploads are Shorts (up to 3 minutes) with the title you give, the caption as the description, and `#Shorts` added.
 - **Export**: 1080×1920, 30 fps, H.264 and AAC, on the GPU with NVENC when there is one. The preview shows each platform's safe zones so captions don't end up under the buttons.
 
 Projects save as `.reel` files next to your media; the original videos are never changed.

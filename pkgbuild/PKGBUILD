@@ -1,7 +1,7 @@
 pkgname=reelcut
 pkgver=0.4.1
 pkgrel=1
-pkgdesc='Make vertical reels for Instagram and TikTok: cut, caption, color, music'
+pkgdesc='Make vertical reels for Instagram, Facebook, YouTube Shorts and TikTok: cut, caption, color, music'
 arch=('x86_64' 'aarch64')
 license=('MIT')
 depends=('qt6-base' 'qt6-declarative' 'qt6-multimedia' 'qt6-wayland' 'ffmpeg' 'xdg-desktop-portal' 'noto-fonts' 'ttf-liberation' 'opencv')

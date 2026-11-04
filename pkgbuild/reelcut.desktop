@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Reelcut
-Comment=Make vertical reels for Instagram and TikTok
+Comment=Make vertical reels for Instagram, Facebook, YouTube Shorts and TikTok
 Exec=reelcut %F
 Icon=reelcut
 Terminal=false
