@@ -1,4 +1,8 @@
 #include <QClipboard>
+#include <QCryptographicHash>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QTimeZone>
 #include <QDir>
 #include <QFile>
 #include <QGuiApplication>
@@ -33,6 +37,7 @@
 #include "jobs.h"
 #include "instagramapi.h"
 #include "facebookapi.h"
+#include "youtubeapi.h"
 #include "postscheduler.h"
 #include "mcpserver.h"
 #include "posting.h"
@@ -371,6 +376,54 @@ public:
             if (c.path == "/V1" && c.query.queryItemValue("fields") == "permalink_url")
                 return json({{"permalink_url", "/reel/V1/"}});
             return error("unexpected " + c.path);
+        };
+    }
+};
+
+
+// Google's OAuth token endpoint and the YouTube Data API, for YouTubeApi.
+class FakeGoogle : public FakeHttp {
+public:
+    QString lastVerifier;
+    QByteArray uploaded;
+    QJsonObject metadata;  // the video resource sent to start the upload
+    bool revoke = false;   // refreshing says invalid_grant
+
+    FakeGoogle() {
+        answer = [this](const Call &c) -> Reply {
+            const QString auth = c.headers.value("authorization");
+            if (c.path == "/token") {
+                const QString grant = c.query.queryItemValue("grant_type");
+                if (c.query.queryItemValue("client_id") != "cid.apps.googleusercontent.com"
+                    || c.query.queryItemValue("client_secret") != "csecret")
+                    return json({{"error", "invalid_client"}, {"error_description", "The OAuth client was not found."}}, 401);
+                if (grant == "authorization_code" && c.query.queryItemValue("code") == "C0DE") {
+                    lastVerifier = c.query.queryItemValue("code_verifier");
+                    return json({{"access_token", "ya29-first"}, {"expires_in", 3599}, {"refresh_token", "1//refresh"},
+                                 {"token_type", "Bearer"}});
+                }
+                if (grant == "refresh_token" && c.query.queryItemValue("refresh_token") == "1//refresh") {
+                    if (revoke)
+                        return json({{"error", "invalid_grant"}, {"error_description", "Token has been expired or revoked."}}, 400);
+                    return json({{"access_token", "ya29-again"}, {"expires_in", 3599}, {"token_type", "Bearer"}});
+                }
+                return json({{"error", "invalid_grant"}, {"error_description", "Bad code."}}, 400);
+            }
+            if (!auth.startsWith("Bearer ya29-"))
+                return error("Request had invalid authentication credentials.", 401);
+            if (c.path == "/youtube/v3/channels" && c.query.queryItemValue("mine") == "true")
+                return json({{"items", QJsonArray{QJsonObject{{"id", "UC123"}, {"snippet", QJsonObject{{"title", "JP Runs"}}}}}}});
+            if (c.method == "POST" && c.path == "/upload/youtube/v3/videos" && c.query.queryItemValue("uploadType") == "resumable") {
+                metadata = QJsonDocument::fromJson(c.body).object();
+                if (c.headers.value("x-upload-content-type") != "video/mp4")
+                    return error("Missing upload type");
+                return {200, {}, {{"Location", (base() + "/upload/session/S1").toUtf8()}}};
+            }
+            if (c.method == "PUT" && c.path == "/upload/session/S1") {
+                uploaded = c.body;
+                return json({{"id", "VID1"}, {"status", QJsonObject{{"uploadStatus", "uploaded"}}}});
+            }
+            return error("unexpected " + c.path, 404);
         };
     }
 };
@@ -3388,6 +3441,112 @@ private slots:
         api.disconnect();
         QVERIFY(!api.connected());
         QVERIFY(!QFile::exists(api.accountFile()));
+    }
+
+    // YouTube: sign in through the browser and a loopback address, then a
+    // resumable upload, against a stand-in for Google.
+    void youtubeSignsInAndUploads()
+    {
+        QTemporaryDir dir, state;
+        QFile video(dir.filePath("reel.mp4"));
+        QVERIFY(video.open(QIODevice::WriteOnly));
+        video.write(QByteArray(7000, 'y'));
+        video.close();
+        FakeGoogle fake;
+        auto point = [&](YouTubeApi &api) {
+            api.stateDir = state.path();
+            api.authBase = fake.base() + "/auth";
+            api.tokenUrl = fake.base() + "/token";
+            api.apiBase = fake.base() + "/youtube/v3";
+            api.uploadBase = fake.base() + "/upload/youtube/v3";
+        };
+        YouTubeApi api;
+        point(api);
+        QUrl opened;
+        api.openUrl = [&](const QUrl &url) { opened = url; };
+        QSignalSpy connected(&api, &YouTubeApi::connectFinished);
+        QNetworkAccessManager browser;
+
+        // A redirect with the wrong state is refused.
+        api.connectClient(" cid.apps.googleusercontent.com ", "csecret");
+        QTRY_VERIFY(opened.isValid());
+        QUrlQuery auth(opened);
+        QCOMPARE(opened.path(), QString("/auth"));
+        QCOMPARE(auth.queryItemValue("client_id"), QString("cid.apps.googleusercontent.com"));
+        QCOMPARE(auth.queryItemValue("access_type"), QString("offline"));
+        QCOMPARE(auth.queryItemValue("code_challenge_method"), QString("S256"));
+        QVERIFY(auth.queryItemValue("scope", QUrl::FullyDecoded).contains("https://www.googleapis.com/auth/youtube.upload"));
+        const QUrl redirect(auth.queryItemValue("redirect_uri", QUrl::FullyDecoded));
+        QCOMPARE(redirect.host(), QString("127.0.0.1"));
+        QUrl wrong = redirect;
+        wrong.setQuery("code=C0DE&state=forged");
+        browser.get(QNetworkRequest(wrong));
+        QVERIFY(connected.wait());
+        QVERIFY(!connected.first().at(0).toBool());
+        QVERIFY(!api.connected());
+
+        // The real way back: code and state, then the code is exchanged with
+        // the PKCE verifier, and the channel looked up.
+        connected.clear();
+        opened.clear();
+        api.connectClient("cid.apps.googleusercontent.com", "csecret");
+        QTRY_VERIFY(opened.isValid());
+        auth = QUrlQuery(opened);
+        QUrl back(auth.queryItemValue("redirect_uri", QUrl::FullyDecoded));
+        back.setQuery("state=" + auth.queryItemValue("state") + "&code=C0DE&scope=x");
+        QNetworkReply *page = browser.get(QNetworkRequest(back));
+        QVERIFY(connected.wait());
+        QVERIFY2(connected.first().at(0).toBool(), qPrintable(connected.first().at(1).toString()));
+        QTRY_VERIFY(page->isFinished());
+        QVERIFY(page->readAll().contains("Reelcut"));
+        const QByteArray challenge = QCryptographicHash::hash(fake.lastVerifier.toLatin1(), QCryptographicHash::Sha256)
+                                         .toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+        QCOMPARE(auth.queryItemValue("code_challenge"), QString(challenge));
+        QCOMPARE(api.account(), QString("JP Runs"));
+        QCOMPARE(QFile::permissions(api.accountFile()) & 0x0077, QFileDevice::Permissions());
+
+        // Publish now: public, the #Shorts tag added once, the bytes, a link.
+        QSignalSpy done(&api, &YouTubeApi::published);
+        api.publish({video.fileName(), "Lake run\n\n#run", "Sunset run", {}});
+        QVERIFY(done.wait());
+        QVERIFY2(done.first().at(0).toBool(), qPrintable(done.first().at(1).toString()));
+        QCOMPARE(done.first().at(2).toUrl(), QUrl("https://youtube.com/shorts/VID1"));
+        QCOMPARE(fake.uploaded.size(), 7000);
+        QJsonObject snippet = fake.metadata.value("snippet").toObject();
+        QJsonObject status = fake.metadata.value("status").toObject();
+        QCOMPARE(snippet.value("title").toString(), QString("Sunset run"));
+        QCOMPARE(snippet.value("description").toString(), QString("Lake run\n\n#run #Shorts"));
+        QCOMPARE(status.value("privacyStatus").toString(), QString("public"));
+        QCOMPARE(status.value("selfDeclaredMadeForKids").toBool(true), false);
+        QVERIFY(!status.contains("publishAt"));
+
+        // After a restart there's no access token: it's refreshed first.
+        // Scheduled: private until publishAt, in UTC.
+        YouTubeApi again;
+        point(again);
+        QTRY_VERIFY(again.connected());
+        QSignalSpy againDone(&again, &YouTubeApi::published);
+        const QDateTime when = QDateTime(QDate(2030, 1, 2), QTime(9, 30), QTimeZone::UTC);
+        again.publish({video.fileName(), "Already #shorts", "Later", when});
+        QVERIFY(againDone.wait());
+        QVERIFY2(againDone.first().at(0).toBool(), qPrintable(againDone.first().at(1).toString()));
+        QCOMPARE(fake.callsTo("/token").last().query.queryItemValue("grant_type"), QString("refresh_token"));
+        status = fake.metadata.value("status").toObject();
+        QCOMPARE(status.value("privacyStatus").toString(), QString("private"));
+        QCOMPARE(status.value("publishAt").toString(), QString("2030-01-02T09:30:00Z"));
+        QCOMPARE(fake.metadata.value("snippet").toObject().value("description").toString(), QString("Already #shorts"));
+
+        // A refresh token Google no longer honors disconnects, saying why.
+        fake.revoke = true;
+        YouTubeApi revoked;
+        point(revoked);
+        QTRY_VERIFY(revoked.connected());
+        QSignalSpy revokedDone(&revoked, &YouTubeApi::published);
+        revoked.publish({video.fileName(), "x", "x", {}});
+        QVERIFY(revokedDone.wait());
+        QVERIFY(!revokedDone.first().at(0).toBool());
+        QVERIFY(revokedDone.first().at(1).toString().contains("connect", Qt::CaseInsensitive));
+        QVERIFY(!revoked.connected());
     }
 
     void mcpManagesEffects()
