@@ -179,7 +179,7 @@ QVariantList Backend::layers() const {
             {"speed", c.speed}, {"zoom", c.zoom}, {"panX", c.panX}, {"panY", c.panY},
             {"width", c.width}, {"height", c.height}, {"audio", c.audio}, {"still", c.still},
             {"sourceDuration", c.sourceDuration}, {"start", l.start}, {"end", l.end()},
-            {"duration", c.duration()}, {"scale", l.scale}, {"x", l.x}, {"y", l.y},
+            {"duration", c.duration()}, {"scale", l.scale}, {"x", l.x}, {"y", l.y}, {"row", l.row},
             {"thumb", m_thumbKeys.value(c.path, -1)}, {"offline", !QFileInfo::exists(c.path)},
         });
     }
@@ -430,9 +430,10 @@ void Backend::moveClip(int from, int to) {
     changed();
 }
 
-int Backend::moveClipToLayer(int index, double start) {
+int Backend::moveClipToLayer(int index, double start, int row) {
     Project next = m_project;
-    if (!next.moveClipToLayer(index, start)) {
+    const int layer = next.moveClipToLayer(index, start, row);
+    if (layer < 0) {
         if (index >= 0 && index < m_project.clips.size())
             setMessage(tr("Keep at least one clip on the main video track to lay others over."), true);
         return -1;
@@ -440,7 +441,40 @@ int Backend::moveClipToLayer(int index, double start) {
     checkpoint();
     m_project = next;
     changed();
-    return m_project.layers.size() - 1;
+    return layer;
+}
+
+QVariantMap Backend::dropTarget(int fromRow, double moved, int index) const {
+    const Project::Drop drop = m_project.dropTarget(fromRow, moved, index);
+    return {{"action", drop.action}, {"row", drop.row}};
+}
+
+QVariantMap Backend::dropClip(int index, double start, double moved) {
+    const Project::Drop drop = m_project.dropTarget(0, moved, index);
+    if (drop.action != "join" && drop.action != "newRow")
+        return {{"kind", ""}, {"index", -1}};
+    const int layer = moveClipToLayer(index, start, drop.row);
+    return {{"kind", layer >= 0 ? "layer" : ""}, {"index", layer}};
+}
+
+QVariantMap Backend::dropLayer(int index, double start, double moved, double time) {
+    if (index < 0 || index >= m_project.layers.size())
+        return {{"kind", ""}, {"index", -1}};
+    const Project::Drop drop = m_project.dropTarget(m_project.layers[index].row + 1, moved, index);
+    if (drop.action == "none")
+        return {{"kind", ""}, {"index", -1}};
+    checkpoint();
+    QVariantMap result;
+    if (drop.action == "toTrack")
+        result = {{"kind", "clip"}, {"index", m_project.moveLayerToTrack(index, time)}};
+    else if (drop.action == "swapTrack")
+        result = {{"kind", "clip"}, {"index", m_project.swapRowWithTrack(index)}};
+    else if (drop.action == "swap")
+        result = {{"kind", "layer"}, {"index", m_project.swapLayerRows(index, drop.row)}};
+    else
+        result = {{"kind", "layer"}, {"index", m_project.moveLayerToRow(index, drop.row, start)}};
+    changed();
+    return result;
 }
 
 int Backend::moveLayerToTrack(int index, double time) {
@@ -462,6 +496,7 @@ void Backend::removeLayer(int index) {
         return;
     checkpoint();
     m_project.layers.remove(index);
+    m_project.normalizeLayers();
     changed();
 }
 

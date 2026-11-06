@@ -1245,12 +1245,12 @@ private slots:
         };
         Project p;
         p.clips = {source(red, 3.0)};
-        QVERIFY(!p.moveClipToLayer(0, 0.0));  // the main track keeps a picture
+        QCOMPARE(p.moveClipToLayer(0, 0.0), -1);  // the main track keeps a picture
         Clip b = source(blue, 2.0);
         b.out = 1.0;
         b.transition = "fade";
         p.clips << b;
-        QVERIFY(p.moveClipToLayer(1, 1.0));
+        QCOMPARE(p.moveClipToLayer(1, 1.0), 0);
         QCOMPARE(p.clips.size(), 1);
         QCOMPARE(p.layers.size(), 1);
         QVERIFY(p.layers[0].clip.transition.isEmpty());
@@ -1305,6 +1305,80 @@ private slots:
         QCOMPARE(p.moveLayerToTrack(0, 2.0), 1);
         QVERIFY(p.layers.isEmpty());
         QCOMPARE(p.clips[1].path, blue);
+    }
+
+    // Dropping up or down: within half a row of a neighbor joins its row,
+    // more than half a row past it swaps rows. A row never overlaps itself.
+    void layerRowsJoinAndSwap()
+    {
+        auto clipOf = [](const QString &path, double duration) {
+            Clip c;
+            c.path = path;
+            c.out = duration;
+            c.sourceDuration = duration;
+            return c;
+        };
+        Project p;
+        p.clips = {clipOf("main1.mp4", 4), clipOf("main2.mp4", 4), clipOf("a.mp4", 2), clipOf("b.mp4", 2),
+                   clipOf("c.mp4", 2)};
+        // The rule, on screen rows (0 is the main track).
+        QCOMPARE(p.dropTarget(0, 0.3, 2).action, QString("none"));
+        QCOMPARE(p.dropTarget(0, 1.0, 2).action, QString("newRow"));  // no layer rows yet
+        QCOMPARE(p.moveClipToLayer(2, 1.0, -1), 0);                      // a: row 0 at 1 s
+        QCOMPARE(p.dropTarget(0, 0.8, 2).action, QString("join"));
+        QCOMPARE(p.dropTarget(0, 0.8, 2).row, 0);
+        QCOMPARE(p.dropTarget(0, 1.6, 2).action, QString("newRow"));
+
+        // b joins row 0 dropped on top of a: it slides to the nearest free spot.
+        const int b = p.moveClipToLayer(2, 1.5, 0);
+        QCOMPARE(p.layerRows(), 1);
+        QCOMPARE(p.layers[b].clip.path, QString("b.mp4"));
+        QCOMPARE(p.layers[b].start, 3.0);  // right after a (1..3), nearer than before it
+        // Moving b sideways stops at a.
+        QVERIFY(p.setLayerValue(b, "start", 0.0));
+        QCOMPARE(p.layers[b].start, 3.0);
+
+        // c on a new row 1, then the layer rules from its row (screen row 2).
+        const int c = p.moveClipToLayer(2, 0.0, -1);
+        QCOMPARE(p.layers[c].row, 1);
+        QCOMPARE(p.dropTarget(2, -0.4, c).action, QString("none"));
+        QCOMPARE(p.dropTarget(2, -1.0, c).action, QString("join"));
+        QCOMPARE(p.dropTarget(2, -1.0, c).row, 0);
+        QCOMPARE(p.dropTarget(2, -1.6, c).action, QString("swap"));
+        QCOMPARE(p.dropTarget(2, 1.0, c).action, QString("none"));  // already alone on the last row
+        QCOMPARE(p.dropTarget(1, -1.0, 0).action, QString("toTrack"));
+        QCOMPARE(p.dropTarget(1, -1.6, 0).action, QString("swapTrack"));
+        QCOMPARE(p.dropTarget(1, 1.0, 0).action, QString("join"));
+        QCOMPARE(p.dropTarget(1, 1.0, 0).row, 1);
+
+        // Swapping c's row with row 0: c now draws under a and b, at its own time.
+        const int swapped = p.swapLayerRows(c, 0);
+        QCOMPARE(p.layers[swapped].clip.path, QString("c.mp4"));
+        QCOMPARE(p.layers[swapped].row, 0);
+        QCOMPARE(p.layers[swapped].start, 0.0);
+        QCOMPARE(p.layers.last().row, 1);
+
+        // Joining: c onto row 1 at 2 s overlaps a and b; it slides to fit.
+        const int joined = p.moveLayerToRow(swapped, 1, 2.0);
+        QCOMPARE(p.layerRows(), 1);  // its old row closed up
+        QCOMPARE(p.layers[joined].clip.path, QString("c.mp4"));
+        QCOMPARE(p.layers[joined].row, 0);
+        for (int i = 1; i < p.layers.size(); ++i)
+            QVERIFY(p.layers[i].start >= p.layers[i - 1].end() - 1e-9);
+
+        // Swapping with the main track: the row becomes the track, the track a row.
+        const int onTrack = p.swapRowWithTrack(0);
+        QCOMPARE(p.clips.size(), 3);
+        QCOMPARE(p.clips[onTrack].path, QString("a.mp4"));
+        QCOMPARE(p.layerRows(), 1);
+        QCOMPARE(p.layers.size(), 2);
+        QCOMPARE(p.layers[0].clip.path, QString("main1.mp4"));
+        QCOMPARE(p.layers[1].start, 4.0);  // main2 where it played
+
+        // Rows save.
+        const Project loaded = Project::fromJson(p.toJson());
+        QCOMPARE(loaded.layers.size(), 2);
+        QCOMPARE(loaded.layers[1].row, 0);
     }
 
     void effectsSaveAndClamp()
@@ -2107,6 +2181,103 @@ private slots:
         QTRY_COMPARE(find(window->contentItem(), "clip1")->property("selected").toBool(), true);
         backend.undo();
         QCOMPARE(backend.project().layers.size(), 1);
+    }
+
+    // The real window: drop a clip onto an existing layer row to join it,
+    // past the last row for a new one, and more than half a row past a
+    // neighboring row to swap the two.
+    void timelineDropJoinsAndSwapsRows()
+    {
+        QTemporaryDir dir, state, themeDir;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=1080x1920",
+                           "-frames:v", "1", dir.filePath("a.jpg")}));
+        Project p;
+        for (int i = 0; i < 4; ++i)
+            p.clips << media::clipFor(media::probe(dir.filePath("a.jpg")), 2.0);
+        for (Clip &c : p.clips)
+            c.motion = "none";
+        write(dir.filePath("rows.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+
+        QQuickStyle::setStyle("Material");
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("rows.reel")));
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.load(QUrl("qrc:/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360, 860);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        std::function<QQuickItem *(QQuickItem *, const QString &)> find = [&](QQuickItem *item, const QString &name) -> QQuickItem * {
+            if (item->objectName() == name)
+                return item;
+            for (QQuickItem *child : item->childItems())
+                if (QQuickItem *found = find(child, name))
+                    return found;
+            return nullptr;
+        };
+        auto send = [&](QEvent::Type type, QPoint pos, Qt::MouseButtons buttons) {
+            QMouseEvent e(type, QPointF(pos), window->mapToGlobal(QPointF(pos)), Qt::LeftButton, buttons, Qt::NoModifier);
+            QCoreApplication::sendEvent(window, &e);
+        };
+        auto drag = [&](QPoint from, QPoint to) {
+            send(QEvent::MouseButtonPress, from, Qt::LeftButton);
+            for (int i = 1; i <= 10; ++i) {
+                send(QEvent::MouseMove, from + (to - from) * i / 10, Qt::LeftButton);
+                QTest::qWait(20);
+            }
+            send(QEvent::MouseButtonRelease, to, Qt::NoButton);
+            QTest::qWait(50);
+        };
+
+        auto center = [&](const QString &name) {
+            QQuickItem *item = find(window->contentItem(), name);
+            return item ? item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint() : QPoint();
+        };
+        auto *timeline = find(window->contentItem(), "clip0")->parentItem();
+        QVERIFY(timeline);
+        const int videoToLayer = 38 + 6 + 20;  // video lane middle to first layer row middle
+        const int pitch = 40 + 6;              // one layer row to the next
+
+        // Clip 3 straight down onto where layer row 1 will be: a new row.
+        QPoint from = center("clip3");
+        drag(from, from + QPoint(0, videoToLayer));
+        QTRY_COMPARE(backend.project().layers.size(), 1);
+        QCOMPARE(backend.project().layerRows(), 1);
+        // Clip 2 onto that row, overlapping in time: it joins and slides to fit.
+        from = center("clip2");
+        drag(from, from + QPoint(0, videoToLayer));
+        QTRY_COMPARE(backend.project().layers.size(), 2);
+        QCOMPARE(backend.project().layerRows(), 1);
+        QVERIFY(backend.project().layers[1].start >= backend.project().layers[0].end() - 1e-6);
+        // Clip 1 past the last row: a second row.
+        from = center("clip1");
+        drag(from, from + QPoint(0, videoToLayer + pitch));
+        QTRY_COMPARE(backend.project().layerRows(), 2);
+        const QString top = backend.project().layers.last().clip.path;
+        QCOMPARE(backend.project().layers.last().row, 1);
+
+        // The top row's video dragged up past row 1's middle by more than half
+        // a row (half of the taller gap above row 1), so the rows swap.
+        from = center(QString("layerBar%1").arg(backend.project().layers.size() - 1));
+        drag(from, from - QPoint(0, pitch + videoToLayer * 5 / 8));
+        QTRY_COMPARE(backend.project().layers.first().row, 0);
+        QTRY_COMPARE(backend.project().layers.first().clip.path, top);
+        QCOMPARE(backend.project().layerRows(), 2);
+        QCOMPARE(backend.project().layers.last().row, 1);
+
+        // Up just one row: it joins the other row (now row 2 on screen).
+        backend.undo();
+        QCOMPARE(backend.project().layers.last().row, 1);
+        from = center(QString("layerBar%1").arg(backend.project().layers.size() - 1));
+        drag(from, from - QPoint(0, pitch));
+        QTRY_COMPARE(backend.project().layerRows(), 1);
+        QCOMPARE(backend.project().layers.size(), 3);
+        Q_UNUSED(timeline);
     }
 
     // The real window, offscreen: everything on the picture moves and resizes

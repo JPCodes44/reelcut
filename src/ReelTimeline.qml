@@ -25,9 +25,12 @@ Rectangle {
     readonly property real laneH: 28
     property real musicH: 52
     readonly property real layerH: 40
-    // A clip is being dragged down far enough to drop it as a new layer.
-    property bool layerDrop: false
-    readonly property int layerRows: backend.layers.length
+    readonly property int layerRows: backend.layers.reduce((n, l) => Math.max(n, l.row + 1), 0)
+    // What letting go of the clip or layer being dragged up or down would do
+    // (Backend::dropTarget): action none, join, newRow, toTrack, swap or
+    // swapTrack, and the layer row it concerns.
+    property var drop: ({ action: "none", row: -1 })
+    readonly property bool layerDrop: drop.action !== "none"
     // Lane stacking, shared by the gutter labels and the time-positioned
     // blocks so the two can't drift apart: Video, Layers, Captions, Text, Music, Effects.
     readonly property real laneGap: 6
@@ -47,16 +50,29 @@ Rectangle {
             flick.contentX = Math.max(0, Math.min(x - flick.width * 0.3, flick.contentWidth - flick.width))
     }
 
-    // Moves between the track and the layers select what moved. They run
-    // here, not in the dragged item: the move destroys that item, and
-    // nothing after it in its own handler would run.
-    function clipToLayer(index, start) {
-        const layer = backend.moveClipToLayer(index, start)
-        if (layer >= 0) layerSelected(layer)
+    // Where a timeline y sits in rows, on screen: 0 at the middle of the
+    // video lane, 1 at the middle of the first layer row, and so on.
+    function rowAt(y) {
+        const videoMid = videoY + videoH / 2
+        const firstMid = layersY + layerH / 2
+        const pitch = layerH + laneGap
+        if (y <= firstMid)
+            return (y - videoMid) / (firstMid - videoMid)
+        return 1 + (y - firstMid) / pitch
     }
-    function layerToTrack(index, time) {
-        const at = backend.moveLayerToTrack(index, time)
-        if (at >= 0) clipSelected(at)
+    // Drops run here, not in the dragged item: the move destroys that item,
+    // and nothing after it in its own handler would run. They select what moved.
+    function select(result) {
+        if (result.kind === "layer") layerSelected(result.index)
+        else if (result.kind === "clip") clipSelected(result.index)
+    }
+    function dropClip(index, start, moved) {
+        drop = { action: "none", row: -1 }
+        select(backend.dropClip(index, start, moved))
+    }
+    function dropLayer(index, start, moved, time) {
+        drop = { action: "none", row: -1 }
+        select(backend.dropLayer(index, start, moved, time))
     }
 
     signal seekRequested(real t)
@@ -336,19 +352,20 @@ Rectangle {
                         dragging = true
                         clipItem.dragOffset = dx
                         clipItem.dragOffsetY = Math.max(0, dy)
-                        // The pointer is below the video lane: it becomes a layer.
-                        root.layerDrop = backend.clips.length > 1 && p.y > root.videoY + root.videoH + root.laneGap / 2
+                        // Down onto a layer row joins it; past the last makes a new one.
+                        root.drop = backend.dropTarget(0, root.rowAt(root.videoY + root.videoH / 2 + clipItem.dragOffsetY), clipItem.index)
                     }
                     onReleased: function(mouse) {
                         if (dragging && root.layerDrop) {
                             const start = Math.max(0, clipItem.modelData.start + clipItem.dragOffset / root.pps)
+                            const moved = root.rowAt(root.videoY + root.videoH / 2 + clipItem.dragOffsetY)
                             clipItem.dragOffset = 0
                             clipItem.dragOffsetY = 0
                             dragging = false
-                            root.layerDrop = false
-                            root.clipToLayer(clipItem.index, start)
+                            root.dropClip(clipItem.index, start, moved)
                             return
                         }
+                        root.drop = { action: "none", row: -1 }
                         clipItem.dragOffsetY = 0
                         if (dragging) {
                             // Drop where the clip's middle lands.
@@ -362,7 +379,7 @@ Rectangle {
                             }
                         }
                     }
-                    onCanceled: { clipItem.dragOffset = 0; clipItem.dragOffsetY = 0; dragging = false; root.layerDrop = false }
+                    onCanceled: { clipItem.dragOffset = 0; clipItem.dragOffsetY = 0; dragging = false; root.drop = { action: "none", row: -1 } }
                 }
 
                 // Trim handles: drag to move the in and out points.
@@ -399,32 +416,46 @@ Rectangle {
             }
         }
 
-        // Where a clip dragged down will land as a new layer. It floats over
-        // the lane below instead of resizing the timeline mid-drag, which
-        // would cancel the drag.
+        // Where the drag would land: the lane it joins or swaps with, or a new
+        // row past the last. A new row floats over the lane below instead of
+        // resizing the timeline mid-drag, which would cancel the drag.
         Rectangle {
+            objectName: "dropHint"
+            readonly property string action: root.drop.action
+            readonly property bool onTrack: action === "toTrack" || action === "swapTrack"
             visible: root.layerDrop
             x: 0
-            y: root.layerY(backend.layers.length)
+            y: onTrack ? root.videoY : root.layerY(root.drop.row)
             z: 9
             width: flick.contentWidth
-            height: root.layerH
+            height: onTrack ? root.videoH : root.layerH
             radius: Math.min(4, theme.radius)
-            color: "#1d1d22"
+            color: action === "newRow" ? "#1d1d22" : Qt.rgba(1, 1, 1, 0.04)
             border.color: theme.accent
-            border.width: 1
+            border.width: action === "swap" || action === "swapTrack" ? 2 : 1
             Label {
                 x: flick.contentX + 10
                 anchors.verticalCenter: parent.verticalCenter
-                text: qsTr("Drop to lay this clip over the video")
+                padding: 3
+                background: Rectangle { color: "#e6121215"; radius: 3 }
+                text: {
+                    const a = parent.action, row = root.drop.row + 1
+                    return a === "newRow" ? qsTr("Drop to lay this clip over the video on a new layer")
+                         : a === "join" ? qsTr("Drop to put it on layer %1").arg(row)
+                         : a === "swap" ? qsTr("⇅ Drop to swap places with layer %1").arg(row)
+                         : a === "toTrack" ? qsTr("Drop to put it back on the main video track")
+                         : a === "swapTrack" ? qsTr("⇅ Drop to swap places with the main video track")
+                         : ""
+                }
                 color: theme.accent
                 font.pixelSize: 11
             }
         }
 
-        // Layers: one row each, later rows drawn on top in the picture.
-        // Drag to move in time, drag an edge to trim, drag up onto the video
-        // lane to put the clip back on the main track.
+        // Layers, on their rows; later rows draw on top in the picture. Drag
+        // to move in time, drag an edge to trim. Drag up or down onto another
+        // row (within half a row of it) to join it; more than half a row past
+        // it, the two rows swap places, the main video track included.
         Repeater {
             model: backend.layers.length
             delegate: Rectangle {
@@ -435,7 +466,7 @@ Rectangle {
                 readonly property bool selected: index === root.selectedLayer
                 property real dragOffsetY: 0
                 x: (modelData.start || 0) * root.pps
-                y: root.layerY(index) + dragOffsetY
+                y: root.layerY(modelData.row || 0) + dragOffsetY
                 z: dragOffsetY !== 0 ? 10 : 0
                 opacity: dragOffsetY !== 0 ? 0.8 : 1
                 width: Math.max(4, (modelData.duration || 0) * root.pps - 2)
@@ -496,7 +527,6 @@ Rectangle {
                     property real startIn: 0
                     property real startOut: 0
                     property bool moving: false
-                    property bool toTrack: false
                     onPressed: function(mouse) {
                         part = mouse.x < 6 ? "start" : mouse.x > width - 6 ? "end" : "body"
                         const p = mapToItem(flick.contentItem, mouse.x, mouse.y)
@@ -506,7 +536,6 @@ Rectangle {
                         startIn = layerBar.modelData.in
                         startOut = layerBar.modelData.out
                         moving = false
-                        toTrack = false
                         root.layerSelected(layerBar.index)
                     }
                     onPositionChanged: function(mouse) {
@@ -531,24 +560,34 @@ Rectangle {
                             backend.setLayerValue(layerBar.index, "out", startOut + dt * d.speed)
                         } else {
                             backend.setLayerValue(layerBar.index, "start", Math.max(0, startStart + dt))
-                            layerBar.dragOffsetY = Math.min(0, dy)
-                            toTrack = p.y < root.videoY + root.videoH
+                            layerBar.dragOffsetY = dy
+                            root.drop = backend.dropTarget(layerBar.modelData.row + 1, moved(), layerBar.index)
                         }
                     }
+                    // Rows the bar has moved up (negative) or down.
+                    function moved() {
+                        const row = layerBar.modelData.row + 1
+                        const mid = root.layerY(row - 1) + root.layerH / 2
+                        return root.rowAt(mid + layerBar.dragOffsetY) - row
+                    }
                     onReleased: function(mouse) {
+                        const rows = moved()
                         layerBar.dragOffsetY = 0
                         if (!moving) {
                             root.seekRequested(layerBar.modelData.start + mouse.x / root.pps)
                             return
                         }
-                        if (toTrack) {
-                            // The move above already left an undo step; take
-                            // it back so one Ctrl+Z undoes the whole drag.
+                        if (root.layerDrop) {
+                            // The sideways move above already left an undo
+                            // step; take it back so one Ctrl+Z undoes the drop.
+                            const start = Math.max(0, startStart + (mapToItem(flick.contentItem, mouse.x, 0).x - startX) / root.pps)
+                            const time = mapToItem(flick.contentItem, mouse.x, 0).x / root.pps
+                            const index = layerBar.index
                             backend.undo()
-                            root.layerToTrack(layerBar.index, mapToItem(flick.contentItem, mouse.x, 0).x / root.pps)
+                            root.dropLayer(index, start, rows, time)
                         }
                     }
-                    onCanceled: layerBar.dragOffsetY = 0
+                    onCanceled: { layerBar.dragOffsetY = 0; root.drop = { action: "none", row: -1 } }
                 }
             }
         }

@@ -94,7 +94,7 @@ Rectangle {
 
                         Label {
                             Layout.fillWidth: true
-                            text: root.layerData ? qsTr("Layer %1 · %2").arg(root.selectedLayer + 1).arg(root.layerData.name) : ""
+                            text: root.layerData ? qsTr("Layer %1 · %2").arg(root.layerData.row + 1).arg(root.layerData.name) : ""
                             font.bold: true
                             elide: Text.ElideMiddle
                         }

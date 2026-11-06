@@ -147,9 +147,17 @@ public:
     Q_INVOKABLE void removeClip(int index);
     Q_INVOKABLE void moveClip(int from, int to);
     // Layers: videos over the main track (see Layer in src/project.h).
-    // Drags a clip off the main track onto a new top layer at `start`;
-    // returns the layer's index, or -1 (the last clip on the track stays).
-    Q_INVOKABLE int moveClipToLayer(int index, double start);
+    // Takes a clip off the main track onto layer row `row` (-1: a new top
+    // row) at `start`; returns the layer's index, or -1 (the last clip on
+    // the track stays).
+    Q_INVOKABLE int moveClipToLayer(int index, double start, int row = -1);
+    // What a drop would do (Project::dropTarget): {action, row}.
+    Q_INVOKABLE QVariantMap dropTarget(int fromRow, double moved, int index) const;
+    // Drops a clip or layer dragged `moved` rows up or down, at `start`
+    // (and, for a layer going back on the main track, at timeline `time`).
+    // Returns what is now selected: {kind: "clip"/"layer"/"", index}.
+    Q_INVOKABLE QVariantMap dropClip(int index, double start, double moved);
+    Q_INVOKABLE QVariantMap dropLayer(int index, double start, double moved, double time);
     // Back onto the main track where `time` falls; returns the clip's index.
     Q_INVOKABLE int moveLayerToTrack(int index, double time);
     // start, in, out, scale, x, y, zoom, panX, panY; no undo step of its own

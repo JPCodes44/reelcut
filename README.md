@@ -8,7 +8,7 @@ Make vertical reels for Instagram, Facebook, YouTube Shorts and TikTok on Omarch
 
 - **Photos and slideshows**: drop in photos (JPG, PNG, WebP, HEIC) and they become slides with a duration and an optional slow zoom or pan. Export the slideshow as a video, or as a **photo set** for TikTok photo posts: one 1080×1920 JPG per slide with the text and look drawn in, numbered in order. Post the set in TikTok's photo mode and pick the sound in the app (TikTok's library sounds can only be added there).
 - **Cut**: drop in videos, split at the playhead, trim with the handles, reorder, change speed from 0.25× to 4×.
-- **Layers**: drag a clip down off the video track to lay it over the video, picture in picture. Move and resize it in the preview, place it in time on its own row, and drag it back up to put it on the main track. Its sound mixes in with the rest.
+- **Layers**: drag a clip down off the video track to lay it over the video, picture in picture. Move and resize it in the preview and place it in time. Layers sit on rows, and higher rows draw on top. Drop a video within half a row of another row to put it on that row (it slides to the nearest free spot); drag it more than half a row past a neighboring row and the two rows swap places, the main video track included. Its sound mixes in with the rest.
 - **Transitions**: 15 transitions between clips (dissolve, dip to black, flash, wipes, slides, iris, clock, zoom, pixelate, blur and more), with a live preview. [How they work](docs/effects.md#2-transitions-two-pictures-and-a-progress-value).
 - **Social preview**: switch between Instagram, Facebook, YouTube and TikTok to preview that app's chrome and safe zones. Click the caption or **Caption and tags** to edit the saved posting text; **Show app UI** hides the chrome. Text wraps inside layout containers and the app UI never appears in exports.
 - **Frame**: every clip fills the 9:16 frame; zoom and pan landscape footage to pick what shows.
@@ -62,7 +62,7 @@ omarchy-pkg-add whisper-cpp
 | Drag a corner / scroll | Resize text or captions, zoom the picture |
 | Ctrl + drag | Move without snapping to the center, thirds or safe zone |
 | Drag in the timeline | Reorder clips, move text in time, trim either end |
-| Drag a clip down in the timeline | Lay it over the video as a new layer; drag a layer back up to return it |
+| Drag a clip or layer up or down | Within half a row of another row: join it. More than half a row past it: swap the two rows |
 | Ctrl+S / Ctrl+Shift+S | Save / save as |
 | Ctrl+O | Open a project |
 | Ctrl+E | Export |

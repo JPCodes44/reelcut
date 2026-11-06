@@ -268,7 +268,8 @@ Rectangle {
                                     required property int index
                                     objectName: "layerSlot" + index
                                     layerIndex: index
-                                    z: 3 + index
+                                    // Higher rows on top; a row's videos never overlap.
+                                    z: 3 + (backend.layers[index] ? backend.layers[index].row : 0)
                                     frameWidth: frame.width
                                     frameHeight: frame.height
                                     time: root.time

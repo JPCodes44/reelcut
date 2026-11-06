@@ -3,6 +3,7 @@
 #include "posting.h"
 
 #include <QColor>
+#include <algorithm>
 #include <QDir>
 #include <QJsonArray>
 
@@ -178,6 +179,7 @@ QJsonObject Project::toJson(const QString &baseDir) const {
         layer["scale"] = l.scale;
         layer["x"] = l.x;
         layer["y"] = l.y;
+        layer["row"] = l.row;
         layerArray.append(layer);
     }
     QJsonArray overlayArray;
@@ -237,9 +239,12 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
         l.scale = qBound(0.1, o.value("scale").toDouble(1.0), 1.0);
         l.x = qBound(0.0, o.value("x").toDouble(0.5), 1.0);
         l.y = qBound(0.0, o.value("y").toDouble(0.5), 1.0);
+        // Files from before rows: each layer on a row of its own.
+        l.row = qMax(0, o.value("row").toInt(int(p.layers.size())));
         if (l.clip.out > l.clip.in)
             p.layers.append(l);
     }
+    p.normalizeLayers();
     const QJsonObject m = json.value("music").toObject();
     p.music.path = loadPath(m.value("path").toString(), baseDir);
     p.music.volume = m.value("volume").toDouble(p.music.volume);
@@ -657,15 +662,162 @@ int Project::addOverlay(const QString &text, double start, double end) {
     return overlays.size() - 1;
 }
 
-bool Project::moveClipToLayer(int index, double start) {
+int Project::layerRows() const {
+    int rows = 0;
+    for (const Layer &l : layers)
+        rows = qMax(rows, l.row + 1);
+    return rows;
+}
+
+void Project::normalizeLayers() {
+    std::stable_sort(layers.begin(), layers.end(), [](const Layer &a, const Layer &b) {
+        return a.row != b.row ? a.row < b.row : a.start < b.start;
+    });
+    int next = 0, last = -1;
+    for (Layer &l : layers) {
+        if (l.row != last) {
+            last = l.row;
+            ++next;
+        }
+        l.row = next - 1;
+    }
+}
+
+int Project::placeLayer(Layer layer) {
+    layer.row = qBound(0, layer.row, layerRows());
+    layer.start = qMax(0.0, layer.start);
+    const double length = layer.clip.duration();
+    QVector<QPair<double, double>> taken;
+    for (const Layer &l : layers)
+        if (l.row == layer.row)
+            taken.append({l.start, l.end()});
+    auto fits = [&](double start) {
+        if (start < 0.0)
+            return false;
+        for (const auto &t : taken)
+            if (start < t.second - 1e-6 && start + length > t.first + 1e-6)
+                return false;
+        return true;
+    };
+    // Where it was dropped, or the nearest spot just before or after a
+    // video on the row. Right after the last one always fits.
+    QVector<double> candidates{layer.start};
+    for (const auto &t : taken)
+        candidates << t.second << t.first - length;
+    double best = -1.0;
+    for (double c : candidates)
+        if (fits(c) && (best < 0.0 || qAbs(c - layer.start) < qAbs(best - layer.start)))
+            best = c;
+    layer.start = best;
+    // Inserted in order, so closing up empty rows afterwards keeps its index.
+    int at = 0;
+    while (at < layers.size() && (layers[at].row < layer.row || (layers[at].row == layer.row && layers[at].start < layer.start)))
+        ++at;
+    layers.insert(at, layer);
+    normalizeLayers();
+    return at;
+}
+
+Project::Drop Project::dropTarget(int fromRow, double moved, int index) const {
+    const int rows = layerRows();
+    if (fromRow == 0) {
+        // A main-track clip: the row it lands on, or a new top row past the last.
+        const int k = qRound(moved);
+        if (moved < 0.5 || index < 0 || index >= clips.size() || clips.size() < 2)
+            return {"none", -1};
+        if (k <= rows)
+            return {"join", k - 1};
+        return {"newRow", rows};
+    }
+    if (qAbs(moved) < 0.5 || index < 0 || index >= layers.size())
+        return {"none", -1};
+    const int neighbor = fromRow + (moved < 0 ? -1 : 1);
+    const bool past = qAbs(moved) > 1.5;
+    if (neighbor == 0)
+        return {past ? "swapTrack" : "toTrack", -1};
+    if (neighbor > rows) {
+        // Below the last row: a row of its own, unless it already has one.
+        int onRow = 0;
+        for (const Layer &l : layers)
+            onRow += l.row == layers[index].row;
+        return onRow > 1 ? Drop{"newRow", rows} : Drop{"none", -1};
+    }
+    return {past ? "swap" : "join", neighbor - 1};
+}
+
+int Project::moveClipToLayer(int index, double start, int row) {
     if (index < 0 || index >= clips.size() || clips.size() < 2)
-        return false;
+        return -1;
     Layer layer;
     layer.clip = layerClip(clips[index]);
-    layer.start = qMax(0.0, start);
+    layer.start = start;
+    layer.row = row < 0 ? layerRows() : row;
     clips.remove(index);
-    layers.append(layer);
-    return true;
+    return placeLayer(layer);
+}
+
+int Project::moveLayerToRow(int index, int row, double start) {
+    if (index < 0 || index >= layers.size())
+        return -1;
+    Layer layer = layers.takeAt(index);
+    // Its old row may now be empty; count rows as they were.
+    const int rows = qMax(layerRows(), layer.row + 1);
+    layer.row = qBound(0, row, rows);
+    layer.start = start;
+    // Keep row numbers stable until it's placed, then close up.
+    return placeLayer(layer);
+}
+
+int Project::swapLayerRows(int index, int otherRow) {
+    if (index < 0 || index >= layers.size() || otherRow < 0 || otherRow >= layerRows())
+        return -1;
+    const int mine = layers[index].row;
+    const double start = layers[index].start;
+    for (Layer &l : layers)
+        l.row = l.row == mine ? otherRow : l.row == otherRow ? mine : l.row;
+    normalizeLayers();
+    // Videos on a row never share a start, so (row, start) finds it again.
+    for (int i = 0; i < layers.size(); ++i)
+        if (layers[i].row == otherRow && layers[i].start == start)
+            return i;
+    return -1;
+}
+
+int Project::swapRowWithTrack(int index) {
+    if (index < 0 || index >= layers.size())
+        return -1;
+    const int row = layers[index].row;
+    // The row's videos, in time order, become the main track.
+    QVector<Clip> track;
+    QVector<Layer> rest;
+    int at = -1;
+    for (int i = 0; i < layers.size(); ++i) {
+        if (layers[i].row == row) {
+            if (i == index)
+                at = track.size();
+            track.append(layers[i].clip);
+        } else {
+            rest.append(layers[i]);
+        }
+    }
+    // The main track's clips become that row, where they played.
+    const QVector<double> starts = clipStarts();
+    for (int i = 0; i < clips.size(); ++i) {
+        Layer l;
+        l.clip = layerClip(clips[i]);
+        l.start = starts[i];
+        l.row = row;
+        rest.append(l);
+    }
+    clips = track;
+    layers = rest;
+    normalizeLayers();
+    // Overlaps from transitions: slide each onto its row again.
+    QVector<Layer> placed = layers;
+    layers.clear();
+    for (const Layer &l : placed)
+        placeLayer(l);
+    return at;
 }
 
 int Project::moveLayerToTrack(int index, double time) {
@@ -682,6 +834,7 @@ int Project::moveLayerToTrack(int index, double time) {
     }
     clips.insert(at, layers[index].clip);
     layers.remove(index);
+    normalizeLayers();
     return at;
 }
 
@@ -689,8 +842,19 @@ bool Project::setLayerValue(int index, const QString &key, double value) {
     if (index < 0 || index >= layers.size())
         return false;
     Layer &l = layers[index];
-    if (key == "start")
-        l.start = qMax(0.0, value);
+    if (key == "start") {
+        // Not into the videos either side of it on its row.
+        double lo = 0.0, hi = 1e9;
+        for (int i = 0; i < layers.size(); ++i) {
+            if (i == index || layers[i].row != l.row)
+                continue;
+            if (layers[i].start < l.start)
+                lo = qMax(lo, layers[i].end());
+            else
+                hi = qMin(hi, layers[i].start);
+        }
+        l.start = qBound(lo, value, qMax(lo, hi - l.clip.duration()));
+    }
     else if (key == "scale")
         l.scale = qBound(0.1, value, 1.0);
     else if (key == "x")
