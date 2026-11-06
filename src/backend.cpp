@@ -170,6 +170,22 @@ QVariantList Backend::clips() const {
     return list;
 }
 
+QVariantList Backend::layers() const {
+    QVariantList list;
+    for (const Layer &l : m_project.layers) {
+        const Clip &c = l.clip;
+        list.append(QVariantMap{
+            {"path", c.path}, {"name", fileName(c.path)}, {"in", c.in}, {"out", c.out},
+            {"speed", c.speed}, {"zoom", c.zoom}, {"panX", c.panX}, {"panY", c.panY},
+            {"width", c.width}, {"height", c.height}, {"audio", c.audio}, {"still", c.still},
+            {"sourceDuration", c.sourceDuration}, {"start", l.start}, {"end", l.end()},
+            {"duration", c.duration()}, {"scale", l.scale}, {"x", l.x}, {"y", l.y},
+            {"thumb", m_thumbKeys.value(c.path, -1)}, {"offline", !QFileInfo::exists(c.path)},
+        });
+    }
+    return list;
+}
+
 QVariantList Backend::captionLines() const {
     // Lines carry each word's index into the transcript, so QML can edit it.
     QVariantList list;
@@ -411,6 +427,41 @@ void Backend::moveClip(int from, int to) {
         return;
     checkpoint();
     m_project.clips.move(from, to);
+    changed();
+}
+
+int Backend::moveClipToLayer(int index, double start) {
+    Project next = m_project;
+    if (!next.moveClipToLayer(index, start)) {
+        if (index >= 0 && index < m_project.clips.size())
+            setMessage(tr("Keep at least one clip on the main video track to lay others over."), true);
+        return -1;
+    }
+    checkpoint();
+    m_project = next;
+    changed();
+    return m_project.layers.size() - 1;
+}
+
+int Backend::moveLayerToTrack(int index, double time) {
+    if (index < 0 || index >= m_project.layers.size())
+        return -1;
+    checkpoint();
+    const int at = m_project.moveLayerToTrack(index, time);
+    changed();
+    return at;
+}
+
+void Backend::setLayerValue(int index, const QString &key, double value) {
+    if (m_project.setLayerValue(index, key, value))
+        changed();
+}
+
+void Backend::removeLayer(int index) {
+    if (index < 0 || index >= m_project.layers.size())
+        return;
+    checkpoint();
+    m_project.layers.remove(index);
     changed();
 }
 
@@ -928,6 +979,8 @@ bool Backend::openFile(const QString &path) {
     m_dirty = false;
     for (const Clip &clip : m_project.clips)
         thumbKey(clip.path);
+    for (const Layer &layer : m_project.layers)
+        thumbKey(layer.clip.path);
     m_onDisk = bytes;
     watchProject();
     recordOpenProject();
@@ -965,6 +1018,8 @@ void Backend::reloadIfChangedOutside() {
     m_dirty = false;
     for (const Clip &clip : m_project.clips)
         thumbKey(clip.path);
+    for (const Layer &layer : m_project.layers)
+        thumbKey(layer.clip.path);
     emit projectChanged();
     setMessage(tr("Updated from outside Reelcut. Ctrl+Z undoes it."), false);
 }
@@ -1022,6 +1077,12 @@ void Backend::exportVideo() {
     for (const Clip &clip : m_project.clips) {
         if (!QFileInfo::exists(clip.path)) {
             setMessage(tr("%1 is missing, so the reel can't be exported.").arg(clip.path), true);
+            return;
+        }
+    }
+    for (const Layer &layer : m_project.layers) {
+        if (!QFileInfo::exists(layer.clip.path)) {
+            setMessage(tr("%1 is missing, so the reel can't be exported.").arg(layer.clip.path), true);
             return;
         }
     }
@@ -1121,6 +1182,11 @@ bool Backend::readyToExport() {
     for (const Clip &clip : m_project.clips)
         if (!QFileInfo::exists(clip.path)) {
             setMessage(tr("%1 is missing, so the reel can't be exported.").arg(clip.path), true);
+            return false;
+        }
+    for (const Layer &layer : m_project.layers)
+        if (!QFileInfo::exists(layer.clip.path)) {
+            setMessage(tr("%1 is missing, so the reel can't be exported.").arg(layer.clip.path), true);
             return false;
         }
     return true;

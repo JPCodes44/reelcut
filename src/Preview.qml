@@ -260,6 +260,21 @@ Rectangle {
                                 fragmentShader: "qrc:/shaders/transition.frag.qsb"
                             }
 
+                            // Layers over the main track, later ones on top,
+                            // under the effect and the look (as in the export).
+                            Repeater {
+                                model: backend.layers.length
+                                delegate: LayerSlot {
+                                    required property int index
+                                    objectName: "layerSlot" + index
+                                    layerIndex: index
+                                    z: 3 + index
+                                    frameWidth: frame.width
+                                    frameHeight: frame.height
+                                    time: root.time
+                                    playing: root.playing
+                                }
+                            }
                         }
                     }
                 }
@@ -358,6 +373,39 @@ Rectangle {
                     onResized: function(factor) { backend.setClipValue(root.clipIndex, "zoom", startZoom * factor) }
                     onWheeled: function(steps) {
                         backend.setClipValue(root.clipIndex, "zoom", root.currentClip.zoom * Math.pow(1.05, steps))
+                    }
+                }
+
+                // The selected layer's box: drag to move it, corners or wheel to resize.
+                EditBox {
+                    id: layerBox
+                    objectName: "layerBox"
+                    readonly property int index: win.selectionKind === "layer" ? win.selectedLayer : -1
+                    readonly property var layerData: index >= 0 && index < backend.layers.length ? backend.layers[index] : null
+                    readonly property bool showing: layerData !== null && root.time >= layerData.start && root.time < layerData.end
+                    visible: showing
+                    selected: showing
+                    snap: frame.snapGuides
+                    width: layerData ? frame.width * layerData.scale : 0
+                    height: layerData ? frame.height * layerData.scale : 0
+                    x: layerData ? frame.width * layerData.x - width / 2 : 0
+                    y: layerData ? frame.height * layerData.y - height / 2 : 0
+                    property real startX
+                    property real startY
+                    property real startScale
+                    onPressed: {
+                        startX = layerData.x
+                        startY = layerData.y
+                        startScale = layerData.scale
+                    }
+                    onBegan: backend.checkpoint()
+                    onDragged: function(dx, dy) {
+                        backend.setLayerValue(index, "x", startX + dx / frame.width)
+                        backend.setLayerValue(index, "y", startY + dy / frame.height)
+                    }
+                    onResized: function(factor) { backend.setLayerValue(index, "scale", startScale * factor) }
+                    onWheeled: function(steps) {
+                        backend.setLayerValue(index, "scale", layerData.scale * Math.pow(1.05, steps))
                     }
                 }
 

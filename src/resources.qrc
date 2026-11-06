@@ -20,6 +20,7 @@
         <file alias="shaders/grade.frag.qsb">shaders/grade.frag.qsb</file>
         <file alias="shaders/wheel.frag.qsb">shaders/wheel.frag.qsb</file>
         <file alias="ClipSlot.qml">ClipSlot.qml</file>
+        <file alias="LayerSlot.qml">LayerSlot.qml</file>
         <file alias="ColorPicker.qml">ColorPicker.qml</file>
         <file alias="ColorWheel.qml">ColorWheel.qml</file>
         <file alias="GradePanel.qml">GradePanel.qml</file>

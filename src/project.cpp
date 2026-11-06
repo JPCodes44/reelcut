@@ -26,6 +26,60 @@ QString loadPath(const QString &path, const QString &baseDir) {
         return path;
     return QDir::cleanPath(QDir(baseDir).absoluteFilePath(path));
 }
+
+QJsonObject clipToJson(const Clip &c, const QString &baseDir) {
+    QJsonObject clip{
+        {"path", storePath(c.path, baseDir)}, {"in", c.in}, {"out", c.out}, {"speed", c.speed},
+        {"zoom", c.zoom}, {"panX", c.panX}, {"panY", c.panY}, {"width", c.width},
+        {"height", c.height}, {"audio", c.audio}, {"sourceDuration", c.sourceDuration},
+        {"still", c.still}, {"motion", c.motion}, {"transition", c.transition},
+        {"transitionSeconds", c.transitionSeconds}, {"body", c.body}, {"bodyAmount", c.bodyAmount},
+    };
+    if (!c.grade.isNeutral())
+        clip["grade"] = c.grade.toJson();
+    return clip;
+}
+
+Clip clipFromJson(const QJsonObject &o, const QString &baseDir) {
+    Clip c;
+    c.path = loadPath(o.value("path").toString(), baseDir);
+    c.in = o.value("in").toDouble();
+    c.out = o.value("out").toDouble();
+    c.speed = qBound(0.25, o.value("speed").toDouble(1.0), 4.0);
+    c.zoom = qBound(1.0, o.value("zoom").toDouble(1.0), 3.0);
+    c.panX = qBound(-1.0, o.value("panX").toDouble(), 1.0);
+    c.panY = qBound(-1.0, o.value("panY").toDouble(), 1.0);
+    c.width = o.value("width").toInt();
+    c.height = o.value("height").toInt();
+    c.audio = o.value("audio").toBool(true);
+    c.sourceDuration = o.value("sourceDuration").toDouble(c.out);
+    c.still = o.value("still").toBool(false);
+    c.motion = Clip::motions().contains(o.value("motion").toString()) ? o.value("motion").toString() : "none";
+    const Transitions::Kind *kind = Transitions::find(o.value("transition").toString());
+    c.transition = kind ? kind->id : QString();
+    c.transitionSeconds = qBound(Transitions::MinSeconds, o.value("transitionSeconds").toDouble(Transitions::DefaultSeconds),
+                                 Transitions::MaxSeconds);
+    const Body::Kind *body = Body::find(o.value("body").toString());
+    c.body = body ? body->id : QString();
+    c.bodyAmount = qBound(0.0, o.value("bodyAmount").toDouble(c.bodyAmount), 1.0);
+    c.grade = ColorGrade::Grade::fromJson(o.value("grade").toObject());
+    if (c.still) {
+        c.audio = false;
+        c.speed = 1.0;
+        c.sourceDuration = Clip::MaxPhotoSeconds;
+    }
+    return c;
+}
+
+// A clip as a layer uses it: the main track's extras (transition, body
+// effect, photo motion, color wheels) don't apply there.
+Clip layerClip(Clip c) {
+    c.transition.clear();
+    c.body.clear();
+    c.motion = "none";
+    c.grade = {};
+    return c;
+}
 }  // namespace
 
 QStringList Clip::motions() {
@@ -115,17 +169,16 @@ void Project::replaceClipWithRanges(int index, const QVector<QPair<double, doubl
 
 QJsonObject Project::toJson(const QString &baseDir) const {
     QJsonArray clipArray;
-    for (const Clip &c : clips) {
-        QJsonObject clip{
-            {"path", storePath(c.path, baseDir)}, {"in", c.in}, {"out", c.out}, {"speed", c.speed},
-            {"zoom", c.zoom}, {"panX", c.panX}, {"panY", c.panY}, {"width", c.width},
-            {"height", c.height}, {"audio", c.audio}, {"sourceDuration", c.sourceDuration},
-            {"still", c.still}, {"motion", c.motion}, {"transition", c.transition},
-            {"transitionSeconds", c.transitionSeconds}, {"body", c.body}, {"bodyAmount", c.bodyAmount},
-        };
-        if (!c.grade.isNeutral())
-            clip["grade"] = c.grade.toJson();
-        clipArray.append(clip);
+    for (const Clip &c : clips)
+        clipArray.append(clipToJson(c, baseDir));
+    QJsonArray layerArray;
+    for (const Layer &l : layers) {
+        QJsonObject layer = clipToJson(l.clip, baseDir);
+        layer["start"] = l.start;
+        layer["scale"] = l.scale;
+        layer["x"] = l.x;
+        layer["y"] = l.y;
+        layerArray.append(layer);
     }
     QJsonArray overlayArray;
     for (const Overlay &o : overlays) {
@@ -149,6 +202,7 @@ QJsonObject Project::toJson(const QString &baseDir) const {
     return {
         {"version", 1},
         {"clips", clipArray},
+        {"layers", layerArray},
         {"music", QJsonObject{{"path", storePath(music.path, baseDir)}, {"volume", music.volume},
                               {"offset", music.offset}, {"duck", music.duck}}},
         {"overlays", overlayArray},
@@ -171,36 +225,20 @@ QJsonObject Project::toJson(const QString &baseDir) const {
 Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
     Project p;
     for (const auto &value : json.value("clips").toArray()) {
-        const QJsonObject o = value.toObject();
-        Clip c;
-        c.path = loadPath(o.value("path").toString(), baseDir);
-        c.in = o.value("in").toDouble();
-        c.out = o.value("out").toDouble();
-        c.speed = qBound(0.25, o.value("speed").toDouble(1.0), 4.0);
-        c.zoom = qBound(1.0, o.value("zoom").toDouble(1.0), 3.0);
-        c.panX = qBound(-1.0, o.value("panX").toDouble(), 1.0);
-        c.panY = qBound(-1.0, o.value("panY").toDouble(), 1.0);
-        c.width = o.value("width").toInt();
-        c.height = o.value("height").toInt();
-        c.audio = o.value("audio").toBool(true);
-        c.sourceDuration = o.value("sourceDuration").toDouble(c.out);
-        c.still = o.value("still").toBool(false);
-        c.motion = Clip::motions().contains(o.value("motion").toString()) ? o.value("motion").toString() : "none";
-        const Transitions::Kind *kind = Transitions::find(o.value("transition").toString());
-        c.transition = kind ? kind->id : QString();
-        c.transitionSeconds = qBound(Transitions::MinSeconds, o.value("transitionSeconds").toDouble(Transitions::DefaultSeconds),
-                                     Transitions::MaxSeconds);
-        const Body::Kind *body = Body::find(o.value("body").toString());
-        c.body = body ? body->id : QString();
-        c.bodyAmount = qBound(0.0, o.value("bodyAmount").toDouble(c.bodyAmount), 1.0);
-        c.grade = ColorGrade::Grade::fromJson(o.value("grade").toObject());
-        if (c.still) {
-            c.audio = false;
-            c.speed = 1.0;
-            c.sourceDuration = Clip::MaxPhotoSeconds;
-        }
+        const Clip c = clipFromJson(value.toObject(), baseDir);
         if (c.out > c.in)
             p.clips.append(c);
+    }
+    for (const auto &value : json.value("layers").toArray()) {
+        const QJsonObject o = value.toObject();
+        Layer l;
+        l.clip = layerClip(clipFromJson(o, baseDir));
+        l.start = qMax(0.0, o.value("start").toDouble());
+        l.scale = qBound(0.1, o.value("scale").toDouble(1.0), 1.0);
+        l.x = qBound(0.0, o.value("x").toDouble(0.5), 1.0);
+        l.y = qBound(0.0, o.value("y").toDouble(0.5), 1.0);
+        if (l.clip.out > l.clip.in)
+            p.layers.append(l);
     }
     const QJsonObject m = json.value("music").toObject();
     p.music.path = loadPath(m.value("path").toString(), baseDir);
@@ -617,4 +655,57 @@ int Project::addOverlay(const QString &text, double start, double end) {
     overlay.end = end > overlay.start ? end : qMin(overlay.start + 3.0, qMax(duration(), overlay.start + 1.0));
     overlays.append(overlay);
     return overlays.size() - 1;
+}
+
+bool Project::moveClipToLayer(int index, double start) {
+    if (index < 0 || index >= clips.size() || clips.size() < 2)
+        return false;
+    Layer layer;
+    layer.clip = layerClip(clips[index]);
+    layer.start = qMax(0.0, start);
+    clips.remove(index);
+    layers.append(layer);
+    return true;
+}
+
+int Project::moveLayerToTrack(int index, double time) {
+    if (index < 0 || index >= layers.size())
+        return -1;
+    // Before the clip under `time` if it lands in that clip's first half, after it otherwise.
+    int at = clips.size();
+    const QVector<double> starts = clipStarts();
+    for (int i = 0; i < clips.size(); ++i) {
+        if (time < starts[i] + clips[i].duration() / 2.0) {
+            at = i;
+            break;
+        }
+    }
+    clips.insert(at, layers[index].clip);
+    layers.remove(index);
+    return at;
+}
+
+bool Project::setLayerValue(int index, const QString &key, double value) {
+    if (index < 0 || index >= layers.size())
+        return false;
+    Layer &l = layers[index];
+    if (key == "start")
+        l.start = qMax(0.0, value);
+    else if (key == "scale")
+        l.scale = qBound(0.1, value, 1.0);
+    else if (key == "x")
+        l.x = qBound(0.0, value, 1.0);
+    else if (key == "y")
+        l.y = qBound(0.0, value, 1.0);
+    else if (key == "in" || key == "out" || key == "zoom" || key == "panX" || key == "panY") {
+        // Same limits as a clip on the main track.
+        Project scratch;
+        scratch.clips.append(l.clip);
+        if (!scratch.setClipValue(0, key, value))
+            return false;
+        l.clip = scratch.clips[0];
+    } else {
+        return false;
+    }
+    return true;
 }

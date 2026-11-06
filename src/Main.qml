@@ -25,7 +25,8 @@ ApplicationWindow {
     property int selectedClip: -1
     property int selectedOverlay: -1
     property int selectedEffect: -1
-    // What a click last picked: clip, overlay, captions, or none. Delete acts on it.
+    property int selectedLayer: -1
+    // What a click last picked: clip, layer, overlay, captions, or none. Delete acts on it.
     property string selectionKind: "none"
     property real playhead: 0
     // Single-key shortcuts must not fire while the user is typing.
@@ -57,6 +58,9 @@ ApplicationWindow {
         } else if (kind === "effect") {
             selectedEffect = index
             inspector.currentIndex = 5
+        } else if (kind === "layer") {
+            selectedLayer = index
+            inspector.currentIndex = 0
         }
     }
     function deleteSelection() {
@@ -69,6 +73,10 @@ ApplicationWindow {
             selectionKind = "none"
         } else if (selectionKind === "captions") {
             backend.clearCaptions()
+            selectionKind = "none"
+        } else if (selectionKind === "layer" && selectedLayer >= 0) {
+            backend.removeLayer(selectedLayer)
+            selectedLayer = -1
             selectionKind = "none"
         } else if (selectedClip >= 0) {
             backend.removeClip(selectedClip)
@@ -84,6 +92,10 @@ ApplicationWindow {
                 win.selectedOverlay = -1
             if (win.selectedEffect >= backend.effects.length)
                 win.selectedEffect = -1
+            if (win.selectedLayer >= backend.layers.length) {
+                win.selectedLayer = -1
+                if (win.selectionKind === "layer") win.selectionKind = "none"
+            }
             if (win.playhead > backend.duration)
                 win.seek(backend.duration)
             else
@@ -236,6 +248,7 @@ ApplicationWindow {
                     selectedClip: win.selectedClip
                     selectedOverlay: win.selectedOverlay
                     selectedEffect: win.selectedEffect
+                    selectedLayer: win.selectionKind === "layer" ? win.selectedLayer : -1
                     textSelected: win.selectionKind === "overlay" && win.selectedOverlay >= 0
                                   && win.selectedOverlay < backend.overlays.length
                     playhead: win.playhead
@@ -253,11 +266,14 @@ ApplicationWindow {
                 Layout.preferredHeight: implicitHeight
                 Layout.minimumHeight: implicitHeight  // follows the resized music lane
                 playhead: win.playhead
-                selectedClip: win.selectedClip
-                selectedOverlay: win.selectedOverlay
+                // Only what's selected now is highlighted: one item at a time.
+                selectedClip: win.selectionKind === "clip" ? win.selectedClip : -1
+                selectedOverlay: win.selectionKind === "overlay" ? win.selectedOverlay : -1
                 selectedEffect: win.selectionKind === "effect" ? win.selectedEffect : -1
+                selectedLayer: win.selectionKind === "layer" ? win.selectedLayer : -1
                 onSeekRequested: function(t) { preview.pause(); win.seek(t) }
                 onClipSelected: function(i) { win.select("clip", i) }
+                onLayerSelected: function(i) { win.select("layer", i) }
                 onOverlaySelected: function(i) { win.select("overlay", i) }
                 onEffectSelected: function(i) { win.select("effect", i) }
                 onCaptionsSelected: win.select("captions", -1)

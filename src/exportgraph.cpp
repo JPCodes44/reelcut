@@ -99,13 +99,64 @@ QStringList joinClips(const Project &project, bool withVideo, bool withAudio) {
     return out;
 }
 
+// The main track with the layers over it: [vlay] when there are layers,
+// otherwise just [vcat].
+QString baseVideo(const Project &project) {
+    return project.layers.isEmpty() ? "[vcat]" : "[vlay]";
+}
+
+// Each layer's picture, framed in its box and placed on the frame over
+// [vcat], later layers on top: [vlay] out. Its frames are shifted to start at
+// the layer's start, and it shows only while it plays. layerInputs[k] is the
+// input layer k reads.
+QStringList layerChains(const Project &project, const QVector<int> &layerInputs) {
+    QStringList out;
+    QString below = "[vcat]";
+    for (int k = 0; k < project.layers.size(); ++k) {
+        const Layer &l = project.layers[k];
+        const int w = qMax(2, even(Project::Width * l.scale));
+        const int h = qMax(2, even(Project::Height * l.scale));
+        const int x = qRound(l.x * Project::Width - w / 2.0);
+        const int y = qRound(l.y * Project::Height - h / 2.0);
+        const QString pad = QString("[ly%1]").arg(k);
+        const QString next = k == project.layers.size() - 1 ? "[vlay]" : QString("[vl%1]").arg(k);
+        QString picture = clipVideoChain(l.clip, QString("[%1:v]").arg(layerInputs[k]));
+        if (w != Project::Width || h != Project::Height)
+            picture += QString(",scale=%1:%2:flags=lanczos").arg(w).arg(h);
+        out << picture + QString(",setpts=PTS+%1/TB").arg(num(l.start)) + pad;
+        out << QString("%1%2overlay=x=%3:y=%4:eof_action=pass:enable='between(t,%5,%6)'%7")
+                   .arg(below, pad).arg(x).arg(y).arg(num(l.start), num(l.end()), next);
+        below = next;
+    }
+    return out;
+}
+
+// The layers' sound, each delayed to its start: [la<k>] for each layer that
+// has sound. Returns the labels made.
+QStringList layerAudioChains(const Project &project, const QVector<int> &layerInputs, QStringList *graph) {
+    QStringList labels;
+    for (int k = 0; k < project.layers.size(); ++k) {
+        const Clip &c = project.layers[k].clip;
+        if (!c.audio || c.still)
+            continue;
+        QString chain = QString("[%1:a]atrim=start=%2:end=%3,asetpts=PTS-STARTPTS")
+                            .arg(layerInputs[k]).arg(num(c.in), num(c.out));
+        if (c.speed != 1.0)
+            chain += "," + atempoChain(c.speed);
+        const QString label = QString("[la%1]").arg(k);
+        *graph << chain + "," + kAudioFormat + QString(",adelay=%1:all=1").arg(qRound(project.layers[k].start * 1000)) + label;
+        labels << label;
+    }
+    return labels;
+}
+
 // The effects track, in order, each over the result of the one before:
-// [vcat] in, [vfx] out. Nothing at all when there are no effects.
+// the base video in, [vfx] out. Nothing at all when there are no effects.
 QStringList effectChains(const Project &project) {
     if (project.effects.isEmpty())
         return {};
     QStringList out;
-    QString in = "[vcat]";
+    QString in = baseVideo(project);
     for (int i = 0; i < project.effects.size(); ++i) {
         const QString next = i == project.effects.size() - 1 ? "[vfx]" : QString("[vfx%1]").arg(i);
         out << Effects::exportChain(project.effects[i], in, next, i);
@@ -145,7 +196,7 @@ QString videoFinish(const Project &project, const ExportOptions &options, const 
     if (!options.assFile.isEmpty())
         video << QString("ass=filename=%1").arg(options.assFile);
     const QString finish = hasText ? QString(",") + kTo420 : QString();
-    const QString in = project.effects.isEmpty() ? "[vcat]" : "[vfx]";
+    const QString in = project.effects.isEmpty() ? baseVideo(project) : "[vfx]";
     QVector<int> texts;
     for (int i = 0; i < textInputs.size(); ++i)
         if (textInputs[i] >= 0)
@@ -210,15 +261,28 @@ QVector<int> maskInputs(const Project &project, const ExportOptions &options, in
     return index;
 }
 
+void addClipInput(const Clip &clip, QStringList *args) {
+    // A photo becomes a stream of the same frame, as long as it shows.
+    if (clip.still)
+        *args << "-loop" << "1" << "-framerate" << QString::number(Project::Fps) << "-t" << num(clip.duration() + 0.1);
+    *args << "-i" << clip.path;
+}
+
 QStringList clipInputs(const Project &project) {
     QStringList args;
-    for (const Clip &clip : project.clips) {
-        // A photo becomes a stream of the same frame, as long as it shows.
-        if (clip.still)
-            args << "-loop" << "1" << "-framerate" << QString::number(Project::Fps) << "-t" << num(clip.duration() + 0.1);
-        args << "-i" << clip.path;
-    }
+    for (const Clip &clip : project.clips)
+        addClipInput(clip, &args);
     return args;
+}
+
+// The layers' sources as extra inputs, numbered from `first`.
+QVector<int> layerInputs(const Project &project, int first, QStringList *args) {
+    QVector<int> index;
+    for (const Layer &layer : project.layers) {
+        addClipInput(layer.clip, args);
+        index << first + index.size();
+    }
+    return index;
 }
 }  // namespace
 
@@ -308,13 +372,24 @@ QStringList exportArgs(const Project &project, const ExportOptions &options) {
     for (int m : masks)
         inputs += m >= 0;
     const QVector<int> texts = textInputs(project, options, inputs, &args);
+    for (int t : texts)
+        inputs += t >= 0;
+    const QVector<int> layers = layerInputs(project, inputs, &args);
 
     QStringList graph = clipChains(project, true, true, kAudioFormat, masks, options.clipGrades);
     graph << joinClips(project, true, true);
+    graph << layerChains(project, layers);
     graph << effectChains(project);
     graph << videoFinish(project, options, texts);
 
     QString voice = "[acat]";
+    const QStringList layerSound = layerAudioChains(project, layers, &graph);
+    if (!layerSound.isEmpty()) {
+        // The main track sets the length; layer sound past the end is cut.
+        graph << voice + layerSound.join(QString()) +
+                     QString("amix=inputs=%1:duration=first:normalize=0[alay]").arg(layerSound.size() + 1);
+        voice = "[alay]";
+    }
     if (project.music.isSet()) {
         const int m = n;
         graph << QString("[%1:a]atrim=start=%2:duration=%3,asetpts=PTS-STARTPTS,volume=%4,%5[mus]")
@@ -322,7 +397,7 @@ QStringList exportArgs(const Project &project, const ExportOptions &options) {
         QString music = "[mus]";
         if (project.music.duck) {
             // The clips' sound pushes the music down while it's there.
-            graph << "[acat]asplit=2[voice][key]";
+            graph << voice + "asplit=2[voice][key]";
             graph << "[mus][key]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=400[ducked]";
             voice = "[voice]";
             music = "[ducked]";
@@ -337,6 +412,8 @@ QStringList exportArgs(const Project &project, const ExportOptions &options) {
     bool hasSound = project.music.isSet();
     for (const Clip &c : project.clips)
         hasSound = hasSound || (c.audio && !c.still);
+    for (const Layer &l : project.layers)
+        hasSound = hasSound || (l.clip.audio && !l.clip.still);
     graph << voice + (hasSound ? "loudnorm=I=-14:TP=-1.5:LRA=11," : QString()) + "aresample=48000[aout]";
 
     args << "-filter_complex" << graph.join(';');
@@ -371,8 +448,12 @@ QStringList frameArgs(const Project &project, const ExportOptions &options, doub
     for (int m : masks)
         inputs += m >= 0;
     const QVector<int> texts = textInputs(project, options, inputs, &args);
+    for (int t : texts)
+        inputs += t >= 0;
+    const QVector<int> layers = layerInputs(project, inputs, &args);
     QStringList graph = clipChains(project, true, false, {}, masks, options.clipGrades);
     graph << joinClips(project, true, false);
+    graph << layerChains(project, layers);
     graph << effectChains(project);
     graph << videoFinish(project, options, texts);
     graph.last().replace("[vout]", QString(",scale=%1:-2[vout]").arg(width));

@@ -1,3 +1,5 @@
+#include <QImage>
+#include <QColor>
 #include <QClipboard>
 #include <QCryptographicHash>
 #include <QNetworkAccessManager>
@@ -1219,6 +1221,92 @@ private slots:
         QVERIFY2(quiet.exitCode() == 0, quiet.readAllStandardError().right(1500).constData());
     }
 
+    // Dragging a clip down makes a layer; it saves, renders over the main
+    // track inside its box only while it plays, and can go back on the track.
+    void layersMoveSaveAndRender()
+    {
+        QTemporaryDir dir;
+        const QString red = dir.filePath("red.mp4");
+        const QString blue = dir.filePath("blue.mp4");
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=180x320:r=30:d=3",
+                           "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-shortest",
+                           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", red}));
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=180x320:r=30:d=2",
+                           "-f", "lavfi", "-i", "sine=frequency=660:duration=2", "-shortest",
+                           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", blue}));
+        auto source = [](const QString &path, double duration) {
+            Clip c;
+            c.path = path;
+            c.out = duration;
+            c.width = 180;
+            c.height = 320;
+            c.sourceDuration = duration;
+            return c;
+        };
+        Project p;
+        p.clips = {source(red, 3.0)};
+        QVERIFY(!p.moveClipToLayer(0, 0.0));  // the main track keeps a picture
+        Clip b = source(blue, 2.0);
+        b.out = 1.0;
+        b.transition = "fade";
+        p.clips << b;
+        QVERIFY(p.moveClipToLayer(1, 1.0));
+        QCOMPARE(p.clips.size(), 1);
+        QCOMPARE(p.layers.size(), 1);
+        QVERIFY(p.layers[0].clip.transition.isEmpty());
+        QCOMPARE(p.duration(), 3.0);  // layers don't lengthen the reel
+        QVERIFY(p.setLayerValue(0, "scale", 0.5));
+        QVERIFY(p.setLayerValue(0, "x", 0.25));
+        QVERIFY(p.setLayerValue(0, "y", 0.25));
+        QVERIFY(p.setLayerValue(0, "scale", 5.0));
+        QCOMPARE(p.layers[0].scale, 1.0);
+        QVERIFY(p.setLayerValue(0, "scale", 0.5));
+        QVERIFY(!p.setLayerValue(0, "nope", 1.0));
+        QVERIFY(!p.setLayerValue(3, "x", 1.0));
+
+        const Project loaded = Project::fromJson(p.toJson(dir.path()), dir.path());
+        QCOMPARE(loaded.layers.size(), 1);
+        QCOMPARE(loaded.layers[0].clip.path, blue);
+        QCOMPARE(loaded.layers[0].start, 1.0);
+        QCOMPARE(loaded.layers[0].scale, 0.5);
+        QCOMPARE(loaded.layers[0].x, 0.25);
+        QCOMPARE(loaded.layers[0].clip.out, 1.0);
+
+        QProcess proc;
+        proc.setWorkingDirectory(dir.path());
+        proc.start("ffmpeg", exportArgs(p, {dir.filePath("reel.mp4"), {}, {}, "libx264"}));
+        QVERIFY(proc.waitForFinished(120000));
+        QVERIFY2(proc.exitCode() == 0, proc.readAllStandardError().right(2000).constData());
+        const media::VideoInfo out = media::probe(dir.filePath("reel.mp4"));
+        QVERIFY2(out.ok, qPrintable(out.error));
+        QVERIFY2(qAbs(out.duration - 3.0) < 0.15, qPrintable(QString::number(out.duration)));
+
+        // In the box while it plays, red around it and before and after.
+        auto frameAt = [&](double t) {
+            const QString png = dir.filePath(QString("frame-%1.png").arg(t));
+            QProcess f;
+            f.setWorkingDirectory(dir.path());
+            f.start("ffmpeg", frameArgs(p, {}, t, png, 540));
+            f.waitForFinished(60000);
+            return QImage(png);
+        };
+        auto isBlue = [](QColor c) { return c.blue() > 180 && c.red() < 80; };
+        auto isRed = [](QColor c) { return c.red() > 180 && c.blue() < 80; };
+        const QImage during = frameAt(1.5);
+        QVERIFY(!during.isNull());
+        QVERIFY(isBlue(during.pixelColor(during.width() / 4, during.height() / 4)));
+        QVERIFY(isRed(during.pixelColor(during.width() * 3 / 4, during.height() * 3 / 4)));
+        const QImage before = frameAt(0.5);
+        QVERIFY(isRed(before.pixelColor(before.width() / 4, before.height() / 4)));
+        const QImage after = frameAt(2.5);
+        QVERIFY(isRed(after.pixelColor(after.width() / 4, after.height() / 4)));
+
+        // Back on the track, after the clip it landed in the second half of.
+        QCOMPARE(p.moveLayerToTrack(0, 2.0), 1);
+        QVERIFY(p.layers.isEmpty());
+        QCOMPARE(p.clips[1].path, blue);
+    }
+
     void effectsSaveAndClamp()
     {
         Project p;
@@ -1912,6 +2000,113 @@ private slots:
         QTRY_COMPARE(backend.project().clips[0].panX, 0.0);
         drag(picture, picture + QPoint(-4, 0), Qt::ControlModifier);
         QTRY_VERIFY(backend.project().clips[0].panX > 0.0);
+    }
+
+    // The real window, offscreen: dragging a clip down off the video lane lays
+    // it over the video as a layer; its box moves in the preview; dragging
+    // the layer back up puts it on the main track. One undo step each.
+    void timelineDragMakesLayer()
+    {
+        QTemporaryDir dir, state, themeDir;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1080x1920",
+                           "-frames:v", "1", dir.filePath("a.jpg")}));
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=1280x720",
+                           "-frames:v", "1", dir.filePath("b.jpg")}));
+        Project p;
+        p.clips = {media::clipFor(media::probe(dir.filePath("a.jpg")), 4.0),
+                   media::clipFor(media::probe(dir.filePath("b.jpg")), 2.0)};
+        for (Clip &c : p.clips)
+            c.motion = "none";
+        write(dir.filePath("layers.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+
+        QQuickStyle::setStyle("Material");
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        QVERIFY(backend.openFile(dir.filePath("layers.reel")));
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.load(QUrl("qrc:/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360, 860);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        std::function<QQuickItem *(QQuickItem *, const QString &)> find = [&](QQuickItem *item, const QString &name) -> QQuickItem * {
+            if (item->objectName() == name)
+                return item;
+            for (QQuickItem *child : item->childItems())
+                if (QQuickItem *found = find(child, name))
+                    return found;
+            return nullptr;
+        };
+        auto send = [&](QEvent::Type type, QPoint pos, Qt::MouseButtons buttons) {
+            QMouseEvent e(type, QPointF(pos), window->mapToGlobal(QPointF(pos)), Qt::LeftButton, buttons, Qt::NoModifier);
+            QCoreApplication::sendEvent(window, &e);
+        };
+        auto drag = [&](QPoint from, QPoint to) {
+            send(QEvent::MouseButtonPress, from, Qt::LeftButton);
+            for (int i = 1; i <= 10; ++i) {
+                send(QEvent::MouseMove, from + (to - from) * i / 10, Qt::LeftButton);
+                QTest::qWait(20);
+            }
+            send(QEvent::MouseButtonRelease, to, Qt::NoButton);
+            QTest::qWait(50);
+        };
+
+        // Clip 1 (4 s to 6 s) dragged straight down: a layer starting at 4 s.
+        auto *clip1 = find(window->contentItem(), "clip1");
+        QVERIFY(clip1);
+        const QPoint grab = clip1->mapToScene(QPointF(clip1->width() / 2, clip1->height() / 2)).toPoint();
+        drag(grab, grab + QPoint(0, int(clip1->height())));
+        QTRY_COMPARE(backend.project().layers.size(), 1);
+        QCOMPARE(backend.project().clips.size(), 1);
+        QVERIFY(std::abs(backend.project().layers[0].start - 4.0) < 0.05);
+        // Only the layer is highlighted now, not the clip still on the track.
+        QTRY_COMPARE(find(window->contentItem(), "clip0")->property("selected").toBool(), false);
+        QTRY_COMPARE(find(window->contentItem(), "layerBar0")->property("selected").toBool(), true);
+        QVERIFY(backend.canUndo());
+
+        // The last clip on the track can't be dragged off it.
+        auto *clip0 = find(window->contentItem(), "clip0");
+        const QPoint grab0 = clip0->mapToScene(QPointF(clip0->width() / 2, clip0->height() / 2)).toPoint();
+        drag(grab0, grab0 + QPoint(0, int(clip0->height())));
+        QCOMPARE(backend.project().clips.size(), 1);
+
+        // Earlier in time so it overlaps the main clip, then shown in the preview.
+        auto *bar = find(window->contentItem(), "layerBar0");
+        QVERIFY(bar && bar->isVisible());
+        const QPoint barMid = bar->mapToScene(QPointF(bar->width() / 2, bar->height() / 2)).toPoint();
+        const double pps = bar->width() / 2.0;
+        drag(barMid, barMid - QPoint(int(pps * 3), 0));
+        QTRY_VERIFY(backend.project().layers[0].start < 1.2);
+        QCOMPARE(backend.project().layers.size(), 1);
+        QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, backend.project().layers[0].start + 0.5));
+        auto *slot = find(window->contentItem(), "layerSlot0");
+        QVERIFY(slot);
+        QTRY_VERIFY(slot->isVisible());
+
+        // Selected, its box moves in the preview, then shrinks from a corner.
+        backend.setLayerValue(0, "scale", 0.5);
+        auto *box = find(window->contentItem(), "layerBox");
+        QVERIFY(box);
+        QTRY_VERIFY(box->isVisible());
+        const double x0 = backend.project().layers[0].x;
+        const QPoint mid = box->mapToScene(QPointF(box->width() / 2, box->height() / 2)).toPoint();
+        drag(mid, mid + QPoint(40, 0));
+        QTRY_VERIFY(backend.project().layers[0].x > x0 + 0.05);
+        window->grabWindow().save(qEnvironmentVariable("REELCUT_LAYER_SHOT", dir.filePath("shot.png")));
+
+        // Dragged back up onto the video lane: on the main track again.
+        bar = find(window->contentItem(), "layerBar0");
+        const QPoint back = bar->mapToScene(QPointF(bar->width() / 2, bar->height() / 2)).toPoint();
+        drag(back, back - QPoint(0, int(bar->height() * 1.5)));
+        QTRY_COMPARE(backend.project().clips.size(), 2);
+        QVERIFY(backend.project().layers.isEmpty());
+        QTRY_COMPARE(find(window->contentItem(), "clip1")->property("selected").toBool(), true);
+        backend.undo();
+        QCOMPARE(backend.project().layers.size(), 1);
     }
 
     // The real window, offscreen: everything on the picture moves and resizes

@@ -45,6 +45,21 @@ struct Clip {
     static QStringList motions();
 };
 
+// A video or photo laid over the main track, made by dragging a clip down
+// off it. Its clip keeps its own trim, speed and framing (zoom and pan inside
+// its box); the layer places that box on the frame. Later layers draw on top.
+// Transitions, body effects, photo motion and clip color wheels belong to the
+// main track and are not used here. A layer is cut off where the reel ends.
+struct Layer {
+    Clip clip;
+    double start = 0.0;  // timeline seconds
+    double scale = 1.0;  // the box, as a fraction of the frame: 0.1..1
+    double x = 0.5;      // the box's center, as fractions of the frame
+    double y = 0.5;
+
+    double end() const { return start + clip.duration(); }
+};
+
 // A caption word, in timeline seconds.
 struct Word {
     QString text;
@@ -129,6 +144,7 @@ struct Look {
 
 struct Project {
     QVector<Clip> clips;
+    QVector<Layer> layers;  // drawn over the clips, in order
     Music music;
     QVector<Overlay> overlays;
     QVector<Effect> effects;
@@ -189,6 +205,15 @@ struct Project {
     // A body effect on a clip; empty removes it. False if unknown.
     bool setClipBody(int index, const QString &id);
     bool setOverlayValue(int index, const QString &key, const QVariant &value);
+    // Takes clip `index` off the main track onto a new top layer starting at
+    // `start`. False for a bad index or the last clip on the main track,
+    // which has to stay so there is a picture underneath.
+    bool moveClipToLayer(int index, double start);
+    // Puts a layer back on the main track where timeline time `time` falls;
+    // returns its clip index, or -1 for a bad index.
+    int moveLayerToTrack(int index, double time);
+    // start, in, out, scale, x, y, zoom, panX, panY; values are clamped.
+    bool setLayerValue(int index, const QString &key, double value);
     bool setLookValue(const QString &key, double value);
     // Color wheels: index -1 is the whole reel. Keys as ColorGrade::Grade::set.
     bool setGrade(int index, const QString &key, double value);

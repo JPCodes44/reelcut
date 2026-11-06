@@ -35,6 +35,7 @@ class ThumbProvider;
 class Backend : public QObject {
     Q_OBJECT
     Q_PROPERTY(QVariantList clips READ clips NOTIFY projectChanged)
+    Q_PROPERTY(QVariantList layers READ layers NOTIFY projectChanged)
     Q_PROPERTY(double duration READ duration NOTIFY projectChanged)
     Q_PROPERTY(QVariantList captionLines READ captionLines NOTIFY projectChanged)
     Q_PROPERTY(int wordCount READ wordCount NOTIFY projectChanged)
@@ -90,6 +91,7 @@ public:
     ~Backend() override;
 
     QVariantList clips() const;
+    QVariantList layers() const;
     double duration() const { return m_project.duration(); }
     QVariantList captionLines() const;
     int wordCount() const { return m_project.words.size(); }
@@ -144,6 +146,16 @@ public:
     Q_INVOKABLE void addUrls(const QList<QUrl> &urls);
     Q_INVOKABLE void removeClip(int index);
     Q_INVOKABLE void moveClip(int from, int to);
+    // Layers: videos over the main track (see Layer in src/project.h).
+    // Drags a clip off the main track onto a new top layer at `start`;
+    // returns the layer's index, or -1 (the last clip on the track stays).
+    Q_INVOKABLE int moveClipToLayer(int index, double start);
+    // Back onto the main track where `time` falls; returns the clip's index.
+    Q_INVOKABLE int moveLayerToTrack(int index, double time);
+    // start, in, out, scale, x, y, zoom, panX, panY; no undo step of its own
+    // (call checkpoint() first).
+    Q_INVOKABLE void setLayerValue(int index, const QString &key, double value);
+    Q_INVOKABLE void removeLayer(int index);
     Q_INVOKABLE bool split(double time);
     // in, out, speed, zoom, panX, panY; values are clamped to what makes sense
     Q_INVOKABLE void setClipValue(int index, const QString &key, double value);
