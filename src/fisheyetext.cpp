@@ -60,7 +60,8 @@ QImage render(const Overlay &overlay) {
         return frame;
 
     QFont font(overlay.fontOf());
-    font.setPixelSize(overlay.size);
+    // A project file can carry any size; keep it drawable.
+    font.setPixelSize(qBound(1, overlay.size, 1000));
     font.setBold(overlay.boldOf());
     font.setItalic(overlay.italic);
     font.setLetterSpacing(QFont::AbsoluteSpacing, overlay.letterSpacingOf());
@@ -75,6 +76,9 @@ QImage render(const Overlay &overlay) {
     const int pad = box.alpha() > 0 ? BoxPadding : 0;
     const QSize core(block.width() + 2 * pad, block.height() + 2 * pad);
     const int w = qCeil(core.width() * Padding), h = qCeil(core.height() * Padding);
+    // Nothing to draw, or a block too big for the supersampled images.
+    if (w <= 0 || h <= 0 || qint64(w) * h * FlatScale * FlatScale > 64'000'000)
+        return frame;
 
     // Sharpness: the lens enlarges the middle about 1.5 times, so the flat
     // text is drawn FlatScale times bigger than it shows, and the lens is
@@ -121,6 +125,8 @@ QImage render(const Overlay &overlay) {
     const double k = MaxBulge * qBound(0.0, overlay.bulge, 1.0);
     const int lw = w * LensScale, lh = h * LensScale;
     QImage big(lw, lh, QImage::Format_ARGB32_Premultiplied);
+    if (flat.isNull() || big.isNull())
+        return frame;
     for (int y = 0; y < lh; ++y) {
         QRgb *row = reinterpret_cast<QRgb *>(big.scanLine(y));
         for (int x = 0; x < lw; ++x) {

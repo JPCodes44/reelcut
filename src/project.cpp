@@ -11,10 +11,21 @@
 #include "bodyeffects.h"
 #include "effects.h"
 #include "transitions.h"
+#include <cmath>
+
+namespace {
+bool nonFiniteNumber(const QVariant &v) {
+    const int t = v.typeId();
+    return (t == QMetaType::Double || t == QMetaType::Float) && !std::isfinite(v.toDouble());
+}
+}
 
 namespace {
 // Shorter than a frame, a cut would leave an empty clip behind.
 constexpr double kMinClip = 1.0 / Project::Fps;
+// The latest a layer may start: keeps export's millisecond delays and filter
+// numbers in range whatever a file or a drag hands in.
+constexpr double kMaxLayerStart = 24 * 3600.0;
 
 QString storePath(const QString &path, const QString &baseDir) {
     if (path.isEmpty() || baseDir.isEmpty())
@@ -235,7 +246,7 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
         const QJsonObject o = value.toObject();
         Layer l;
         l.clip = layerClip(clipFromJson(o, baseDir));
-        l.start = qMax(0.0, o.value("start").toDouble());
+        l.start = qBound(0.0, o.value("start").toDouble(), kMaxLayerStart);
         l.scale = qBound(0.1, o.value("scale").toDouble(1.0), 1.0);
         l.x = qBound(0.0, o.value("x").toDouble(0.5), 1.0);
         l.y = qBound(0.0, o.value("y").toDouble(0.5), 1.0);
@@ -254,11 +265,12 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
         const QJsonObject o = value.toObject();
         Overlay overlay;
         overlay.text = o.value("text").toString();
-        overlay.start = o.value("start").toDouble();
-        overlay.end = o.value("end").toDouble(overlay.start + 3.0);
+        // Hand-edited or partial files: never before 0, never ending before it starts.
+        overlay.start = qMax(0.0, o.value("start").toDouble());
+        overlay.end = qMax(overlay.start + 0.1, o.value("end").toDouble(overlay.start + 3.0));
         overlay.x = qBound(0.0, o.value("x").toDouble(overlay.x), 1.0);
         overlay.y = o.value("y").toDouble(overlay.y);
-        overlay.size = o.value("size").toInt(overlay.size);
+        overlay.size = qBound(40, o.value("size").toInt(overlay.size), 200);  // as setOverlayValue
         overlay.animation = o.value("animation").toString(overlay.animation);
         overlay.style = o.value("style").toString() == "fisheye" ? "fisheye" : "plain";
         overlay.bulge = qBound(0.0, o.value("bulge").toDouble(overlay.bulge), 1.0);
@@ -324,21 +336,25 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
 }
 
 bool Project::setClipValue(int index, const QString &key, double value) {
+    if (!std::isfinite(value))
+        return false;
     if (index < 0 || index >= clips.size())
         return false;
     Clip &c = clips[index];
     if (key == "duration") {
         // Photos have no source length; their duration is simply how long they show.
-        c.out = c.in + qBound(kMinClip * c.speed, value * c.speed, (c.sourceDuration > 0 ? c.sourceDuration : c.out) - c.in);
+        // qBound asserts min <= max: a clip already at its source's end keeps one frame.
+        const double lo = kMinClip * c.speed;
+        c.out = c.in + qBound(lo, value * c.speed, qMax(lo, (c.sourceDuration > 0 ? c.sourceDuration : c.out) - c.in));
         return true;
     }
     if (c.still && key == "speed")
         return false;
     // Never shorter than a frame, never past the source.
     if (key == "in")
-        c.in = qBound(0.0, value, c.out - kMinClip);
+        c.in = qBound(0.0, value, qMax(0.0, c.out - kMinClip));
     else if (key == "out")
-        c.out = qBound(c.in + kMinClip, value, c.sourceDuration > 0 ? c.sourceDuration : qMax(value, c.in + kMinClip));
+        c.out = qBound(c.in + kMinClip, value, qMax(c.in + kMinClip, c.sourceDuration > 0 ? c.sourceDuration : value));
     else if (key == "speed")
         c.speed = qBound(0.25, value, 4.0);
     else if (key == "zoom")
@@ -392,6 +408,8 @@ bool Project::setClipMotion(int index, const QString &motion) {
 }
 
 bool Project::setGrade(int index, const QString &key, double value) {
+    if (!std::isfinite(value))
+        return false;
     if (index == -1)
         return look.grade.set(key, value);
     if (index < 0 || index >= clips.size())
@@ -449,13 +467,15 @@ QString Overlay::colorOf(const QString &part) const {
 }
 
 bool Project::setOverlayValue(int index, const QString &key, const QVariant &value) {
+    if (nonFiniteNumber(value))
+        return false;
     if (index < 0 || index >= overlays.size())
         return false;
     Overlay &o = overlays[index];
     if (key == "text")
         o.text = value.toString();
     else if (key == "start")
-        o.start = qBound(0.0, value.toDouble(), o.end - 0.1);
+        o.start = qBound(0.0, value.toDouble(), qMax(0.0, o.end - 0.1));
     else if (key == "end")
         o.end = qMax(o.start + 0.1, value.toDouble());
     else if (key == "x")
@@ -509,6 +529,8 @@ bool Project::setOverlayValue(int index, const QString &key, const QVariant &val
 }
 
 bool Project::setLookValue(const QString &key, double value) {
+    if (!std::isfinite(value))
+        return false;
     const double v = qBound(-1.0, value, 1.0);
     if (key == "exposure")
         look.exposure = v;
@@ -567,6 +589,8 @@ void Project::setPlatform(const QString &name) {
 }
 
 bool Project::setCaptionValue(const QString &key, double value) {
+    if (!std::isfinite(value))
+        return false;
     if (key == "x") {
         captionX = qBound(0.0, value, 1.0);
         captionAuto = false;
@@ -582,6 +606,8 @@ bool Project::setCaptionValue(const QString &key, double value) {
 }
 
 bool Project::setMusicValue(const QString &key, const QVariant &value) {
+    if (nonFiniteNumber(value))
+        return false;
     if (key == "volume")
         music.volume = qBound(0.0, value.toDouble(), 1.5);
     else if (key == "offset")
@@ -637,11 +663,13 @@ int Project::addEffect(const QString &kind, double start, double end) {
 }
 
 bool Project::setEffectValue(int index, const QString &key, double value) {
+    if (!std::isfinite(value))
+        return false;
     if (index < 0 || index >= effects.size())
         return false;
     Effect &e = effects[index];
     if (key == "start")
-        e.start = qBound(0.0, value, e.end - kMinClip);
+        e.start = qBound(0.0, value, qMax(0.0, e.end - kMinClip));
     else if (key == "end")
         e.end = qMax(e.start + kMinClip, value);
     else if (key == "intensity")
@@ -685,7 +713,8 @@ void Project::normalizeLayers() {
 
 int Project::placeLayer(Layer layer) {
     layer.row = qBound(0, layer.row, layerRows());
-    layer.start = qMax(0.0, layer.start);
+    // NaN or infinity from a drag would place it nowhere (or forever).
+    layer.start = std::isfinite(layer.start) ? qBound(0.0, layer.start, kMaxLayerStart) : 0.0;
     const double length = layer.clip.duration();
     QVector<QPair<double, double>> taken;
     for (const Layer &l : layers)
@@ -719,6 +748,9 @@ int Project::placeLayer(Layer layer) {
 }
 
 Project::Drop Project::dropTarget(int fromRow, double moved, int index) const {
+    // qRound of NaN or infinity is undefined; a negative row is not on screen.
+    if (!std::isfinite(moved) || fromRow < 0)
+        return {"none", -1};
     const int rows = layerRows();
     if (fromRow == 0) {
         // A main-track clip: the row it lands on, or a new top row past the last.
@@ -839,12 +871,14 @@ int Project::moveLayerToTrack(int index, double time) {
 }
 
 bool Project::setLayerValue(int index, const QString &key, double value) {
+    if (!std::isfinite(value))
+        return false;
     if (index < 0 || index >= layers.size())
         return false;
     Layer &l = layers[index];
     if (key == "start") {
         // Not into the videos either side of it on its row.
-        double lo = 0.0, hi = 1e9;
+        double lo = 0.0, hi = kMaxLayerStart;
         for (int i = 0; i < layers.size(); ++i) {
             if (i == index || layers[i].row != l.row)
                 continue;

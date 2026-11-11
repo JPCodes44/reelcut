@@ -128,7 +128,7 @@ Item {
                     objectName: "socialCaption"
                     Layout.fillWidth: true
                     Layout.minimumWidth: 0
-                    text: root.youtube ? (root.title || root.caption || qsTr("Add a title…"))
+                    text: root.youtube ? (root.title || qsTr("Add a title…"))
                                        : (root.caption || qsTr("Add a caption…"))
                     color: "white"; font.pixelSize: 13
                     textFormat: Text.PlainText

@@ -34,7 +34,7 @@ public:
     void cancel() override { m_cancelled = true; }
 
     void run() override {
-        if (!m_cancelled && !m_path.isEmpty()) {
+        if (!m_cancelled && !m_path.isEmpty() && !m_provider->stopping()->load()) {
             m_image = media::thumbnail(m_path, m_time, m_height, [this] {
                 return m_cancelled.load(std::memory_order_relaxed)
                     || m_provider->stopping()->load(std::memory_order_relaxed);
@@ -78,8 +78,9 @@ ThumbProvider::ThumbProvider() : m_cache(kCacheKB) {
 }
 
 ThumbProvider::~ThumbProvider() {
+    // Queued responses still run (they see m_stopping and finish at once),
+    // so each one emits finished() instead of being dropped and leaked.
     m_stopping = true;
-    m_pool.clear();
     m_pool.waitForDone();
 }
 
@@ -103,7 +104,7 @@ QQuickImageResponse *ThumbProvider::requestImageResponse(const QString &id, cons
     // id looks like "<video key>/<milliseconds>".
     const int key = id.section('/', 0, 0).toInt();
     const double time = id.section('/', 1, 1).toLongLong() / 1000.0;
-    const int height = requestedSize.height() > 0 ? requestedSize.height() : kDefaultHeight;
+    const int height = requestedSize.height() > 0 ? qMin(requestedSize.height(), 2160) : kDefaultHeight;
     const QString cacheId = id + QLatin1Char('@') + QString::number(height);
 
     const QImage hit = cached(cacheId);

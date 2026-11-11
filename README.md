@@ -27,7 +27,7 @@ Each account is connected once from the post dialog and kept in a file under `~/
 
 - **Instagram**: a Creator or Business account and a token from your Meta app (Instagram product).
 - **Facebook**: Reels post to a **Page**, not a personal profile. Give the same Meta app the `pages_show_list`, `pages_read_engagement` and `pages_manage_posts` permissions, then use your Instagram connection or paste a user token; Reelcut keeps only the Page's token. Reels must be 3 to 90 seconds.
-- **YouTube**: in Google Cloud, enable the YouTube Data API v3, set up the OAuth consent screen (publish it to *In production*, or Google signs you out every 7 days) and create an OAuth client of type **Desktop app**. Paste its client ID and secret and sign in in the browser. Uploads are Shorts (up to 3 minutes) with the title you give, the caption as the description, and `#Shorts` added.
+- **YouTube**: in Google Cloud, enable the YouTube Data API v3, set up the OAuth consent screen (publish it to *In production*, or Google signs you out every 7 days) and create an OAuth client of type **Desktop app**. Paste its client ID and secret and sign in in the browser, choosing the YouTube channel (or Brand Account) you want to post to. Check the connected channel name before posting. Switching channels on youtube.com does not change Reelcut’s saved authorization; disconnect YouTube in Reelcut and sign in again to change the destination. Uploads are Shorts (up to 3 minutes) with the title you give, the caption as the description, and `#Shorts` added.
 - **Export**: 1080×1920, 30 fps, H.264 and AAC, on the GPU with NVENC when there is one. The preview shows each platform's safe zones so captions don't end up under the buttons.
 
 Projects save as `.reel` files next to your media; the original videos are never changed.
@@ -100,6 +100,16 @@ Then ask for things like "make a reel from these three clips, cut the silences, 
 | `export` | The MP4 |
 | `export_photos` | A photo set for TikTok photo posts |
 | `show_in_app` | Opens the project in the window |
+
+### Watch what agents spend on Higgsfield
+
+When an agent generates through the Higgsfield MCP, the top bar shows the dollars spent and the dollars left (`Higgsfield $4.20 spent · $32.46 left`). Click it to sign in to your Higgsfield account the first time. After that it shows what you've spent **all time**, today, in the last 10 minutes and, after a **Reset**, since the reset. It also shows your balance and every recent charge. The chip counts all time until you reset, and **All time** switches it back. It updates every 20 seconds. Only charges and refunds count; plan credits, top-ups and expiring daily credits don't.
+
+- **$/credit** turns credits into dollars. The default is $0.05, the Plus auto-refill rate of 20 credits per dollar.
+- **Budget** is in dollars, counted from the last reset, or all time without one. When spending passes it, the meter turns red and a desktop notification fires once. Stop the agent then (Esc in Claude Code).
+- Reelcut writes `~/.config/reelcut/higgsfield-status.json` (`spentDollars`, `spentAllTimeDollars`, `balanceDollars`, `overBudget`, …) so scripts and hooks can read it. For example, a Claude Code `PreToolUse` hook can refuse `mcp__*Higgsfield__generate_*` calls while `overBudget` is true.
+
+Reelcut signs in to `mcp.higgsfield.ai/mcp` as its own OAuth client (it registers itself, so there's no key to paste). It calls the same `balance` and `transactions` tools the agent sees. The account lives in `~/.config/reelcut/higgsfield.json`, which only you can read.
 
 ## Development
 

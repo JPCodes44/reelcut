@@ -39,7 +39,8 @@ Item {
             smooth: false
             sourceSize.width: Math.max(1, Math.ceil(width * Screen.devicePixelRatio))
             sourceSize.height: Math.max(1, Math.ceil(height * Screen.devicePixelRatio))
-            source: width > 0 && height > 0 && waveform.pixelsPerSecond > 0
+            source: width > 0 && height > 0 && waveform.pixelsPerSecond > 0 && waveform.speed > 0
+                && isFinite(waveform.sourceStart)
                 ? "image://waveforms/tile?path=" + encodeURIComponent(waveform.sourcePath)
                   + "&start=" + (waveform.sourceStart + x / waveform.pixelsPerSecond * waveform.speed).toFixed(9)
                   + "&duration=" + (width / waveform.pixelsPerSecond * waveform.speed).toFixed(9)

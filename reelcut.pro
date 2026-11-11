@@ -9,6 +9,7 @@ HEADERS += \
     src/backend.h \
     src/bodyeffects.h \
     src/captions.h \
+    src/downloads.h \
     src/effects.h \
     src/exportgraph.h \
     src/filepicker.h \
@@ -22,7 +23,7 @@ HEADERS += \
     src/fisheyetext.h \
     src/colorgrade.h \
     src/posting.h \
-    src/publisher.h src/instagramapi.h src/facebookapi.h src/youtubeapi.h src/postscheduler.h \
+    src/publisher.h src/instagramapi.h src/facebookapi.h src/youtubeapi.h src/postscheduler.h src/higgsfield.h \
     src/silence.h \
     src/theme.h \
     src/thumbprovider.h \
@@ -36,6 +37,7 @@ SOURCES += \
     src/backend.cpp \
     src/bodyeffects.cpp \
     src/captions.cpp \
+    src/downloads.cpp \
     src/effects.cpp \
     src/exportgraph.cpp \
     src/filters.cpp \
@@ -48,7 +50,7 @@ SOURCES += \
     src/fisheyetext.cpp \
     src/colorgrade.cpp \
     src/posting.cpp \
-    src/publisher.cpp src/instagramapi.cpp src/facebookapi.cpp src/youtubeapi.cpp src/postscheduler.cpp \
+    src/publisher.cpp src/instagramapi.cpp src/facebookapi.cpp src/youtubeapi.cpp src/postscheduler.cpp src/higgsfield.cpp \
     src/silence.cpp \
     src/theme.cpp \
     src/thumbprovider.cpp \

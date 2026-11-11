@@ -1,6 +1,7 @@
 #include <QImage>
 #include <QColor>
 #include <QClipboard>
+#include <QMimeData>
 #include <QCryptographicHash>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -25,6 +26,7 @@
 #include <QQuickWindow>
 
 #include "backend.h"
+#include "downloads.h"
 #include "waveformprovider.h"
 #include "thumbprovider.h"
 #include "captions.h"
@@ -40,6 +42,7 @@
 #include "instagramapi.h"
 #include "facebookapi.h"
 #include "youtubeapi.h"
+#include "higgsfield.h"
 #include "postscheduler.h"
 #include "mcpserver.h"
 #include "posting.h"
@@ -82,6 +85,13 @@ bool runFfmpeg(const QStringList &args) {
 
 // A stand-in for graph.instagram.com and Meta's upload host, on localhost:
 // answers the calls InstagramApi makes and remembers them.
+
+// An empty downloads library for windows under test.
+static Downloads *testDownloads() {
+    static Downloads *downloads = new Downloads(nullptr, (new QTemporaryDir)->path());
+    return downloads;
+}
+
 class FakeInstagram : public QObject {
 public:
     struct Call { QString method, path; QUrlQuery query; QByteArray body; QHash<QString, QString> headers; };
@@ -389,6 +399,7 @@ public:
     QString lastVerifier;
     QByteArray uploaded;
     QJsonObject metadata;  // the video resource sent to start the upload
+    QString channelId = "UC123";
     bool revoke = false;   // refreshing says invalid_grant
 
     FakeGoogle() {
@@ -414,7 +425,7 @@ public:
             if (!auth.startsWith("Bearer ya29-"))
                 return error("Request had invalid authentication credentials.", 401);
             if (c.path == "/youtube/v3/channels" && c.query.queryItemValue("mine") == "true")
-                return json({{"items", QJsonArray{QJsonObject{{"id", "UC123"}, {"snippet", QJsonObject{{"title", "JP Runs"}}}}}}});
+                return json({{"items", QJsonArray{QJsonObject{{"id", channelId}, {"snippet", QJsonObject{{"title", "JP Runs"}}}}}}});
             if (c.method == "POST" && c.path == "/upload/youtube/v3/videos" && c.query.queryItemValue("uploadType") == "resumable") {
                 metadata = QJsonDocument::fromJson(c.body).object();
                 if (c.headers.value("x-upload-content-type") != "video/mp4")
@@ -434,6 +445,80 @@ class ReelcutTests : public QObject {
     Q_OBJECT
 
 private slots:
+    // Saved downloads read by their title, newest first, ready to drag in.
+    void downloadsLibrary()
+    {
+        QCOMPARE(Downloads::titleFor("Me at the zoo [jNQXAC9IVRw].mp4"), QString("Me at the zoo"));
+        QCOMPARE(Downloads::titleFor("plain name.mp4"), QString("plain name"));
+        QCOMPARE(Downloads::titleFor("[abc].mp4"), QString("[abc]"));
+
+        const QStringList args = Downloads::ytDlpArgs("https://www.tiktok.com/@a/video/1", "/x");
+        QCOMPARE(args.last(), QString("https://www.tiktok.com/@a/video/1"));
+        QCOMPARE(args.at(args.size() - 2), QString("--"));  // a link can't pass as an option
+        QVERIFY(args.contains("--no-playlist"));
+        QCOMPARE(args.at(args.indexOf("-P") + 1), QString("/x"));
+
+        QTemporaryDir dir;
+        write(dir.filePath("Old one [a1].mp4"), "x");
+        write(dir.filePath("Old one [a1].jpg"), "x");
+        QFile old(dir.filePath("Old one [a1].mp4"));
+        QVERIFY(old.open(QIODevice::ReadWrite));
+        QVERIFY(old.setFileTime(QDateTime::currentDateTime().addSecs(-60), QFileDevice::FileModificationTime));
+        old.close();
+        write(dir.filePath("New one [b2].webm"), "x");
+        write(dir.filePath("Half done [c3].f137.mp4"), "x");
+        write(dir.filePath("notes.txt"), "x");
+        Downloads downloads(nullptr, dir.path());
+        const QVariantList items = downloads.items();
+        QCOMPARE(items.size(), 2);
+        QCOMPARE(items[0].toMap()["title"].toString(), QString("New one"));
+        QVERIFY(items[0].toMap()["thumb"].toUrl().isEmpty());
+        QCOMPARE(items[1].toMap()["title"].toString(), QString("Old one"));
+        QVERIFY(items[1].toMap()["thumb"].toUrl().isLocalFile());
+
+        // Not links: refused before yt-dlp runs.
+        QSignalSpy failed(&downloads, &Downloads::failed);
+        QVERIFY(!downloads.download("hello"));
+        QVERIFY(!downloads.download("file:///etc/passwd"));
+        QCOMPARE(failed.size(), 2);
+        QVERIFY(downloads.active().isEmpty());
+
+        // Deleting takes the thumbnail too, and nothing outside the folder.
+        QTemporaryDir other;
+        write(other.filePath("keep.mp4"), "x");
+        downloads.remove(other.filePath("keep.mp4"));
+        QVERIFY(QFile::exists(other.filePath("keep.mp4")));
+        downloads.remove(dir.filePath("Old one [a1].mp4"));
+        QVERIFY(!QFile::exists(dir.filePath("Old one [a1].mp4")));
+        QVERIFY(!QFile::exists(dir.filePath("Old one [a1].jpg")));
+        QCOMPARE(downloads.items().size(), 1);
+
+        // Dragged or copied out, a video is a file to other apps and a path to terminals.
+        const QString kept = dir.filePath("New one [b2].webm");
+        std::unique_ptr<QMimeData> mime(Downloads::mimeFor(kept));
+        QCOMPARE(mime->urls(), QList<QUrl>{QUrl::fromLocalFile(kept)});
+        QCOMPARE(mime->text(), kept);
+        QVERIFY(mime->data("text/uri-list").startsWith("file:///"));
+    }
+
+    // A video dropped onto the timeline goes in where it was dropped.
+    void addUrlsAtIndex()
+    {
+        QTemporaryDir dir, state, themeDir;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240",
+                           "-frames:v", "1", dir.filePath("a.jpg")}));
+        QVERIFY(QFile::copy(dir.filePath("a.jpg"), dir.filePath("b.jpg")));
+        QVERIFY(QFile::copy(dir.filePath("a.jpg"), dir.filePath("c.jpg")));
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        backend.addUrls({QUrl::fromLocalFile(dir.filePath("a.jpg")), QUrl::fromLocalFile(dir.filePath("b.jpg"))});
+        QTRY_COMPARE(backend.project().clips.size(), 2);
+        backend.addUrls({QUrl::fromLocalFile(dir.filePath("c.jpg"))}, 1);
+        QTRY_COMPARE(backend.project().clips.size(), 3);
+        QVERIFY(backend.project().clips[1].path.endsWith("c.jpg"));
+        QVERIFY(backend.project().clips[2].path.endsWith("b.jpg"));
+    }
+
     void musicWaveformResizesByDraggingItsTopEdge()
     {
         QTemporaryDir dir, state;
@@ -456,6 +541,7 @@ private slots:
         engine.addImageProvider("waveforms", new WaveformProvider());
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
         engine.loadData(R"(
             import QtQuick
             import QtQuick.Window
@@ -544,6 +630,7 @@ private slots:
         engine.addImageProvider("waveforms", new WaveformProvider());
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
         engine.loadData("import QtQuick\nItem { width: 800; height: 278; ReelTimeline { anchors.fill: parent } }",
             QUrl("qrc:/TimelineWaveformTest.qml"));
         QVERIFY(!engine.rootObjects().isEmpty());
@@ -2013,9 +2100,13 @@ private slots:
         Theme theme(themeDir.path());
         Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
         QVERIFY(backend.openFile(dir.filePath("snap.reel")));
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir = state.path();
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
         engine.load(QUrl("qrc:/Main.qml"));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
@@ -2097,9 +2188,13 @@ private slots:
         Theme theme(themeDir.path());
         Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
         QVERIFY(backend.openFile(dir.filePath("layers.reel")));
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir = state.path();
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
         engine.load(QUrl("qrc:/Main.qml"));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
@@ -2172,6 +2267,32 @@ private slots:
         QTRY_VERIFY(backend.project().layers[0].x > x0 + 0.05);
         window->grabWindow().save(qEnvironmentVariable("REELCUT_LAYER_SHOT", dir.filePath("shot.png")));
 
+        // A click on the empty space beside the frame drops the selection.
+        auto click = [&](QPoint pos) {
+            send(QEvent::MouseButtonPress, pos, Qt::LeftButton);
+            send(QEvent::MouseButtonRelease, pos, Qt::NoButton);
+            QTest::qWait(50);
+        };
+        auto *stage = find(window->contentItem(), "stageBackground");
+        QVERIFY(stage);
+        click(stage->mapToScene(QPointF(4, stage->height() / 2)).toPoint());
+        QTRY_COMPARE(window->property("selectionKind").toString(), QString("none"));
+        QTRY_VERIFY(!box->isVisible());
+        QTRY_COMPARE(find(window->contentItem(), "layerBar0")->property("selected").toBool(), false);
+
+        // Selected again from its bar, then a click on empty timeline space
+        // (the layer row, past the layer's end) drops it too.
+        bar = find(window->contentItem(), "layerBar0");
+        click(bar->mapToScene(QPointF(bar->width() / 2, bar->height() / 2)).toPoint());
+        QTRY_COMPARE(window->property("selectionKind").toString(), QString("layer"));
+        QTRY_VERIFY(box->isVisible());
+        click(bar->mapToScene(QPointF(bar->width() + pps * 0.5, bar->height() / 2)).toPoint());
+        QTRY_COMPARE(window->property("selectionKind").toString(), QString("none"));
+        QTRY_VERIFY(!box->isVisible());
+        QTRY_COMPARE(find(window->contentItem(), "layerBar0")->property("selected").toBool(), false);
+        click(bar->mapToScene(QPointF(bar->width() / 2, bar->height() / 2)).toPoint());
+        QTRY_COMPARE(window->property("selectionKind").toString(), QString("layer"));
+
         // Dragged back up onto the video lane: on the main track again.
         bar = find(window->contentItem(), "layerBar0");
         const QPoint back = bar->mapToScene(QPointF(bar->width() / 2, bar->height() / 2)).toPoint();
@@ -2202,9 +2323,13 @@ private slots:
         Theme theme(themeDir.path());
         Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
         QVERIFY(backend.openFile(dir.filePath("rows.reel")));
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir = state.path();
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
         engine.load(QUrl("qrc:/Main.qml"));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
@@ -2301,9 +2426,13 @@ private slots:
         Theme theme(themeDir.path());
         Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
         QVERIFY(backend.openFile(dir.filePath("ui.reel")));
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir = state.path();
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
         engine.load(QUrl("qrc:/Main.qml"));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
@@ -2420,9 +2549,13 @@ private slots:
         Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
         QVERIFY(backend.openFile(dir.filePath("t.reel")));
         QCOMPARE(backend.duration(), 5.0);
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir = state.path();
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 860);
@@ -2485,9 +2618,13 @@ private slots:
         Theme theme(themeDir.path());
         Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
         QVERIFY(backend.openFile(dir.filePath("e.reel")));
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir = state.path();
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 900);
@@ -2656,9 +2793,13 @@ private slots:
         Theme theme(themeDir.path());
         Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
         QVERIFY(backend.openFile(dir.filePath("e.reel")));
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir = state.path();
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 900);
@@ -2902,9 +3043,13 @@ private slots:
         Theme theme(themeDir.path());
         Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
         QVERIFY(backend.openFile(dir.filePath("e.reel")));
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir = state.path();
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 900);
@@ -3160,15 +3305,36 @@ private slots:
 
     // ---- Posting ----
 
+    void youtubePreviewKeepsDescriptionOutOfTitle()
+    {
+        QQmlEngine engine;
+        QQmlComponent component(&engine, QUrl("qrc:/SocialPreview.qml"));
+        QScopedPointer<QObject> preview(component.create());
+        QVERIFY2(preview, qPrintable(component.errorString()));
+        preview->setProperty("platform", "youtube");
+        preview->setProperty("caption", "An optional description");
+        auto *title = preview->findChild<QObject *>("socialCaption");
+        QVERIFY(title);
+        QCOMPARE(title->property("text").toString(), QString("Add a title…"));
+        preview->setProperty("title", "My Short");
+        QCOMPARE(title->property("text").toString(), QString("My Short"));
+        preview->setProperty("platform", "instagram");
+        QCOMPARE(title->property("text").toString(), QString("An optional description"));
+    }
+
     void socialPreviewEditingAndLayout()
     {
         QTemporaryDir state, themeDir;
         QQuickStyle::setStyle("Material");
         Theme theme(themeDir.path());
         Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir = state.path();
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
         engine.load(QUrl("qrc:/Main.qml"));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
@@ -3276,9 +3442,13 @@ private slots:
         backend.openUrl = [&](const QUrl &url) { opened = url; };
         backend.revealFile = [&](const QString &file) { revealed = file; };
         backend.postFolder = movies.path();  // not the real ~/Videos
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir = state.path();
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 900);
@@ -3439,9 +3609,13 @@ private slots:
         QVERIFY(backend.schedulerReady());
         QVERIFY(backend.openFile(dir.filePath("s.reel")));
 
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir = state.path();
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 900);
@@ -3662,9 +3836,13 @@ private slots:
         backend.postFolder = movies.path();
         backend.instagram()->graphBase = fake.base();
         backend.instagram()->pollIntervalMs = 20;
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir = state.path();
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 900);
@@ -3840,6 +4018,7 @@ private slots:
         QCOMPARE(opened.path(), QString("/auth"));
         QCOMPARE(auth.queryItemValue("client_id"), QString("cid.apps.googleusercontent.com"));
         QCOMPARE(auth.queryItemValue("access_type"), QString("offline"));
+        QCOMPARE(auth.queryItemValue("prompt", QUrl::FullyDecoded), QString("select_account consent"));
         QCOMPARE(auth.queryItemValue("code_challenge_method"), QString("S256"));
         QVERIFY(auth.queryItemValue("scope", QUrl::FullyDecoded).contains("https://www.googleapis.com/auth/youtube.upload"));
         const QUrl redirect(auth.queryItemValue("redirect_uri", QUrl::FullyDecoded));
@@ -3913,6 +4092,31 @@ private slots:
         QVERIFY(!revokedDone.first().at(0).toBool());
         QVERIFY(revokedDone.first().at(1).toString().contains("connect", Qt::CaseInsensitive));
         QVERIFY(!revoked.connected());
+    }
+
+    void youtubeRefusesUploadToDifferentChannel()
+    {
+        QTemporaryDir state, dir;
+        seedAccounts(state.path());
+        QFile video(dir.filePath("reel.mp4"));
+        QVERIFY(video.open(QIODevice::WriteOnly));
+        video.write("video");
+        video.close();
+        FakeGoogle fake;
+        fake.channelId = "UC-other-channel";
+        YouTubeApi api;
+        api.stateDir = state.path();
+        api.tokenUrl = fake.base() + "/token";
+        api.apiBase = fake.base() + "/youtube/v3";
+        api.uploadBase = fake.base() + "/upload/youtube/v3";
+        QTRY_VERIFY(api.connected());
+        QSignalSpy done(&api, &YouTubeApi::published);
+        api.publish({video.fileName(), "Description", "Title", {}});
+        QVERIFY(done.wait());
+        QVERIFY(!done.first().at(0).toBool());
+        QVERIFY(done.first().at(1).toString().contains("channel", Qt::CaseInsensitive));
+        QVERIFY(fake.callsTo("/upload/youtube/v3/videos").isEmpty());
+        QVERIFY(fake.uploaded.isEmpty());
     }
 
     // Accounts as they sit on disk once connected, for tests that start there.
@@ -4077,9 +4281,13 @@ private slots:
         backend.youtube()->tokenUrl = google.base() + "/token";
         backend.youtube()->apiBase = google.base() + "/youtube/v3";
         backend.youtube()->uploadBase = google.base() + "/upload/youtube/v3";
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir = state.path();
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 900);
@@ -4131,6 +4339,49 @@ private slots:
         QTRY_VERIFY(dialog->property("blocked").toBool());
         QTRY_VERIFY(!next->isEnabled());
         QVERIFY(findItem(window->contentItem(), "facebookConnect"));
+    }
+
+    void higgsfieldCountsSpending()
+    {
+        auto t = [](const char *action, double credits, const char *at) {
+            return QJsonObject{{"display_name", "x"}, {"action", action}, {"credits", credits}, {"created_at", at}};
+        };
+        const QJsonArray items{t("spend", -0.5, "2026-11-06T14:09:18.319304Z"), t("refund", 7.5, "2026-11-06T14:05:00Z"),
+                               t("spend", -7.5, "2026-11-06T14:04:00Z"), t("grant", 500, "2026-11-06T14:03:00Z"), t("deduct", -10, "2026-11-06T14:02:00Z"),
+                               t("spend", -5.82, "2026-11-06T05:46:52.196460Z")};
+        const QDateTime afternoon(QDate(2026, 11, 6), QTime(14, 0), QTimeZone::UTC);
+        // The refund cancels its spend; grants and expiring daily credits aren't spending.
+        QCOMPARE(HiggsfieldCredits::spentFrom(items, afternoon), 0.5);
+        QCOMPARE(HiggsfieldCredits::spentFrom(items, afternoon.addDays(-1)), 6.32);
+        QCOMPARE(HiggsfieldCredits::spentFrom(items, afternoon.addDays(1)), 0.0);
+        QCOMPARE(HiggsfieldCredits::spentFrom(items, QDateTime()), 6.32);  // all time
+        // A poll's fresh page goes ahead of the history, without repeats.
+        const QJsonArray merged = HiggsfieldCredits::mergeNewest(
+            QJsonArray{t("spend", -1, "2026-11-06T15:00:00Z"), items.first()}, items);
+        QCOMPARE(merged.size(), items.size() + 1);
+        QCOMPARE(merged.first().toObject().value("credits").toDouble(), -1.0);
+    }
+
+    void higgsfieldReadsMcpReplies()
+    {
+        const QJsonObject balance{{"credits", 649.27}, {"subscription_plan_type", "plus"}};
+        const QJsonObject reply{
+            {"jsonrpc", "2.0"},
+            {"id", 2},
+            {"result", QJsonObject{{"content", QJsonArray{QJsonObject{
+                                                   {"type", "text"},
+                                                   {"text", QString::fromUtf8(QJsonDocument(balance).toJson())}}}}}}};
+        const QByteArray json = QJsonDocument(reply).toJson(QJsonDocument::Compact);
+        QCOMPARE(HiggsfieldCredits::toolResult(HiggsfieldCredits::rpcMessage(json)).value("credits").toDouble(), 649.27);
+        // The same answer as server-sent events, after a progress notice.
+        const QByteArray sse = QByteArray("event: message\r\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\r\n\r\n")
+                               + "event: message\r\ndata: " + json + "\r\n\r\n";
+        QCOMPARE(HiggsfieldCredits::toolResult(HiggsfieldCredits::rpcMessage(sse)).value("subscription_plan_type").toString(),
+                 QString("plus"));
+        // Structured content wins over text.
+        const QJsonObject structured{{"result", QJsonObject{{"structuredContent", QJsonObject{{"credits", 3}}},
+                                                            {"content", QJsonArray{}}}}};
+        QCOMPARE(HiggsfieldCredits::toolResult(structured).value("credits").toInt(), 3);
     }
 
     void mcpManagesEffects()

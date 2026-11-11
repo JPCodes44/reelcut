@@ -81,12 +81,18 @@ QLocale Translator::formatLocale(const QString &language) {
 
 QString Translator::translate(const char *, const char *sourceText, const char *, int n) const {
     // A null string tells Qt there is no translation, so it shows the English.
-    const QJsonValue value = m_strings.value(QString::fromUtf8(sourceText));
+    QJsonValue value;
+    QString language;
+    {
+        QReadLocker lock(&m_lock);
+        value = m_strings.value(QString::fromUtf8(sourceText));
+        language = m_language;
+    }
     if (value.isString())
         return value.toString();
     if (value.isObject()) {
         const QJsonObject forms = value.toObject();
-        const QString form = forms.value(n < 0 ? "other" : pluralCategory(m_language, n)).toString();
+        const QString form = forms.value(n < 0 ? "other" : pluralCategory(language, n)).toString();
         return form.isEmpty() ? forms.value("other").toString() : form;
     }
     return {};
@@ -126,8 +132,11 @@ void Translator::reload() {
                 strings.insert(it.key(), it.value());
     }
 
-    m_language = language;
-    m_strings = strings;
+    {
+        QWriteLocker lock(&m_lock);
+        m_language = language;
+        m_strings = strings;
+    }
     // Dates, numbers, and Qt's own day and month names follow the language
     // too, and right-to-left languages mirror the window.
     const QLocale locale = formatLocale(language);

@@ -11,6 +11,8 @@
 #include <QUrlQuery>
 
 FacebookApi::FacebookApi(QObject *parent) : Publisher(parent), m_net(new QNetworkAccessManager(this)) {
+    // A stalled request (no bytes for 2 min) fails instead of hanging forever.
+    m_net->setTransferTimeout(120000);
     // After the constructor, so tests can set stateDir first.
     QTimer::singleShot(0, this, [this] { load(); });
 }
@@ -56,7 +58,7 @@ QNetworkReply *FacebookApi::postForm(const QString &path, const QList<QPair<QStr
 }
 
 void FacebookApi::connectToken(const QString &userToken) {
-    Net::whenDone(get("/me/accounts", {{"fields", "id,name,access_token"}, {"limit", "100"}}, userToken.trimmed()),
+    Net::whenDone(get("/me/accounts", {{"fields", "id,name,access_token"}, {"limit", "100"}}, userToken.trimmed()), this,
                   [this](const Net::Response &r) {
         static const QRegularExpression pageId("^[0-9]+$");
         QVector<Page> pages;
@@ -106,7 +108,7 @@ void FacebookApi::publish(const PostRequest &post) {
         return finish(false, tr("Connect a Facebook Page first."));
     m_busy = true;
     emit progress(tr("Starting the reel on Facebook…"), 0.0);
-    Net::whenDone(postForm("/" + m_pageId + "/video_reels", {{"upload_phase", "start"}}), [this, post](const Net::Response &r) {
+    Net::whenDone(postForm("/" + m_pageId + "/video_reels", {{"upload_phase", "start"}}), this, [this, post](const Net::Response &r) {
         const QString video = r.json.value("video_id").toString();
         QUrl uri(r.json.value("upload_url").toString());
         if (!uri.isValid() || uri.isEmpty())
@@ -135,7 +137,7 @@ void FacebookApi::upload(const QString &video, const QUrl &uri, const PostReques
         if (total > 0)
             emit progress(tr("Uploading the video to Facebook…"), double(sent) / total);
     });
-    Net::whenDone(reply, [this, video, post](const Net::Response &r) {
+    Net::whenDone(reply, this, [this, video, post](const Net::Response &r) {
         if (!r.error.isEmpty() || !r.json.value("success").toBool())
             return finish(false, tr("The upload to Facebook didn't go through: %1")
                                      .arg(r.error.isEmpty() ? tr("refused") : r.error));
@@ -152,7 +154,7 @@ void FacebookApi::finishUpload(const QString &video, const PostRequest &post) {
     } else {
         form << qMakePair(QString("video_state"), QString("PUBLISHED"));
     }
-    Net::whenDone(postForm("/" + m_pageId + "/video_reels", form), [this, video, post](const Net::Response &r) {
+    Net::whenDone(postForm("/" + m_pageId + "/video_reels", form), this, [this, video, post](const Net::Response &r) {
         if (!r.error.isEmpty() || !r.json.value("success").toBool())
             return finish(false, tr("Facebook didn't publish it: %1").arg(r.error.isEmpty() ? tr("refused") : r.error));
         waitForPublishing(video, post, 0);
@@ -161,7 +163,7 @@ void FacebookApi::finishUpload(const QString &video, const PostRequest &post) {
 
 void FacebookApi::waitForPublishing(const QString &video, const PostRequest &post, int tries) {
     emit progress(tr("Facebook is processing the video…"), -1);
-    Net::whenDone(get("/" + video, {{"fields", "status"}}, m_pageToken), [this, video, post, tries](const Net::Response &r) {
+    Net::whenDone(get("/" + video, {{"fields", "status"}}, m_pageToken), this, [this, video, post, tries](const Net::Response &r) {
         if (!r.error.isEmpty())
             return finish(false, tr("Couldn't check on the Facebook upload: %1").arg(r.error));
         const QJsonObject status = r.json.value("status").toObject();
@@ -176,7 +178,7 @@ void FacebookApi::waitForPublishing(const QString &video, const PostRequest &pos
             return finish(false, tr("Facebook couldn't use the video: %1").arg(why));
         }
         if (published == "published" || published == "scheduled") {
-            Net::whenDone(get("/" + video, {{"fields", "permalink_url"}}, m_pageToken), [this, video, post](const Net::Response &p) {
+            Net::whenDone(get("/" + video, {{"fields", "permalink_url"}}, m_pageToken), this, [this, video, post](const Net::Response &p) {
                 QString link = p.json.value("permalink_url").toString();
                 if (link.startsWith('/'))
                     link = "https://www.facebook.com" + link;

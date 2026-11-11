@@ -64,6 +64,9 @@ struct Response {
 // the way Meta ({"error": {"message"}}) and Google ({"error": {"message"}}
 // or {"error": "...", "error_description"}) send it.
 void whenDone(QNetworkReply *reply, const std::function<void(const Response &)> &then);
+// The same, with `context` owning `then`: if it's gone by the time the reply
+// is in, `then` isn't called (and the reply still goes).
+void whenDone(QNetworkReply *reply, QObject *context, const std::function<void(const Response &)> &then);
 
 // An application/x-www-form-urlencoded body. Every value is percent-encoded,
 // so a "+" or "&" in a caption arrives as typed.

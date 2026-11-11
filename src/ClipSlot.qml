@@ -27,7 +27,10 @@ Item {
         index = i
         playing = play
         const c = clipData
-        syncMask(c ? (sourceSeconds - c.in) / c.speed : 0, play)
+        // A NaN or infinite position ends up as a garbage seek in the media backend.
+        if (!isFinite(sourceSeconds)) sourceSeconds = c ? c.in || 0 : 0
+        const speed = c && c.speed > 0 ? c.speed : 1
+        syncMask(c ? (sourceSeconds - c.in) / speed : 0, play)
         if (!c || c.still) {
             pendingSeek = -1
             mediaPlayer.stop()
@@ -35,7 +38,7 @@ Item {
             return
         }
         const url = "file://" + c.path
-        mediaPlayer.playbackRate = c.speed
+        mediaPlayer.playbackRate = speed
         if (mediaPlayer.source.toString() !== encodeURI(url) && mediaPlayer.source.toString() !== url) {
             pendingSeek = sourceSeconds * 1000
             mediaPlayer.source = url
@@ -56,6 +59,7 @@ Item {
         if (maskPlayer.source.toString() !== url)
             maskPlayer.source = url
         if (url === "") return
+        if (!isFinite(localSeconds)) localSeconds = 0
         maskPlayer.position = Math.max(0, localSeconds) * 1000
         if (play) maskPlayer.play(); else maskPlayer.pause()
     }
@@ -72,17 +76,20 @@ Item {
     function reached() {
         const c = clipData
         if (!c || c.still) return -1
-        return c.start + Math.max(0, mediaPlayer.position / 1000 - c.in) / c.speed
+        return c.start + Math.max(0, mediaPlayer.position / 1000 - c.in) / (c.speed > 0 ? c.speed : 1)
     }
     function finished() {
         const c = clipData
         return c && !c.still && (mediaPlayer.position / 1000 >= c.out - 0.02 || mediaPlayer.mediaStatus === MediaPlayer.EndOfMedia)
     }
 
+    MediaDevices { id: mediaDevices }
+
     MediaPlayer {
         id: mediaPlayer
         videoOutput: video
-        audioOutput: AudioOutput { volume: slot.volume }
+        // Follow the system's default output, so switching it (Super+Q) moves Reelcut's sound too.
+        audioOutput: AudioOutput { device: mediaDevices.defaultAudioOutput; volume: slot.volume }
         onMediaStatusChanged: {
             if ((mediaStatus === MediaPlayer.LoadedMedia || mediaStatus === MediaPlayer.BufferedMedia) && slot.pendingSeek >= 0) {
                 position = slot.pendingSeek
@@ -108,7 +115,7 @@ Item {
     Item {
         id: bodyLayer
         anchors.fill: parent
-        readonly property bool active: slot.clipData !== null && slot.clipData.bodyMode >= 0 && slot.clipData.mask !== ""
+        readonly property bool active: slot.clipData !== null && slot.clipData.bodyMode >= 0 && !!slot.clipData.mask
         layer.enabled: active
         layer.effect: ShaderEffect {
             property variant mask: ShaderEffectSource {

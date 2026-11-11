@@ -12,7 +12,13 @@
 namespace Net {
 
 void whenDone(QNetworkReply *reply, const std::function<void(const Response &)> &then) {
-    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, then] {
+    whenDone(reply, reply, then);
+}
+
+void whenDone(QNetworkReply *reply, QObject *context, const std::function<void(const Response &)> &then) {
+    if (!reply)
+        return;
+    QObject::connect(reply, &QNetworkReply::finished, context ? context : reply, [reply, then] {
         Response r;
         r.body = reply->readAll();
         r.json = QJsonDocument::fromJson(r.body).object();

@@ -40,6 +40,8 @@ QByteArray page(const QString &message) {
 }  // namespace
 
 YouTubeApi::YouTubeApi(QObject *parent) : Publisher(parent), m_net(new QNetworkAccessManager(this)) {
+    // A stalled request (no bytes for 2 min) fails instead of hanging forever.
+    m_net->setTransferTimeout(120000);
     QTimer::singleShot(0, this, [this] { load(); });
 }
 
@@ -78,8 +80,18 @@ void YouTubeApi::connectClient(const QString &clientId, const QString &clientSec
             socket->setParent(this);
             connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
             connect(socket, &QTcpSocket::readyRead, this, [this, socket] {
-                if (!socket->canReadLine())
+                // One request per connection: whatever follows its first
+                // line (headers, a second request) is ignored.
+                if (socket->property("answered").toBool()) {
+                    socket->readAll();
                     return;
+                }
+                if (!socket->canReadLine()) {
+                    if (socket->bytesAvailable() > 16 * 1024)  // no line ever coming
+                        socket->abort();
+                    return;
+                }
+                socket->setProperty("answered", true);
                 // "GET /?state=…&code=… HTTP/1.1"
                 const QList<QByteArray> request = socket->readLine().trimmed().split(' ');
                 const QUrlQuery query(QUrl("http://x" + QString::fromUtf8(request.value(1))));
@@ -87,6 +99,13 @@ void YouTubeApi::connectClient(const QString &clientId, const QString &clientSec
                 const QString error = query.queryItemValue("error", QUrl::FullyDecoded);
                 if (code.isEmpty() && error.isEmpty()) {  // the browser asking for a favicon, say
                     socket->write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    socket->disconnectFromHost();
+                    return;
+                }
+                // A late answer (another tab, a reload) once this sign-in is
+                // over: it can't start or end one.
+                if (!m_listener) {
+                    socket->write(page(tr("This sign-in is already over. Go back to Reelcut.")));
                     socket->disconnectFromHost();
                     return;
                 }
@@ -113,7 +132,7 @@ void YouTubeApi::connectClient(const QString &clientId, const QString &clientSec
     q.addQueryItem("scope", QString::fromLatin1(QUrl::toPercentEncoding(
                                 "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly")));
     q.addQueryItem("access_type", "offline");
-    q.addQueryItem("prompt", "consent");
+    q.addQueryItem("prompt", "select_account%20consent");
     q.addQueryItem("state", m_state);
     q.addQueryItem("code_challenge", QString::fromLatin1(challenge));
     q.addQueryItem("code_challenge_method", "S256");
@@ -149,7 +168,7 @@ void YouTubeApi::signedIn(const QString &code) {
     stopListening();
     const QString id = m_pendingId, secret = m_pendingSecret;
     Net::whenDone(postToken({{"code", code}, {"client_id", id}, {"client_secret", secret}, {"redirect_uri", m_redirect},
-                             {"grant_type", "authorization_code"}, {"code_verifier", m_verifier}}),
+                             {"grant_type", "authorization_code"}, {"code_verifier", m_verifier}}), this,
                   [this, id, secret](const Net::Response &r) {
         const QString access = r.json.value("access_token").toString();
         const QString refresh = r.json.value("refresh_token").toString();
@@ -159,8 +178,8 @@ void YouTubeApi::signedIn(const QString &code) {
         QNetworkRequest request(QUrl(apiBase + "/channels?part=snippet&mine=true"));
         request.setRawHeader("Authorization", "Bearer " + access.toUtf8());
         const QDateTime expires = QDateTime::currentDateTimeUtc().addSecs(r.json.value("expires_in").toInt(3600));
-        Net::whenDone(m_net->get(request), [this, id, secret, access, refresh, expires](const Net::Response &c) {
-            const QJsonObject channel = c.json.value("items").toArray().first().toObject();
+        Net::whenDone(m_net->get(request), this, [this, id, secret, access, refresh, expires](const Net::Response &c) {
+            const QJsonObject channel = c.json.value("items").toArray().at(0).toObject();
             const QString title = channel.value("snippet").toObject().value("title").toString();
             if (!c.error.isEmpty() || channel.value("id").toString().isEmpty())
                 return failConnect(c.error.isEmpty() ? tr("This Google account has no YouTube channel yet. Make one on YouTube first.")
@@ -197,7 +216,7 @@ void YouTubeApi::withAccess(const std::function<void(const QString &error)> &the
     if (!m_accessToken.isEmpty() && QDateTime::currentDateTimeUtc().secsTo(m_accessExpires) > 60)
         return then({});
     Net::whenDone(postToken({{"client_id", m_clientId}, {"client_secret", m_clientSecret},
-                             {"refresh_token", m_refreshToken}, {"grant_type", "refresh_token"}}),
+                             {"refresh_token", m_refreshToken}, {"grant_type", "refresh_token"}}), this,
                   [this, then](const Net::Response &r) {
         if (r.json.value("error").toString() == "invalid_grant") {
             // Revoked, or expired: Google ends refresh tokens of apps still in
@@ -224,7 +243,19 @@ void YouTubeApi::publish(const PostRequest &post) {
     withAccess([this, post](const QString &error) {
         if (!error.isEmpty())
             return finish(false, error);
-        startUpload(post);
+        // Browser channel switches do not change the channel authorized by
+        // our saved token. Verify that identity before sending any video.
+        QNetworkRequest request(QUrl(apiBase + "/channels?part=snippet&mine=true"));
+        request.setRawHeader("Authorization", "Bearer " + m_accessToken.toUtf8());
+        Net::whenDone(m_net->get(request), this, [this, post](const Net::Response &r) {
+            if (!r.error.isEmpty())
+                return finish(false, tr("Couldn't verify your YouTube channel: %1").arg(r.error));
+            const QJsonArray channels = r.json.value("items").toArray();
+            if (channels.size() != 1 || m_channelId.isEmpty()
+                || channels.first().toObject().value("id").toString() != m_channelId)
+                return finish(false, tr("YouTube authorized a different channel than %1. Connect YouTube again and choose the channel you want to post to.").arg(m_channelTitle));
+            startUpload(post);
+        });
     });
 }
 
@@ -258,7 +289,7 @@ void YouTubeApi::startUpload(const PostRequest &post) {
     request.setRawHeader("X-Upload-Content-Length", QByteArray::number(info.size()));
     request.setRawHeader("X-Upload-Content-Type", "video/mp4");
     emit progress(tr("Starting the upload to YouTube…"), 0.0);
-    Net::whenDone(m_net->post(request, QJsonDocument(video).toJson(QJsonDocument::Compact)), [this, post](const Net::Response &r) {
+    Net::whenDone(m_net->post(request, QJsonDocument(video).toJson(QJsonDocument::Compact)), this, [this, post](const Net::Response &r) {
         const QUrl session(QString::fromUtf8(r.location));
         if (!r.error.isEmpty() || !session.isValid() || session.isEmpty())
             return finish(false, tr("YouTube wouldn't start the upload: %1")
@@ -282,7 +313,7 @@ void YouTubeApi::sendBytes(const QUrl &session, const PostRequest &post) {
         if (total > 0)
             emit progress(tr("Uploading the video to YouTube…"), double(sent) / total);
     });
-    Net::whenDone(reply, [this, post](const Net::Response &r) {
+    Net::whenDone(reply, this, [this, post](const Net::Response &r) {
         const QString id = r.json.value("id").toString();
         if (!r.error.isEmpty() || id.isEmpty())
             return finish(false, tr("The upload to YouTube didn't go through: %1")

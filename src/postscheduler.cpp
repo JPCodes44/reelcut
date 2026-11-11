@@ -15,6 +15,8 @@
 #include <QTimer>
 
 PostScheduler::PostScheduler(QObject *parent) : QObject(parent), m_net(new QNetworkAccessManager(this)) {
+    // A stalled request (no bytes for 2 min) fails instead of hanging forever.
+    m_net->setTransferTimeout(120000);
     QTimer::singleShot(0, this, [this] {
         load();
         if (configured())
@@ -64,7 +66,8 @@ void PostScheduler::call(const QString &kind, const QString &path, QJsonObject a
     const QByteArray body =
         QJsonDocument(QJsonObject{{"path", path}, {"args", args}, {"format", "json"}}).toJson(QJsonDocument::Compact);
     QNetworkReply *reply = m_net->post(request, body);
-    connect(reply, &QNetworkReply::finished, reply, [reply, then] {
+    // `then` works on this object, so the reply is dropped if it's gone first.
+    connect(reply, &QNetworkReply::finished, this, [reply, then] {
         const QJsonObject json = QJsonDocument::fromJson(reply->readAll()).object();
         reply->deleteLater();
         if (json.value("status").toString() == "success")
@@ -98,12 +101,15 @@ void PostScheduler::schedule(const QString &file, const QString &title, const QS
     call("mutation", "posts:uploadUrl", {}, [=, this](bool ok, const QJsonValue &value, const QString &error) {
         if (!ok)
             return finish(false, tr("The scheduler didn't answer: %1").arg(error));
+        const QUrl uploadUrl(value.toString());
+        if (!uploadUrl.isValid() || uploadUrl.scheme().isEmpty())
+            return finish(false, tr("The scheduler didn't answer: %1").arg(tr("no upload address came back")));
         auto *source = new QFile(file, this);
         if (!source->open(QIODevice::ReadOnly)) {
             delete source;
             return finish(false, tr("Couldn't read %1.").arg(file));
         }
-        QNetworkRequest request(QUrl(value.toString()));
+        QNetworkRequest request(uploadUrl);
         request.setHeader(QNetworkRequest::ContentTypeHeader, "video/mp4");
         QNetworkReply *upload = m_net->post(request, source);
         source->setParent(upload);

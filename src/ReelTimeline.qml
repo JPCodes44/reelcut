@@ -18,14 +18,16 @@ Rectangle {
     property int selectedLayer: -1
     property real zoom: 1
     readonly property real gutter: 74
-    readonly property real fitPps: Math.max(8, (width - gutter - 24) / Math.max(backend.duration, 5))
+    // Finite duration only: a NaN here would make every x and width NaN.
+    readonly property real safeDuration: isFinite(backend.duration) ? Math.max(0, backend.duration) : 0
+    readonly property real fitPps: Math.max(8, (width - gutter - 24) / Math.max(safeDuration, 5))
     readonly property real pps: fitPps * zoom
     readonly property real rulerH: 22
     readonly property real videoH: 76
     readonly property real laneH: 28
     property real musicH: 52
     readonly property real layerH: 40
-    readonly property int layerRows: backend.layers.reduce((n, l) => Math.max(n, l.row + 1), 0)
+    readonly property int layerRows: backend.layers.reduce((n, l) => Math.max(n, (l.row || 0) + 1), 0)
     // What letting go of the clip or layer being dragged up or down would do
     // (Backend::dropTarget): action none, join, newRow, toTrack, swap or
     // swapTrack, and the layer row it concerns.
@@ -62,17 +64,57 @@ Rectangle {
     }
     // Drops run here, not in the dragged item: the move destroys that item,
     // and nothing after it in its own handler would run. They select what moved.
+    // They also run after the release that asked for them, never inside it:
+    // the move rebuilds the clip and layer lanes, and destroying the delegate
+    // whose MouseArea is still handling the release can crash.
     function select(result) {
+        if (!result || result.index < 0) return
         if (result.kind === "layer") layerSelected(result.index)
         else if (result.kind === "clip") clipSelected(result.index)
     }
     function dropClip(index, start, moved) {
         drop = { action: "none", row: -1 }
+        if (!isFinite(start) || !isFinite(moved)) return
+        Qt.callLater(root.dropClipNow, index, start, moved)
+    }
+    function dropClipNow(index, start, moved) {
+        if (index < 0 || index >= backend.clips.length) return
         select(backend.dropClip(index, start, moved))
     }
-    function dropLayer(index, start, moved, time) {
+    // undoFirst: take back the undo step the sideways drag left first.
+    function dropLayer(index, start, moved, time, undoFirst) {
         drop = { action: "none", row: -1 }
+        if (!isFinite(start) || !isFinite(moved) || !isFinite(time)) {
+            if (undoFirst) Qt.callLater(backend.undo)
+            return
+        }
+        Qt.callLater(root.dropLayerNow, index, start, moved, time, undoFirst)
+    }
+    function dropLayerNow(index, start, moved, time, undoFirst) {
+        if (undoFirst) backend.undo()
+        if (index < 0 || index >= backend.layers.length) return
         select(backend.dropLayer(index, start, moved, time))
+    }
+    function moveClipNow(from, to) {
+        const n = backend.clips.length
+        if (from < 0 || from >= n || to < 0 || to >= n || from === to) return
+        backend.moveClip(from, to)
+        clipSelected(to)
+    }
+
+    // Where a video dragged in from outside would land: a clip index, or -1.
+    property int dropIndex: -1
+    // The clip index a drop at (x, y) in the timeline inserts at; -1 when
+    // (x, y) is off the video lane, which adds at the end instead.
+    function insertIndexAt(x, y) {
+        if (y < videoY - laneGap || y > videoY + videoH + laneGap || x < gutter)
+            return -1
+        const t = (x - gutter + flick.contentX) / pps
+        const clips = backend.clips
+        for (let i = 0; i < clips.length; ++i)
+            if (t < clips[i].start + clips[i].duration / 2)
+                return i
+        return clips.length
     }
 
     signal seekRequested(real t)
@@ -82,6 +124,8 @@ Rectangle {
     signal effectSelected(int index)
     signal captionsSelected()
     signal musicSelected()
+    // A press on empty space, away from every clip, layer and text.
+    signal emptyClicked()
 
     // Scene coordinates avoid feedback as the timeline itself grows upward.
     // Keep the handle outside the horizontal Flickable so it spans the view.
@@ -181,7 +225,7 @@ Rectangle {
         id: flick
         anchors.fill: parent
         anchors.leftMargin: root.gutter
-        contentWidth: Math.max(width, backend.duration * root.pps + 40)
+        contentWidth: Math.max(width, root.safeDuration * root.pps + 40)
         contentHeight: height
         clip: true
         boundsBehavior: Flickable.StopAtBounds
@@ -196,12 +240,13 @@ Rectangle {
             }
         }
 
-        // Clicking or dragging on the ruler (or any empty space) moves the playhead.
+        // Clicking or dragging on the ruler (or any empty space) moves the playhead
+        // and drops the selection.
         MouseArea {
             width: flick.contentWidth
             height: flick.height
             preventStealing: true
-            onPressed: function(mouse) { root.seekRequested(mouse.x / root.pps) }
+            onPressed: function(mouse) { root.emptyClicked(); root.seekRequested(Math.max(0, mouse.x / root.pps)) }
             onPositionChanged: function(mouse) { if (pressed) root.seekRequested(Math.max(0, mouse.x / root.pps)) }
         }
 
@@ -221,7 +266,7 @@ Rectangle {
 
         // Ruler
         Repeater {
-            model: Math.ceil(backend.duration) + 1
+            model: Math.ceil(root.safeDuration) + 1
             delegate: Item {
                 required property int index
                 readonly property int every: root.pps < 18 ? 5 : root.pps < 40 ? 2 : 1
@@ -252,11 +297,11 @@ Rectangle {
                 property real dragOffset: 0
                 property real dragOffsetY: 0
                 readonly property bool held: dragOffset !== 0 || dragOffsetY !== 0
-                x: modelData.start * root.pps + dragOffset
+                x: (modelData.start || 0) * root.pps + dragOffset
                 z: held ? 10 : 0
                 opacity: held ? 0.8 : 1
                 y: root.videoY + dragOffsetY
-                width: Math.max(4, modelData.duration * root.pps - 2)
+                width: Math.max(4, (modelData.duration || 0) * root.pps - 2)
                 height: root.videoH
                 radius: Math.min(4, theme.radius)
                 color: modelData.offline ? "#5a2020" : "#26262c"
@@ -272,14 +317,19 @@ Rectangle {
                         model: Math.max(1, Math.ceil((clipItem.width - 4) / 44))
                         delegate: Image {
                             required property int index
-                            readonly property real tileSeconds: 44 / root.pps * clipItem.modelData.speed
+                            readonly property real tileSeconds: 44 / root.pps * (clipItem.modelData.speed || 1)
+                            // Zoomed in, a long clip has hundreds of tiles; each frame is an
+                            // ffmpeg run, so only tiles near the view ask for one.
+                            readonly property real tileX: clipItem.x + 2 + index * 44
+                            readonly property bool nearView: tileX + 44 > flick.contentX - 400
+                                                             && tileX < flick.contentX + flick.width + 400
                             width: 44
                             height: root.videoH - 4
                             fillMode: Image.PreserveAspectCrop
                             asynchronous: true
                             cache: true
                             sourceSize.height: 90
-                            source: clipItem.modelData.thumb > 0
+                            source: nearView && clipItem.modelData.thumb > 0
                                     ? "image://thumbs/" + clipItem.modelData.thumb + "/"
                                       + (clipItem.modelData.still ? 0
                                          : Math.round(Math.min(clipItem.modelData.out - 0.05, clipItem.modelData.in + (index + 0.5) * tileSeconds) * 10) * 100)
@@ -341,7 +391,7 @@ Rectangle {
                         startY = p.y
                         dragging = false
                         root.clipSelected(clipItem.index)
-                        root.seekRequested(clipItem.modelData.start + mouse.x / root.pps)
+                        root.seekRequested((clipItem.modelData.start || 0) + mouse.x / root.pps)
                     }
                     onPositionChanged: function(mouse) {
                         if (!pressed) return
@@ -357,7 +407,7 @@ Rectangle {
                     }
                     onReleased: function(mouse) {
                         if (dragging && root.layerDrop) {
-                            const start = Math.max(0, clipItem.modelData.start + clipItem.dragOffset / root.pps)
+                            const start = Math.max(0, (clipItem.modelData.start || 0) + clipItem.dragOffset / root.pps)
                             const moved = root.rowAt(root.videoY + root.videoH / 2 + clipItem.dragOffsetY)
                             clipItem.dragOffset = 0
                             clipItem.dragOffsetY = 0
@@ -370,13 +420,11 @@ Rectangle {
                         if (dragging) {
                             // Drop where the clip's middle lands.
                             const middle = clipItem.modelData.start + clipItem.modelData.duration / 2 + clipItem.dragOffset / root.pps
-                            const target = backend.locate(Math.max(0, Math.min(middle, backend.duration))).index
+                            const target = isFinite(middle) ? backend.locate(Math.max(0, Math.min(middle, backend.duration))).index : -1
                             clipItem.dragOffset = 0
                             dragging = false
-                            if (target >= 0 && target !== clipItem.index) {
-                                backend.moveClip(clipItem.index, target)
-                                root.clipSelected(target)
-                            }
+                            if (target >= 0 && target < backend.clips.length && target !== clipItem.index)
+                                Qt.callLater(root.moveClipNow, clipItem.index, target)
                         }
                     }
                     onCanceled: { clipItem.dragOffset = 0; clipItem.dragOffsetY = 0; dragging = false; root.drop = { action: "none", row: -1 } }
@@ -403,12 +451,14 @@ Rectangle {
                                 backend.checkpoint()
                                 root.clipSelected(clipItem.index)
                                 startX = mapToItem(flick.contentItem, mouse.x, 0).x
-                                startValue = clipItem.modelData[parent.modelData]
+                                startValue = clipItem.modelData[parent.modelData] || 0
                             }
                             onPositionChanged: function(mouse) {
                                 if (!pressed) return
                                 const dx = mapToItem(flick.contentItem, mouse.x, 0).x - startX
-                                backend.setClipValue(clipItem.index, parent.modelData, startValue + dx / root.pps * clipItem.modelData.speed)
+                                const v = startValue + dx / root.pps * (clipItem.modelData.speed || 1)
+                                if (isFinite(v))
+                                    backend.setClipValue(clipItem.index, parent.modelData, v)
                             }
                         }
                     }
@@ -425,7 +475,7 @@ Rectangle {
             readonly property bool onTrack: action === "toTrack" || action === "swapTrack"
             visible: root.layerDrop
             x: 0
-            y: onTrack ? root.videoY : root.layerY(root.drop.row)
+            y: onTrack ? root.videoY : root.layerY(Math.max(0, root.drop.row || 0))
             z: 9
             width: flick.contentWidth
             height: onTrack ? root.videoH : root.layerH
@@ -485,13 +535,18 @@ Rectangle {
                         delegate: Image {
                             required property int index
                             readonly property real tileSeconds: 30 / root.pps * (layerBar.modelData.speed || 1)
+                            // As on the video lane: zoomed in, only tiles near the view
+                            // ask for a frame (each one is an ffmpeg run).
+                            readonly property real tileX: layerBar.x + 2 + index * 30
+                            readonly property bool nearView: tileX + 30 > flick.contentX - 400
+                                                             && tileX < flick.contentX + flick.width + 400
                             width: 30
                             height: root.layerH - 4
                             fillMode: Image.PreserveAspectCrop
                             asynchronous: true
                             cache: true
                             sourceSize.height: 60
-                            source: layerBar.modelData.thumb > 0
+                            source: nearView && layerBar.modelData.thumb > 0
                                     ? "image://thumbs/" + layerBar.modelData.thumb + "/"
                                       + (layerBar.modelData.still ? 0
                                          : Math.round(Math.min(layerBar.modelData.out - 0.05, layerBar.modelData.in + (index + 0.5) * tileSeconds) * 10) * 100)
@@ -532,9 +587,9 @@ Rectangle {
                         const p = mapToItem(flick.contentItem, mouse.x, mouse.y)
                         startX = p.x
                         startY = p.y
-                        startStart = layerBar.modelData.start
-                        startIn = layerBar.modelData.in
-                        startOut = layerBar.modelData.out
+                        startStart = layerBar.modelData.start || 0
+                        startIn = layerBar.modelData.in || 0
+                        startOut = layerBar.modelData.out || 0
                         moving = false
                         root.layerSelected(layerBar.index)
                     }
@@ -548,25 +603,30 @@ Rectangle {
                             moving = true
                             backend.checkpoint()
                         }
-                        const d = layerBar.modelData
+                        // The layer list shrank under the drag (an undo, say): stop editing.
+                        if (layerBar.index >= backend.layers.length) return
+                        if (!isFinite(dt) || !isFinite(dy)) return
+                        const speed = layerBar.modelData.speed > 0 ? layerBar.modelData.speed : 1
                         if (part === "start") {
                             // The in point and the start move together, so the
                             // rest of the layer stays where it is.
-                            const minShift = Math.max(-startIn / d.speed, -startStart)
-                            const shift = Math.max(minShift, Math.min(dt, (startOut - startIn) / d.speed - 1 / 30))
-                            backend.setLayerValue(layerBar.index, "in", startIn + shift * d.speed)
+                            const minShift = Math.max(-startIn / speed, -startStart)
+                            const shift = Math.max(minShift, Math.min(dt, (startOut - startIn) / speed - 1 / 30))
+                            backend.setLayerValue(layerBar.index, "in", startIn + shift * speed)
                             backend.setLayerValue(layerBar.index, "start", startStart + shift)
                         } else if (part === "end") {
-                            backend.setLayerValue(layerBar.index, "out", startOut + dt * d.speed)
+                            backend.setLayerValue(layerBar.index, "out", startOut + dt * speed)
                         } else {
                             backend.setLayerValue(layerBar.index, "start", Math.max(0, startStart + dt))
                             layerBar.dragOffsetY = dy
-                            root.drop = backend.dropTarget(layerBar.modelData.row + 1, moved(), layerBar.index)
+                            const rows = moved()
+                            root.drop = isFinite(rows) ? backend.dropTarget((layerBar.modelData.row || 0) + 1, rows, layerBar.index)
+                                                       : { action: "none", row: -1 }
                         }
                     }
                     // Rows the bar has moved up (negative) or down.
                     function moved() {
-                        const row = layerBar.modelData.row + 1
+                        const row = (layerBar.modelData.row || 0) + 1
                         const mid = root.layerY(row - 1) + root.layerH / 2
                         return root.rowAt(mid + layerBar.dragOffsetY) - row
                     }
@@ -574,17 +634,17 @@ Rectangle {
                         const rows = moved()
                         layerBar.dragOffsetY = 0
                         if (!moving) {
-                            root.seekRequested(layerBar.modelData.start + mouse.x / root.pps)
+                            root.drop = { action: "none", row: -1 }
+                            root.seekRequested((layerBar.modelData.start || 0) + mouse.x / root.pps)
                             return
                         }
                         if (root.layerDrop) {
                             // The sideways move above already left an undo
                             // step; take it back so one Ctrl+Z undoes the drop.
+                            // Both run after this release (see dropLayer).
                             const start = Math.max(0, startStart + (mapToItem(flick.contentItem, mouse.x, 0).x - startX) / root.pps)
                             const time = mapToItem(flick.contentItem, mouse.x, 0).x / root.pps
-                            const index = layerBar.index
-                            backend.undo()
-                            root.dropLayer(index, start, rows, time)
+                            root.dropLayer(layerBar.index, start, rows, time, true)
                         }
                     }
                     onCanceled: { layerBar.dragOffsetY = 0; root.drop = { action: "none", row: -1 } }
@@ -630,7 +690,7 @@ Rectangle {
                 readonly property var modelData: backend.clips[index] || ({})
                 objectName: "transition" + index
                 visible: (modelData.overlap || 0) > 0
-                x: (modelData.start + modelData.duration - (modelData.overlap || 0)) * root.pps
+                x: ((modelData.start || 0) + (modelData.duration || 0) - (modelData.overlap || 0)) * root.pps
                 y: root.videoY + root.videoH - 14
                 z: 5
                 width: Math.max(10, (modelData.overlap || 0) * root.pps)
@@ -653,9 +713,9 @@ Rectangle {
                 // Items stay put while their entry changes, so a drag survives edits.
                 readonly property var modelData: backend.overlays[index] || ({})
                 required property int index
-                x: modelData.start * root.pps
+                x: (modelData.start || 0) * root.pps
                 y: root.textY
-                width: Math.max(3, (modelData.end - modelData.start) * root.pps - 1)
+                width: Math.max(3, ((modelData.end || 0) - (modelData.start || 0)) * root.pps - 1)
                 height: root.laneH
                 radius: Math.min(4, theme.radius)
                 color: index === root.selectedOverlay ? theme.accent : Qt.rgba(1, 1, 1, 0.2)
@@ -693,6 +753,8 @@ Rectangle {
                     onPositionChanged: function(mouse) {
                         if (!pressed) return
                         const dt = (mapToItem(flick.contentItem, mouse.x, 0).x - startX) / root.pps
+                        // A NaN would reach the C++ side as an end time of NaN.
+                        if (!isFinite(dt) || !isFinite(startStart) || !isFinite(startEnd)) return
                         if (!moving && Math.abs(dt * root.pps) < 3) return
                         if (!moving) {
                             moving = true
@@ -728,9 +790,9 @@ Rectangle {
                 readonly property var modelData: backend.effects[index] || ({})
                 required property int index
                 readonly property bool selected: index === root.selectedEffect
-                x: modelData.start * root.pps
+                x: (modelData.start || 0) * root.pps
                 y: root.effectsY
-                width: Math.max(3, (modelData.end - modelData.start) * root.pps - 1)
+                width: Math.max(3, ((modelData.end || 0) - (modelData.start || 0)) * root.pps - 1)
                 height: root.laneH
                 radius: Math.min(4, theme.radius)
                 color: selected ? theme.accent : Qt.rgba(0.75, 0.45, 1, 0.45)
@@ -767,6 +829,8 @@ Rectangle {
                     onPositionChanged: function(mouse) {
                         if (!pressed) return
                         const dt = (mapToItem(flick.contentItem, mouse.x, 0).x - startX) / root.pps
+                        // A NaN would reach the C++ side as an end time of NaN.
+                        if (!isFinite(dt) || !isFinite(startStart) || !isFinite(startEnd)) return
                         if (!moving && Math.abs(dt * root.pps) < 3) return
                         if (!moving) {
                             moving = true
@@ -798,7 +862,7 @@ Rectangle {
             visible: backend.music.set
             x: 0
             y: root.musicY
-            width: backend.duration * root.pps
+            width: Math.max(1, root.safeDuration * root.pps)
             height: root.musicH
             radius: Math.min(4, theme.radius)
             color: Qt.rgba(0.35, 0.55, 1, 0.35)
@@ -829,6 +893,19 @@ Rectangle {
                 elide: Text.ElideRight
             }
             MouseArea { anchors.fill: parent; onClicked: root.musicSelected() }
+        }
+
+        // Insertion marker while a video is dragged over the video lane
+        Rectangle {
+            visible: root.dropIndex >= 0
+            readonly property var at: backend.clips[root.dropIndex]
+            x: (at ? at.start : backend.duration) * root.pps - 2
+            y: root.videoY - 4
+            z: 20
+            width: 4
+            height: root.videoH + 8
+            radius: 2
+            color: theme.accent
         }
 
         // Playhead

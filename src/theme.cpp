@@ -48,6 +48,11 @@ Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl)
 }
 
 Theme::~Theme() {
+    // The timers are destroyed before the process (declared after it), and
+    // ~QProcess can still emit finished/errorOccurred while it reaps a child;
+    // the handlers would then touch destroyed timers.
+    m_roundingProcess.disconnect();
+    m_roundingTimeout.disconnect();
     if (m_roundingProcess.state() != QProcess::NotRunning) {
         m_roundingProcess.kill();
         m_roundingProcess.waitForFinished(1000);

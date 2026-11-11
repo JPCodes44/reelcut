@@ -84,7 +84,7 @@ QStringList joinClips(const Project &project, bool withVideo, bool withAudio) {
             const Transitions::Kind *kind = Transitions::find(project.clips[i - 1].transition);
             if (withVideo)
                 out << QString("%1[v%2]xfade=transition=%3:duration=%4:offset=%5%6")
-                           .arg(video).arg(i).arg(kind->xfade, num(overlap), num(starts[i]), nextVideo);
+                           .arg(video).arg(i).arg(kind ? kind->xfade : QStringLiteral("fade"), num(overlap), num(starts[i]), nextVideo);
             if (withAudio)
                 out << QString("%1[a%2]acrossfade=d=%3:c1=tri:c2=tri%4").arg(audio).arg(i).arg(num(overlap), nextAudio);
         } else {

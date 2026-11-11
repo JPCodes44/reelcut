@@ -72,12 +72,13 @@ ColumnLayout {
                 puckX = root.wheel.x; puckY = root.wheel.y
             }
             onPositionChanged: function(m) {
-                if (!pressed) return
+                if (!pressed || width <= 0 || height <= 0) return
                 const k = (m.modifiers & Qt.ShiftModifier) ? 0.25 : 1
                 let x = puckX + (m.x - startX) / (width / 2) * k
                 let y = puckY - (m.y - startY) / (height / 2) * k
                 const r = Math.sqrt(x * x + y * y)
                 if (r > 1) { x /= r; y /= r }
+                if (!isFinite(x) || !isFinite(y)) return
                 root.moved("x", x)
                 root.moved("y", y)
             }

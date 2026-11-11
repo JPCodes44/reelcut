@@ -35,7 +35,9 @@ Job::Job(QObject *parent) : QObject(parent) {
     });
     connect(&m_process, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
         readOutput();
-        emit finished(!m_cancelled && status == QProcess::NormalExit && code == 0, m_output, m_errors);
+        // Copies: a receiver may start the next run, which clears the members.
+        const QByteArray output = m_output, errors = m_errors;
+        emit finished(!m_cancelled && status == QProcess::NormalExit && code == 0, output, errors);
     });
     connect(&m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart)
@@ -44,6 +46,9 @@ Job::Job(QObject *parent) : QObject(parent) {
 }
 
 Job::~Job() {
+    // Killing below would emit finished() into receivers that are being
+    // destroyed (the Job is usually a member of its owner).
+    disconnect(&m_process, nullptr, this, nullptr);
     if (isRunning()) {
         m_process.kill();
         m_process.waitForFinished(2000);
@@ -214,6 +219,7 @@ bool downloadFile(const QString &url, const QString &path, const QString &what, 
         return false;
     }
     QNetworkAccessManager network;
+    network.setTransferTimeout(120000);  // a stalled download fails instead of hanging the worker
     QNetworkRequest request{QUrl(url)};
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply *reply = network.get(request);
@@ -298,6 +304,12 @@ bool exportProject(const Project &project, const QString &accent, const QString 
     for (const Clip &clip : project.clips) {
         if (!QFileInfo::exists(clip.path)) {
             *error = QObject::tr("%1 is missing.").arg(clip.path);
+            return false;
+        }
+    }
+    for (const Layer &layer : project.layers) {
+        if (!QFileInfo::exists(layer.clip.path)) {
+            *error = QObject::tr("%1 is missing.").arg(layer.clip.path);
             return false;
         }
     }

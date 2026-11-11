@@ -73,7 +73,8 @@ Popup {
         if (backend.schedulerReady)
             backend.refreshScheduled()
         open()
-        captionField.forceActiveFocus()
+        if (hasYouTube) titleField.forceActiveFocus()
+        else captionField.forceActiveFocus()
     }
     // TikTok can't be combined: picking it clears the rest, and the reverse.
     // The last one picked can't be cleared.
@@ -210,31 +211,46 @@ Popup {
             }
             // Each field label sits tight above its field.
             ColumnLayout {
-                visible: root.stage === "write" && root.publishing && root.hasYouTube
+                visible: root.stage === "write" && root.hasYouTube
                 Layout.fillWidth: true
                 spacing: 4
-                Label { text: qsTr("YouTube title") }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Label { text: qsTr("YouTube Shorts title") }
+                    Item { Layout.fillWidth: true }
+                    Label { text: titleField.text.length + " / 100"; color: "#9a9aa2"; font.pixelSize: 12 }
+                }
                 TextField {
                     id: titleField
                     objectName: "postTitle"
                     Layout.fillWidth: true
                     maximumLength: 100
-                    placeholderText: qsTr("What viewers see under the Short")
+                    placeholderText: qsTr("Add a title for your Short")
                 }
             }
             ColumnLayout {
                 visible: root.stage === "write"
                 Layout.fillWidth: true
                 spacing: 4
-                Label { text: root.hasYouTube && root.selected.length === 1 ? qsTr("Description") : qsTr("Caption") }
+                Label { text: root.hasYouTube && root.selected.length === 1 ? qsTr("Description (optional)") : root.hasYouTube ? qsTr("Caption / YouTube description") : qsTr("Caption") }
                 TextArea {
                     id: captionField
                     objectName: "postCaption"
                     Layout.fillWidth: true
                     Layout.minimumHeight: 110
                     wrapMode: TextEdit.Wrap
-                    placeholderText: qsTr("What's this reel about? Enter starts a new line.")
+                    placeholderText: root.hasYouTube && root.selected.length === 1
+                                     ? qsTr("Add details or hashtags for viewers who open the description")
+                                     : qsTr("What's this reel about? Enter starts a new line.")
                 }
+            }
+            Label {
+                visible: root.stage === "write" && root.hasYouTube
+                Layout.fillWidth: true
+                text: qsTr("The Shorts preview shows your title. The description and hashtags are saved with the video for viewers to open.")
+                color: "#9a9aa2"
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
             }
             ColumnLayout {
                 visible: root.stage === "write"
@@ -312,15 +328,20 @@ Popup {
                         objectName: modelData + "Connect"
                         flat: true
                         text: root.connected(modelData) ? qsTr("Disconnect") : qsTr("Connect…")
+                        // Leaving "write" destroys this row, so act once its click is over.
                         onClicked: {
-                            if (!root.connected(modelData))
-                                root.startConnect(modelData)
-                            else if (modelData === "instagram")
-                                backend.disconnectInstagram()
-                            else if (modelData === "facebook")
-                                backend.disconnectFacebook()
-                            else
-                                backend.disconnectYouTube()
+                            const id = modelData
+                            const connect = !root.connected(id)
+                            Qt.callLater(function() {
+                                if (connect)
+                                    root.startConnect(id)
+                                else if (id === "instagram")
+                                    backend.disconnectInstagram()
+                                else if (id === "facebook")
+                                    backend.disconnectFacebook()
+                                else
+                                    backend.disconnectYouTube()
+                            })
                         }
                     }
                 }
@@ -449,7 +470,7 @@ Popup {
                                 Layout.fillWidth: true
                                 text: root.label(modelData.platform) + " · "
                                       + Qt.formatDateTime(new Date(modelData.publishAt), "ddd MMM d, h:mm AP")
-                                      + " · " + (modelData.caption.split("\n")[0] || modelData.title)
+                                      + " · " + ((modelData.caption || "").split("\n")[0] || modelData.title || "")
                                 elide: Text.ElideRight
                                 font.pixelSize: 13
                             }
@@ -474,14 +495,21 @@ Popup {
                             visible: !held && modelData.status === "failed"
                             flat: true
                             text: qsTr("Retry")
-                            onClicked: backend.retryScheduled(modelData.id)
+                            // The list is rebuilt from the change, this row with it.
+                            onClicked: { const id = modelData.id; Qt.callLater(function() { backend.retryScheduled(id) }) }
                         }
                         Button {
                             visible: !held && modelData.status !== "publishing"
                             flat: true
                             text: modelData.status === "failed" ? qsTr("Remove") : qsTr("Cancel")
-                            onClicked: modelData.status === "failed" ? backend.removeScheduled(modelData.id)
-                                                                     : backend.cancelScheduled(modelData.id)
+                            onClicked: {
+                                const id = modelData.id
+                                const failed = modelData.status === "failed"
+                                Qt.callLater(function() {
+                                    if (failed) backend.removeScheduled(id)
+                                    else backend.cancelScheduled(id)
+                                })
+                            }
                         }
                     }
                 }
@@ -543,7 +571,7 @@ Popup {
                              + "2. Set up the <b>OAuth consent screen</b> (External) and add yourself as a test user. "
                              + "Publish the app to <b>In production</b>, or Google signs you out every 7 days.<br>"
                              + "3. Under <b>Credentials</b>, create an <b>OAuth client ID</b> of type <b>Desktop app</b>.<br>"
-                             + "4. Paste its client ID and secret here, then sign in in the browser.<br><br>"
+                             + "4. Paste its client ID and secret here, then sign in in the browser. Choose the YouTube channel you want to post to, including its Brand Account if applicable.<br><br>Check the connected channel name before posting. Switching channels on youtube.com does not change Reelcut’s connection; disconnect and sign in again to change it.<br><br>"
                              + "They're kept in a file only you can read.")
                       : qsTr("Reelcut publishes through Instagram's official API, which needs a token for your account. "
                              + "Once:<br><br>"
@@ -598,7 +626,8 @@ Popup {
                     objectName: "facebookPage-" + modelData.id
                     Layout.fillWidth: true
                     text: modelData.name
-                    onClicked: backend.chooseFacebookPage(modelData.id)
+                    // Choosing leaves "connect", which destroys this button.
+                    onClicked: { const id = modelData.id; Qt.callLater(function() { backend.chooseFacebookPage(id) }) }
                 }
             }
             Label {
@@ -654,7 +683,7 @@ Popup {
                         wrapMode: Text.Wrap
                     }
                     Button {
-                        visible: modelData.ok && modelData.link.length > 0
+                        visible: modelData.ok && (modelData.link || "").length > 0
                         flat: true
                         text: qsTr("Open")
                         onClicked: backend.openLink(modelData.link)

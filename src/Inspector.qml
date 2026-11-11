@@ -42,7 +42,45 @@ Rectangle {
     signal effectSelected(int index)
     signal seekRequested(real t)
 
-    function seconds(value) { return value.toLocaleString(Qt.locale(), 'f', 2) + " s" }
+    function seconds(value) { return (Number(value) || 0).toLocaleString(Qt.locale(), 'f', 2) + " s" }
+
+    // Edits that rebuild or shrink a Repeater's model run after the click,
+    // key press or focus change that asked for them, never inside it, so
+    // the delegate handling that event isn't destroyed under it.
+    property var pendingWordEdits: []
+    function queueWordEdit(index, text) {
+        pendingWordEdits = pendingWordEdits.concat([{ index: index, text: text }])
+        Qt.callLater(root.applyWordEdits)
+    }
+    function applyWordEdits() {
+        const edits = pendingWordEdits
+        pendingWordEdits = []
+        for (const e of edits) {
+            if (e.index < 0 || e.index >= backend.wordCount) continue
+            backend.checkpoint()
+            backend.setWordText(e.index, e.text)
+        }
+    }
+    function removeOverlayLater(index) { Qt.callLater(root.removeOverlayNow, index) }
+    // Layer edits that reshape the layer list (and the preview's players and
+    // the timeline's layer bars) also wait until the click is done.
+    function setLayerValue(key, v) {
+        if (root.selectedLayer >= 0 && root.selectedLayer < backend.layers.length && isFinite(v))
+            backend.setLayerValue(root.selectedLayer, key, v)
+    }
+    function moveLayerToTrackNow(index, time) {
+        if (index < 0 || index >= backend.layers.length) return
+        const at = backend.moveLayerToTrack(index, isFinite(time) ? time : 0)
+        if (at >= 0 && at < backend.clips.length) win.select("clip", at)
+    }
+    function removeLayerNow(index) {
+        if (index >= 0 && index < backend.layers.length)
+            backend.removeLayer(index)
+    }
+    function removeOverlayNow(index) {
+        if (index >= 0 && index < backend.overlays.length)
+            backend.removeOverlay(index)
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -94,7 +132,7 @@ Rectangle {
 
                         Label {
                             Layout.fillWidth: true
-                            text: root.layerData ? qsTr("Layer %1 · %2").arg(root.layerData.row + 1).arg(root.layerData.name) : ""
+                            text: root.layerData ? qsTr("Layer %1 · %2").arg((root.layerData.row || 0) + 1).arg(root.layerData.name || "") : ""
                             font.bold: true
                             elide: Text.ElideMiddle
                         }
@@ -112,51 +150,48 @@ Rectangle {
                             from: 0.1; to: 1; resetValue: 1
                             value: root.layerData ? root.layerData.scale : 1
                             valueText: Math.round(value * 100) + "%"
-                            onMoved: function(v) { backend.setLayerValue(root.selectedLayer, "scale", v) }
+                            onMoved: function(v) { root.setLayerValue("scale", v) }
                         }
                         ValueSlider {
                             label: qsTr("Position left / right")
                             from: 0; to: 1; resetValue: 0.5
                             value: root.layerData ? root.layerData.x : 0.5
-                            onMoved: function(v) { backend.setLayerValue(root.selectedLayer, "x", v) }
+                            onMoved: function(v) { root.setLayerValue("x", v) }
                         }
                         ValueSlider {
                             label: qsTr("Position up / down")
                             from: 0; to: 1; resetValue: 0.5
                             value: root.layerData ? root.layerData.y : 0.5
-                            onMoved: function(v) { backend.setLayerValue(root.selectedLayer, "y", v) }
+                            onMoved: function(v) { root.setLayerValue("y", v) }
                         }
                         ValueSlider {
                             label: qsTr("Zoom")
                             from: 1; to: 3; resetValue: 1
                             value: root.layerData ? root.layerData.zoom : 1
                             valueText: value.toLocaleString(Qt.locale(), 'f', 2) + "×"
-                            onMoved: function(v) { backend.setLayerValue(root.selectedLayer, "zoom", v) }
+                            onMoved: function(v) { root.setLayerValue("zoom", v) }
                         }
                         ValueSlider {
                             label: qsTr("Pan left / right")
                             value: root.layerData ? root.layerData.panX : 0
-                            onMoved: function(v) { backend.setLayerValue(root.selectedLayer, "panX", v) }
+                            onMoved: function(v) { root.setLayerValue("panX", v) }
                         }
                         ValueSlider {
                             label: qsTr("Pan up / down")
                             value: root.layerData ? root.layerData.panY : 0
-                            onMoved: function(v) { backend.setLayerValue(root.selectedLayer, "panY", v) }
+                            onMoved: function(v) { root.setLayerValue("panY", v) }
                         }
                         Button {
                             Layout.fillWidth: true
                             text: qsTr("Move to main track")
-                            onClicked: {
-                                const at = backend.moveLayerToTrack(root.selectedLayer, root.layerData.start)
-                                if (at >= 0) win.select("clip", at)
-                            }
+                            onClicked: if (root.layerData) Qt.callLater(root.moveLayerToTrackNow, root.selectedLayer, root.layerData.start || 0)
                         }
                         Button {
                             Layout.fillWidth: true
                             text: qsTr("Delete layer")
                             flat: true
                             Material.foreground: "#ff8a80"
-                            onClicked: backend.removeLayer(root.selectedLayer)
+                            onClicked: Qt.callLater(root.removeLayerNow, root.selectedLayer)
                         }
                     }
 
@@ -536,13 +571,15 @@ Rectangle {
                                             anchors.fill: parent
                                             topPadding: 2
                                             bottomPadding: 2
+                                            // The edit rebuilds backend.captionLines, which destroys this
+                                            // delegate (and the one being clicked). Doing that inside the
+                                            // focus change or key press that commits it can crash, so the
+                                            // write waits until the event is done.
                                             function commit() {
                                                 if (!wordItem.editing) return
                                                 wordItem.editing = false
-                                                if (text !== wordItem.modelData.text) {
-                                                    backend.checkpoint()
-                                                    backend.setWordText(wordItem.modelData.index, text)
-                                                }
+                                                if (text !== wordItem.modelData.text)
+                                                    root.queueWordEdit(wordItem.modelData.index, text)
                                             }
                                             onAccepted: commit()
                                             onActiveFocusChanged: if (!activeFocus) commit()
@@ -623,7 +660,7 @@ Rectangle {
                                         id: startBox
                                         Layout.fillWidth: true
                                         from: 0; to: Math.ceil(backend.duration * 10); editable: true
-                                        value: Math.round(card.modelData.start * 10)
+                                        value: Math.round((card.modelData.start || 0) * 10)
                                         textFromValue: function(v) { return (v / 10).toLocaleString(Qt.locale(), 'f', 1) }
                                         valueFromText: function(t) { return Math.round(Number.fromLocaleString(Qt.locale(), t) * 10) }
                                         onValueModified: { backend.checkpoint(); backend.setOverlayValue(card.index, "start", value / 10) }
@@ -636,7 +673,7 @@ Rectangle {
                                     SpinBox {
                                         Layout.fillWidth: true
                                         from: 1; to: Math.ceil(backend.duration * 10) + 10; editable: true
-                                        value: Math.round(card.modelData.end * 10)
+                                        value: Math.round((card.modelData.end || 0) * 10)
                                         textFromValue: function(v) { return (v / 10).toLocaleString(Qt.locale(), 'f', 1) }
                                         valueFromText: function(t) { return Math.round(Number.fromLocaleString(Qt.locale(), t) * 10) }
                                         onValueModified: { backend.checkpoint(); backend.setOverlayValue(card.index, "end", value / 10) }
@@ -827,7 +864,8 @@ Rectangle {
                                     text: qsTr("Delete")
                                     flat: true
                                     Material.foreground: "#ff8a80"
-                                    onClicked: backend.removeOverlay(card.index)
+                                    // Deleting the last card destroys this button: wait until its click is done.
+                                    onClicked: root.removeOverlayLater(card.index)
                                 }
                             }
                         }

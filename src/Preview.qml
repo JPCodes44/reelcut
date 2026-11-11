@@ -43,6 +43,7 @@ Rectangle {
     function slotFor(i) { return i % 2 === 0 ? slotEven : slotOdd }
 
     function seek(t) {
+        if (!isFinite(t)) t = 0
         const at = backend.locate(t)
         clipIndex = at.index
         if (at.index < 0) {
@@ -84,10 +85,13 @@ Rectangle {
         music.pause()
     }
 
+    MediaDevices { id: mediaDevices }
+
     MediaPlayer {
         id: music
         source: backend.music.set ? "file://" + backend.music.path : ""
-        audioOutput: AudioOutput { volume: backend.music.volume }
+        // Follow the system's default output, so switching it (Super+Q) moves Reelcut's sound too.
+        audioOutput: AudioOutput { device: mediaDevices.defaultAudioOutput; volume: backend.music.volume }
         function sync(t) {
             if (!backend.music.set) return
             position = (backend.music.offset + t) * 1000
@@ -107,6 +111,8 @@ Rectangle {
             if (!c || cur.loading) return
             const now = Date.now()
             const t = c.still ? root.time + (now - root.lastTick) / 1000 : cur.reached()
+            // The slot is a step behind an edit (it hasn't reloaded yet): wait for it.
+            if (!isFinite(t) || t < 0) return
             const done = c.still ? t >= c.start + c.duration : cur.finished()
             root.lastTick = now
 
@@ -146,6 +152,13 @@ Rectangle {
             id: stage
             Layout.fillWidth: true
             Layout.fillHeight: true
+
+            // Clicking the empty space around the frame drops the selection.
+            MouseArea {
+                objectName: "stageBackground"
+                anchors.fill: parent
+                onPressed: win.selectionKind = "none"
+            }
 
             // The 9:16 frame, as large as fits.
             Rectangle {
@@ -269,7 +282,7 @@ Rectangle {
                                     objectName: "layerSlot" + index
                                     layerIndex: index
                                     // Higher rows on top; a row's videos never overlap.
-                                    z: 3 + (backend.layers[index] ? backend.layers[index].row : 0)
+                                    z: 3 + (backend.layers[index] ? backend.layers[index].row || 0 : 0)
                                     frameWidth: frame.width
                                     frameHeight: frame.height
                                     time: root.time
@@ -339,14 +352,15 @@ Rectangle {
                     property real spanX
                     property real spanY
                     onPressed: {
+                        if (!root.currentClip) return
                         win.select("clip", root.clipIndex)
                         startPanX = root.currentClip.panX
                         startPanY = root.currentClip.panY
                         startZoom = root.currentClip.zoom
                         // How far a pan of 1 moves the picture, as framed now.
                         const framed = root.slotFor(root.clipIndex).framedItem
-                        spanX = (framed.width - frame.width) / 2
-                        spanY = (framed.height - frame.height) / 2
+                        spanX = framed ? (framed.width - frame.width) / 2 : 0
+                        spanY = framed ? (framed.height - frame.height) / 2 : 0
                     }
                     onBegan: backend.checkpoint()
                     // Pan snaps to centered (0) and to the picture's edges (±1)
@@ -371,8 +385,9 @@ Rectangle {
                             guideY = py[1]
                         }
                     }
-                    onResized: function(factor) { backend.setClipValue(root.clipIndex, "zoom", startZoom * factor) }
+                    onResized: function(factor) { if (isFinite(factor) && factor > 0) backend.setClipValue(root.clipIndex, "zoom", startZoom * factor) }
                     onWheeled: function(steps) {
+                        if (!root.currentClip) return
                         backend.setClipValue(root.clipIndex, "zoom", root.currentClip.zoom * Math.pow(1.05, steps))
                     }
                 }
@@ -383,30 +398,39 @@ Rectangle {
                     objectName: "layerBox"
                     readonly property int index: win.selectionKind === "layer" ? win.selectedLayer : -1
                     readonly property var layerData: index >= 0 && index < backend.layers.length ? backend.layers[index] : null
-                    readonly property bool showing: layerData !== null && root.time >= layerData.start && root.time < layerData.end
+                    readonly property bool showing: layerData !== null && root.time >= (layerData.start || 0) && root.time < (layerData.end || 0)
+                    readonly property real boxScale: layerData && layerData.scale > 0 ? layerData.scale : 1
                     visible: showing
                     selected: showing
                     snap: frame.snapGuides
-                    width: layerData ? frame.width * layerData.scale : 0
-                    height: layerData ? frame.height * layerData.scale : 0
-                    x: layerData ? frame.width * layerData.x - width / 2 : 0
-                    y: layerData ? frame.height * layerData.y - height / 2 : 0
+                    width: layerData ? frame.width * boxScale : 0
+                    height: layerData ? frame.height * boxScale : 0
+                    x: layerData ? frame.width * (layerData.x || 0) - width / 2 : 0
+                    y: layerData ? frame.height * (layerData.y || 0) - height / 2 : 0
                     property real startX
                     property real startY
-                    property real startScale
+                    property real startScale: 1
+                    // Edits only while the layer it started on is still there,
+                    // and never with a NaN or infinite value (a 0-wide frame).
+                    function edit(key, value) {
+                        if (index >= 0 && index < backend.layers.length && isFinite(value))
+                            backend.setLayerValue(index, key, value)
+                    }
                     onPressed: {
-                        startX = layerData.x
-                        startY = layerData.y
-                        startScale = layerData.scale
+                        if (!layerData) return
+                        startX = layerData.x || 0
+                        startY = layerData.y || 0
+                        startScale = boxScale
                     }
                     onBegan: backend.checkpoint()
                     onDragged: function(dx, dy) {
-                        backend.setLayerValue(index, "x", startX + dx / frame.width)
-                        backend.setLayerValue(index, "y", startY + dy / frame.height)
+                        if (frame.width < 1 || frame.height < 1) return
+                        edit("x", startX + dx / frame.width)
+                        edit("y", startY + dy / frame.height)
                     }
-                    onResized: function(factor) { backend.setLayerValue(index, "scale", startScale * factor) }
+                    onResized: function(factor) { if (factor > 0) edit("scale", startScale * factor) }
                     onWheeled: function(steps) {
-                        backend.setLayerValue(index, "scale", layerData.scale * Math.pow(1.05, steps))
+                        if (layerData) edit("scale", boxScale * Math.pow(1.05, steps))
                     }
                 }
 
@@ -536,7 +560,7 @@ Rectangle {
             Item { Layout.fillWidth: true }
             Button {
                 objectName: "editPostText"
-                text: qsTr("Caption and tags")
+                text: backend.platform === "youtube" ? qsTr("Description and tags") : qsTr("Caption and tags")
                 onClicked: postEditor.begin()
             }
         }
@@ -604,7 +628,7 @@ Rectangle {
                 font.bold: true
                 wrapMode: Text.WordWrap
             }
-            Label { text: qsTr("Caption") }
+            Label { text: backend.platform === "youtube" ? qsTr("Description (optional)") : qsTr("Caption") }
             ScrollView {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 120
@@ -627,7 +651,9 @@ Rectangle {
             }
             Label {
                 Layout.fillWidth: true
-                text: qsTr("Saved with your project and used when posting. App UI is preview only.")
+                text: backend.platform === "youtube"
+                      ? qsTr("Shorts show the title in the feed. This optional description and hashtags are available in the video details. Edit your title in the Post dialog.")
+                      : qsTr("Saved with your project and used when posting. App UI is preview only.")
                 wrapMode: Text.WordWrap
                 font.pixelSize: 12
                 opacity: 0.7
