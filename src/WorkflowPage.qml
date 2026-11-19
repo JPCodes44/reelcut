@@ -104,15 +104,15 @@ Rectangle {
         },
         {
             id: "deliver", number: "5", title: qsTr("Review + deliver"),
-            what: qsTr("Every change is a new numbered version (v1, v2, …); only the approved version gets posted or uploaded."),
-            owner: qsTr("Reelcut: export, post"),
-            checkpoint: qsTr("\"Upload vN\" + confirm it shows online"),
+            what: qsTr("Every change is a new numbered version (v1, v2, …); only the approved version goes into the schedule queue."),
+            owner: qsTr("Reelcut: export, add to queue"),
+            checkpoint: qsTr("\"Queue vN\" + confirm it shows online"),
             steps: [
                 { id: "d1", text: qsTr("Export and send the phone copy with a short note: what changed, length and speed, choices made without asking, anything unproven by timestamp."), action: "export", actionText: qsTr("Export") },
                 { id: "d2", text: qsTr("Revise only what was asked. Re-check the audio after anything that touched it, and look at frames after anything that touched the picture.") },
                 { id: "d3", text: qsTr("Fixes that apply to future reels become a dated house rule straight away.") },
                 { id: "d4", text: qsTr("Keep old versions instead of deleting them; log every round (what changed, why, length, loudness).") },
-                { id: "d5", text: qsTr("Post or upload only on an explicit OK for that version. Never say it's up until it's confirmed visible."), checkpoint: true, action: "post", actionText: qsTr("Post") }
+                { id: "d5", text: qsTr("Queue only on an explicit OK for that version: it goes into the next open slots on each platform, rolling into the next day when today's are full. Never say it's up until it's confirmed visible."), checkpoint: true, action: "post", actionText: qsTr("Add to queue") }
             ]
         }
     ]
@@ -241,7 +241,7 @@ Rectangle {
                     Label { text: qsTr("Reel workflow"); font.pixelSize: 24; font.bold: true }
                     Label {
                         Layout.fillWidth: true
-                        text: qsTr("Every reel goes through the same five stages. Talking-head reels take the cut route; voiceover-led animated reels take the animation route. Nothing is posted until it has been seen and OK'd.")
+                        text: qsTr("Every reel goes through the same five stages. Talking-head reels take the cut route; voiceover-led animated reels take the animation route. Nothing is queued until it has been seen and OK'd.")
                         wrapMode: Text.Wrap
                         color: root.dim
                     }
@@ -281,7 +281,7 @@ Rectangle {
                         model: [
                             qsTr("Research"), qsTr("Script"), qsTr("Film"), qsTr("Intake"),
                             qsTr("Cut + QA  /  VO + scenes"), qsTr("Finish  /  Stills + render"),
-                            qsTr("Review + revise"), qsTr("Post")
+                            qsTr("Review + revise"), qsTr("Queue")
                         ]
                         delegate: Row {
                             required property string modelData
@@ -301,7 +301,7 @@ Rectangle {
                 }
                 Label {
                     Layout.fillWidth: true
-                    text: qsTr("Revision notes loop back into the cut (or the scenes) as a new version; only an explicit \"upload vN\" leaves the loop.")
+                    text: qsTr("Revision notes loop back into the cut (or the scenes) as a new version; only an explicit OK for that version (\"queue vN\") leaves the loop.")
                     wrapMode: Text.Wrap
                     color: root.dim
                 }
