@@ -23,21 +23,43 @@ ApplicationWindow {
     property bool helpVisible: false
     property bool safeZones: true
     property bool downloadsVisible: true
-    // Which page fills the window: the editor, or the reel workflow checklist.
-    property string page: "editor"
+    // The Stats page covers the editor while it's open.
+    property bool statsVisible: false
+    property bool scheduleVisible: false
+    property bool workflowVisible: false
+    onStatsVisibleChanged: if (statsVisible) { scheduleVisible = false; workflowVisible = false }
+    onScheduleVisibleChanged: if (scheduleVisible) { statsVisible = false; workflowVisible = false; preview.pause() }
+    onWorkflowVisibleChanged: if (workflowVisible) { statsVisible = false; scheduleVisible = false; preview.pause() }
     property int selectedClip: -1
     property int selectedOverlay: -1
     property int selectedEffect: -1
-    // What a click last picked: clip, overlay, captions, or none. Delete acts on it.
+    property int selectedLayer: -1
+    // What a click last picked: clip, layer, overlay, captions, or none. Delete acts on it.
     property string selectionKind: "none"
     property real playhead: 0
-    // Single-key shortcuts must not fire while the user is typing.
-    readonly property bool typing: activeFocusItem !== null && activeFocusItem.hasOwnProperty("cursorPosition")
+    // Single-key shortcuts must not fire while the user is typing, nor edit
+    // the hidden editor while the Stats page covers it.
+    readonly property bool typing: settingsPage.visible || statsVisible || scheduleVisible || workflowVisible || (activeFocusItem !== null && activeFocusItem.hasOwnProperty("cursorPosition"))
+    readonly property bool textFocused: activeFocusItem !== null && activeFocusItem.hasOwnProperty("cursorPosition")
+    // Schedule undo: the page is open and no text field has the keys.
+    readonly property bool scheduleKeys: scheduleVisible && !textFocused && !postDialog.visible
 
     // The color picker's eyedropper: the next click on the preview picks a
     // color from the video and hands it to `callback`. Escape cancels.
     property var eyedropperCallback: null
     function startEyedropper(callback) { eyedropperCallback = callback }
+
+    Automation {
+        windowItem: win
+        previewItem: preview
+        timelineItem: timeline
+        inspectorItem: inspector
+        statsItem: statsPage
+        scheduleItem: schedulePage
+        postItem: postDialog
+        settingsItem: settingsPage
+        confirmationItem: confirm
+    }
 
     function seek(t) {
         if (!isFinite(t)) t = 0
@@ -49,6 +71,12 @@ ApplicationWindow {
         seek(playhead + seconds)
     }
     function select(kind, index) {
+        // A drop or move that failed hands back -1: select nothing rather than a stale index.
+        if (kind === "layer" && (index < 0 || index >= backend.layers.length)) {
+            selectedLayer = -1
+            selectionKind = "none"
+            return
+        }
         selectionKind = kind
         if (kind === "clip") {
             selectedClip = index
@@ -61,25 +89,11 @@ ApplicationWindow {
         } else if (kind === "effect") {
             selectedEffect = index
             inspector.currentIndex = 5
+        } else if (kind === "layer") {
+            selectedLayer = index
+            inspector.currentIndex = 0
         }
     }
-    function deleteSelection() {
-        if (selectionKind === "effect" && selectedEffect >= 0) {
-            backend.removeEffect(selectedEffect)
-            selectedEffect = -1
-            selectionKind = "none"
-        } else if (selectionKind === "overlay" && selectedOverlay >= 0) {
-            backend.removeOverlay(selectedOverlay)
-            selectedOverlay = -1
-            selectionKind = "none"
-        } else if (selectionKind === "captions") {
-            backend.clearCaptions()
-            selectionKind = "none"
-        } else if (selectedClip >= 0) {
-            backend.removeClip(selectedClip)
-        }
-    }
-
     // A button on the workflow page: do the step in the editor.
     function runWorkflowAction(name) {
         if (name === "addMedia") {
@@ -94,7 +108,7 @@ ApplicationWindow {
             postDialog.openFor("")
             return
         }
-        page = "editor"
+        workflowVisible = false
         if (name === "transcribe") {
             select("captions", -1)
             backend.transcribe()
@@ -113,6 +127,26 @@ ApplicationWindow {
             select("overlay", backend.addOverlay(0))
         }
     }
+    function deleteSelection() {
+        if (selectionKind === "effect" && selectedEffect >= 0) {
+            backend.removeEffect(selectedEffect)
+            selectedEffect = -1
+            selectionKind = "none"
+        } else if (selectionKind === "overlay" && selectedOverlay >= 0) {
+            backend.removeOverlay(selectedOverlay)
+            selectedOverlay = -1
+            selectionKind = "none"
+        } else if (selectionKind === "captions") {
+            backend.clearCaptions()
+            selectionKind = "none"
+        } else if (selectionKind === "layer" && selectedLayer >= 0) {
+            backend.removeLayer(selectedLayer)
+            selectedLayer = -1
+            selectionKind = "none"
+        } else if (selectedClip >= 0) {
+            backend.removeClip(selectedClip)
+        }
+    }
 
     Connections {
         target: downloads
@@ -129,6 +163,10 @@ ApplicationWindow {
                 win.selectedOverlay = -1
             if (win.selectedEffect >= backend.effects.length)
                 win.selectedEffect = -1
+            if (win.selectedLayer >= backend.layers.length || win.selectedLayer < -1) {
+                win.selectedLayer = -1
+                if (win.selectionKind === "layer") win.selectionKind = "none"
+            }
             if (win.selectedClip < -1)
                 win.selectedClip = -1
             if (win.playhead > backend.duration)
@@ -144,14 +182,37 @@ ApplicationWindow {
 
     Shortcut { sequence: "Escape"; enabled: win.eyedropperCallback !== null; context: Qt.ApplicationShortcut; onActivated: win.eyedropperCallback = null }
     Shortcut { sequence: "?"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.helpVisible = !win.helpVisible }
-    Shortcut { sequence: "Esc"; context: Qt.ApplicationShortcut; onActivated: { win.helpVisible = false; win.selectionKind = "none"; win.contentItem.forceActiveFocus() } }
+    Shortcut {
+        sequence: "Esc"
+        enabled: !postDialog.visible
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (win.scheduleVisible) {
+                if (!schedulePage.closeDetail()) win.scheduleVisible = false
+                return
+            }
+            if (win.workflowVisible) {
+                win.workflowVisible = false
+                return
+            }
+            // On the Stats page, Esc closes a reel's details, then the page.
+            if (win.statsVisible) {
+                if (!statsPage.closeDetail())
+                    win.statsVisible = false
+                return
+            }
+            win.helpVisible = false
+            win.selectionKind = "none"
+            win.contentItem.forceActiveFocus()
+        }
+    }
     Shortcut { sequence: "Q"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: confirm.ask(backend.dirty ? qsTr("Quit without saving your changes?") : qsTr("Quit Reelcut?"), function() { win.closeConfirmed = true; win.close() }) }
     Shortcut { sequence: "Space"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: preview.toggle() }
     Shortcut { sequence: "S"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: backend.split(win.playhead) }
     Shortcut { sequence: "I"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: backend.addMedia() }
     Shortcut { sequence: "T"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.select("overlay", backend.addOverlay(win.playhead)) }
     Shortcut { sequence: "G"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.safeZones = !win.safeZones }
-    Shortcut { sequences: ["Delete", "Backspace"]; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.deleteSelection() }
+    Shortcut { sequences: ["Delete", "Backspace"]; enabled: !win.typing && !pointerDown.active; context: Qt.ApplicationShortcut; onActivated: win.deleteSelection() }
     Shortcut { sequence: "Left"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.step(-1 / 30) }
     Shortcut { sequence: "Right"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.step(1 / 30) }
     Shortcut { sequence: "Shift+Left"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.step(-1) }
@@ -160,8 +221,9 @@ ApplicationWindow {
     Shortcut { sequence: "End"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.seek(backend.duration) }
     Shortcut { sequence: "Alt+Left"; enabled: !win.typing && win.selectedClip > 0; context: Qt.ApplicationShortcut; onActivated: { backend.moveClip(win.selectedClip, win.selectedClip - 1); win.selectedClip-- } }
     Shortcut { sequence: "Alt+Right"; enabled: !win.typing && win.selectedClip >= 0 && win.selectedClip < backend.clips.length - 1; context: Qt.ApplicationShortcut; onActivated: { backend.moveClip(win.selectedClip, win.selectedClip + 1); win.selectedClip++ } }
-    Shortcut { sequences: [StandardKey.Undo]; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: backend.undo() }
-    Shortcut { sequences: ["Ctrl+Y", "Ctrl+Shift+Z", StandardKey.Redo]; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: backend.redo() }
+    // On the Schedule page, undo and redo work on its own history (placeholders, timing).
+    Shortcut { sequences: [StandardKey.Undo]; enabled: !win.typing || win.scheduleKeys; context: Qt.ApplicationShortcut; onActivated: win.scheduleVisible ? backend.undoSchedule() : backend.undo() }
+    Shortcut { sequences: ["Ctrl+Y", "Ctrl+Shift+Z", StandardKey.Redo]; enabled: !win.typing || win.scheduleKeys; context: Qt.ApplicationShortcut; onActivated: win.scheduleVisible ? backend.redoSchedule() : backend.redo() }
     Shortcut { sequences: [StandardKey.Save]; context: Qt.ApplicationShortcut; onActivated: backend.save() }
     Shortcut { sequence: "Ctrl+Shift+S"; context: Qt.ApplicationShortcut; onActivated: backend.saveAs() }
     Shortcut { sequences: [StandardKey.Open]; context: Qt.ApplicationShortcut; onActivated: confirm.ask(qsTr("Open another project?"), function() { backend.open() }) }
@@ -176,6 +238,14 @@ ApplicationWindow {
         }
     }
 
+    // Passive watcher over the whole window: Delete is ignored while a mouse
+    // button is held, so deleting can't destroy a bar or box mid-drag.
+    Item {
+        anchors.fill: parent
+        z: 1000000
+        PointHandler { id: pointerDown; acceptedButtons: Qt.AllButtons }
+    }
+
     Item {
         anchors.fill: parent
         LayoutMirroring.enabled: Qt.application.layoutDirection === Qt.RightToLeft
@@ -187,6 +257,7 @@ ApplicationWindow {
 
             // Top bar
             Rectangle {
+                id: topBar
                 Layout.fillWidth: true
                 Layout.preferredHeight: 52
                 color: win.panel
@@ -206,25 +277,18 @@ ApplicationWindow {
                         text: qsTr("%n clips", "", backend.clips.length) + " · " + timeText(backend.duration)
                         color: backend.duration > 90 ? "#ff8a65" : win.dim
                         elide: Text.ElideRight
+                        // Gives way first when the top bar runs out of room.
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         ToolTip.visible: backend.duration > 90 && overDuration.hovered
-                        ToolTip.text: qsTr("Longer than 90 seconds. Reels and TikToks perform best when short.")
+                        ToolTip.text: qsTr("Longer than 90 seconds. Reels, Shorts and TikToks perform best when short.")
                         HoverHandler { id: overDuration }
                     }
                     Item { Layout.fillWidth: true }
-                    ToolButton {
-                        objectName: "workflowToggle"
-                        Layout.minimumWidth: implicitWidth
-                        text: qsTr("Workflow")
-                        checkable: true
-                        checked: win.page === "workflow"
-                        onToggled: win.page = checked ? "workflow" : "editor"
-                        ToolTip.visible: hovered
-                        ToolTip.delay: 500
-                        ToolTip.text: qsTr("The reel workflow: every stage from research to posting, as a checklist")
-                    }
+                    CreditsMeter {}
+                    ToolSeparator {}
                     ToolButton {
                         objectName: "downloadsToggle"
-                        visible: win.page === "editor"
                         Layout.minimumWidth: implicitWidth
                         text: qsTr("Downloads")
                         checkable: true
@@ -234,10 +298,46 @@ ApplicationWindow {
                         ToolTip.delay: 500
                         ToolTip.text: qsTr("Download reels from YouTube, Instagram, TikTok or Facebook")
                     }
+                    ToolButton {
+                        objectName: "settingsButton"
+                        Layout.minimumWidth: implicitWidth
+                        text: qsTr("Settings")
+                        onClicked: settingsPage.openFor("")
+                    }
+                    ToolButton {
+                        objectName: "scheduleToggle"
+                        Layout.minimumWidth: implicitWidth
+                        text: qsTr("Schedule")
+                        checkable: true
+                        checked: win.scheduleVisible
+                        onToggled: win.scheduleVisible = checked
+                    }
+                    ToolButton {
+                        objectName: "workflowToggle"
+                        Layout.minimumWidth: implicitWidth
+                        text: qsTr("Workflow")
+                        checkable: true
+                        checked: win.workflowVisible
+                        onToggled: win.workflowVisible = checked
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("The reel workflow: every stage from research to posting, as a checklist")
+                    }
+                    ToolButton {
+                        objectName: "statsToggle"
+                        Layout.minimumWidth: implicitWidth
+                        text: qsTr("Stats")
+                        checkable: true
+                        checked: win.statsVisible
+                        onToggled: win.statsVisible = checked
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("How your reels are doing on Instagram, Facebook and YouTube")
+                    }
                     ToolSeparator {}
                     ButtonGroup { id: platforms }
                     Repeater {
-                        model: [{ id: "instagram", label: qsTr("Instagram") }, { id: "tiktok", label: qsTr("TikTok") }]
+                        model: backend.platforms
                         delegate: Button {
                             required property var modelData
                             Layout.minimumWidth: implicitWidth
@@ -272,7 +372,7 @@ ApplicationWindow {
                         enabled: backend.clips.length > 0 && !backend.busy
                         ToolTip.visible: hovered
                         ToolTip.delay: 500
-                        ToolTip.text: qsTr("Export and open TikTok or Instagram, ready to post")
+                        ToolTip.text: qsTr("Publish to Instagram, Facebook or YouTube, or export ready to post on TikTok")
                         onClicked: postDialog.openFor("")
                     }
                     Button {
@@ -286,17 +386,7 @@ ApplicationWindow {
                 }
             }
 
-            WorkflowPage {
-                id: workflowPage
-                objectName: "workflowPage"
-                visible: win.page === "workflow"
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                onActionRequested: function(name) { win.runWorkflowAction(name) }
-            }
-
             RowLayout {
-                visible: win.page === "editor"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 spacing: 0
@@ -331,6 +421,7 @@ ApplicationWindow {
                     selectedClip: win.selectedClip
                     selectedOverlay: win.selectedOverlay
                     selectedEffect: win.selectedEffect
+                    selectedLayer: win.selectionKind === "layer" ? win.selectedLayer : -1
                     textSelected: win.selectionKind === "overlay" && win.selectedOverlay >= 0
                                   && win.selectedOverlay < backend.overlays.length
                     playhead: win.playhead
@@ -340,31 +431,70 @@ ApplicationWindow {
                 }
             }
 
-            Rectangle { visible: win.page === "editor"; Layout.fillWidth: true; Layout.preferredHeight: 1; color: win.line }
+            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: win.line }
 
             ReelTimeline {
                 id: timeline
-                visible: win.page === "editor"
                 Layout.fillWidth: true
                 Layout.preferredHeight: implicitHeight
                 Layout.minimumHeight: implicitHeight  // follows the resized music lane
                 playhead: win.playhead
-                selectedClip: win.selectedClip
-                selectedOverlay: win.selectedOverlay
+                // Only what's selected now is highlighted: one item at a time.
+                selectedClip: win.selectionKind === "clip" ? win.selectedClip : -1
+                selectedOverlay: win.selectionKind === "overlay" ? win.selectedOverlay : -1
                 selectedEffect: win.selectionKind === "effect" ? win.selectedEffect : -1
+                selectedLayer: win.selectionKind === "layer" ? win.selectedLayer : -1
                 onSeekRequested: function(t) { preview.pause(); win.seek(t) }
                 onClipSelected: function(i) { win.select("clip", i) }
+                onLayerSelected: function(i) { win.select("layer", i) }
                 onOverlaySelected: function(i) { win.select("overlay", i) }
                 onEffectSelected: function(i) { win.select("effect", i) }
                 onCaptionsSelected: win.select("captions", -1)
+                onEmptyClicked: win.selectionKind = "none"
                 onMusicSelected: inspector.currentIndex = 4
             }
+        }
+
+        // Over the editor, under the top bar, so Stats in the top bar closes it too.
+        // Before the toasts and the busy bar, which stay on top of it.
+        StatsPage {
+            id: statsPage
+            onManageAccount: function(platform) { settingsPage.openFor(platform) }
+            anchors.fill: parent
+            anchors.topMargin: topBar.height
+            visible: win.statsVisible
+            onCloseRequested: {
+                win.statsVisible = false
+                win.contentItem.forceActiveFocus()
+            }
+        }
+
+        SchedulePage {
+            id: schedulePage
+            anchors.fill: parent
+            anchors.topMargin: topBar.height
+            visible: win.scheduleVisible
+            onCloseRequested: {
+                win.scheduleVisible = false
+                win.contentItem.forceActiveFocus()
+            }
+            onScheduleRequested: function(platform, publishAt) { postDialog.openScheduled(platform, publishAt) }
+        }
+
+        WorkflowPage {
+            id: workflowPage
+            objectName: "workflowPage"
+            anchors.fill: parent
+            anchors.topMargin: topBar.height
+            visible: win.workflowVisible
+            onActionRequested: function(name) { win.runWorkflowAction(name) }
         }
 
         // Videos can be dropped anywhere on the window.
         // Over the timeline's video lane, they go in where they're dropped.
         DropArea {
             id: windowDrop
+            enabled: !win.statsVisible && !win.scheduleVisible && !win.workflowVisible
             anchors.fill: parent
             keys: ["text/uri-list"]
             function timelineIndex(x, y) {
@@ -479,7 +609,8 @@ ApplicationWindow {
             onAccepted: action()
         }
 
-        PostDialog { id: postDialog }
+        SettingsPage { id: settingsPage }
+        PostDialog { id: postDialog; onManageAccounts: { close(); settingsPage.openFor(platform) } }
 
         HelpOverlay {
             anchors.fill: parent

@@ -1,4 +1,6 @@
 #include "mcpserver.h"
+#include "automationregistry.h"
+#include "appbridge.h"
 
 #include "bodyeffects.h"
 #include "effects.h"
@@ -11,6 +13,8 @@
 #include <QIODevice>
 #include <QJsonDocument>
 #include <QProcess>
+#include <QProcessEnvironment>
+#include <QCoreApplication>
 #include <QSaveFile>
 #include <QStandardPaths>
 
@@ -28,11 +32,16 @@
 namespace {
 constexpr int kUndoLimit = 100;
 const char *kInstructions =
-    "Reelcut edits vertical 1080x1920 reels for Instagram and TikTok. Work on one .reel project: "
+    "Reelcut edits vertical 1080x1920 reels for Instagram, Facebook, YouTube Shorts and TikTok. Work on one .reel project: "
     "create_project or open_project first (open_project with no path picks the project open in the Reelcut "
     "window). Every edit saves the file at once and the window reloads it live. Times are seconds on the "
     "timeline unless a tool says source seconds. Clip indexes start at 0. Use preview_frame to look at the "
-    "result before export, and undo if an edit went wrong.";
+    "result before export, and undo if an edit went wrong. Live app_* tools cover the running editor, layers, "
+    "posting, accounts/settings, stats, calendar, downloads, credits and UI controls. get_app_capabilities lists "
+    "every operation and native-gesture equivalent. get_app_state/get_app_events report asynchronous completion. "
+    "Use list_app_instances and specify instance when multiple windows run. A tool returning accepted has not "
+    "necessarily finished a download, export, sign-in or publishing action. Credentials are write-only inputs. "
+    "Publishing is an explicit action: never use a posting tool merely to preview or validate a draft.";
 
 QJsonObject prop(const QString &type, const QString &description) {
     return {{"type", type}, {"description", description}};
@@ -54,6 +63,16 @@ QJsonObject failure(const QString &message) {
     QJsonObject result = text(message);
     result.insert("isError", true);
     return result;
+}
+
+QString launchDesktop(const QStringList &arguments) {
+    auto environment=QProcessEnvironment::systemEnvironment();
+    if(environment.value("WAYLAND_DISPLAY").isEmpty() && environment.value("DISPLAY").isEmpty())
+        return "No desktop display is available. Launch Reelcut in your desktop session, then use list_app_instances.";
+    if(environment.value("QT_QPA_PLATFORM")=="offscreen")environment.remove("QT_QPA_PLATFORM");
+    QProcess process;process.setProgram(QCoreApplication::applicationFilePath());
+    process.setArguments(arguments);process.setProcessEnvironment(environment);
+    return process.startDetached()?QString():QString("Could not launch the Reelcut GUI.");
 }
 
 // Thrown by handlers for bad arguments; becomes an isError result.
@@ -133,6 +152,7 @@ McpServer::McpServer(const QString &stateDir)
     : m_stateDir(stateDir.isEmpty() ? QStandardPaths::writableLocation(QStandardPaths::GenericStateLocation) + "/reelcut"
                                     : stateDir) {
     defineTools();
+    defineLiveTools();
 }
 
 QString McpServer::openProjectFile(const QString &stateDir) {
@@ -377,7 +397,7 @@ void McpServer::defineTools() {
             {{"path", prop("string", "Where to write the .reel file (the extension is added if missing).")},
              {"clips", QJsonObject{{"type", "array"}, {"items", QJsonObject{{"type", "string"}}},
                                    {"description", "Video files to add, in timeline order."}}},
-             {"platform", enumProp({"instagram", "tiktok"}, "Which app's safe zones to design for.")}},
+             {"platform", enumProp({"instagram", "facebook", "youtube", "tiktok"}, "Which app's safe zones to design for.")}},
             {"path"}, false, [this](Call &call) {
                 QString path = absolute(call.args.value("path").toString());
                 if (!path.endsWith(".reel"))
@@ -430,8 +450,8 @@ void McpServer::defineTools() {
                              {"width", info.width}, {"height", info.height}, {"has_audio", info.audio}});
             }, false);
 
-    addTool("set_platform", "Design for Instagram Reels or TikTok (changes the safe zones shown and the file name).",
-            {{"platform", enumProp({"instagram", "tiktok"}, "The platform.")}}, {"platform"}, true, [this](Call &call) {
+    addTool("set_platform", "Design for Instagram Reels, Facebook Reels, YouTube Shorts or TikTok (changes the safe zones shown and the file name).",
+            {{"platform", enumProp({"instagram", "facebook", "youtube", "tiktok"}, "The platform.")}}, {"platform"}, true, [this](Call &call) {
                 call.project.setPlatform(call.args.value("platform").toString());
                 return json(summary(call));
             });
@@ -584,7 +604,7 @@ void McpServer::defineTools() {
             {{"style", enumProp({"highlight", "pop", "bold", "box"},
                                 "highlight: line with the spoken word in the accent color; pop: one word at a time; "
                                 "bold: plain white line; box: white text on a dark box.")},
-             {"position", prop("number", "Vertical center, 0.05 (top) to 0.95 (bottom). Default: just above the platform's own caption area (0.68 Instagram, 0.65 TikTok), following the platform until set.")},
+             {"position", prop("number", "Vertical center, 0.05 (top) to 0.95 (bottom). Default: just above the platform's own caption area (0.68 Instagram, 0.55 Facebook, 0.63 YouTube, 0.65 TikTok), following the platform until set.")},
              {"x", prop("number", "Horizontal center, 0 (left) to 1 (right). Default: the middle of the platform's safe zone.")},
              {"size", prop("number", "Size, 0.5 to 2 times normal. Default 1.")},
              {"words", QJsonObject{{"type", "array"},
@@ -929,8 +949,77 @@ void McpServer::defineTools() {
                 const bool open = state.open(QIODevice::ReadOnly) && QString::fromUtf8(state.readAll()).trimmed() == call.path;
                 if (open && windowRunning())
                     return text("It's already open in Reelcut, which shows every edit as it's saved.");
-                if (!QProcess::startDetached("reelcut", {call.path}))
-                    throw ToolError{"Could not start Reelcut."};
+                const auto error=launchDesktop({call.path});
+                if (!error.isEmpty()) throw ToolError{error};
                 return text("Opened in Reelcut. The window reloads the project after every edit.");
             });
+}
+
+
+void McpServer::defineLiveTools() {
+    auto result=[](const QJsonObject &value) {
+        if (value.value("isError").toBool()) return failure(value.value("error").toString("Live app action failed."));
+        auto out=json(value);out["structuredContent"]=value;return out;
+    };
+    const auto instance=prop("string","Live window instance ID; required when several windows are running.");
+    addTool("get_app_capabilities","Audit functional MCP coverage and list typed live operations, safe properties, native-gesture equivalents and human OAuth steps. Does not require a running GUI.",{}, {},false,
+        [result](Call &){return result(AutomationRegistry::inventory());},false);
+    addTool("list_app_instances","List live Reelcut windows and their instance IDs/projects. Does not change the app.",{}, {},false,
+        [this,result](Call &){return result({{"instances",AppBridgeClient::instances(m_stateDir)}});},false);
+    addTool("get_app_state","Read non-secret live state. component may be backend, accounts, stats, downloads, credits, theme, language or ui; omit it for all native components. Does not expose credentials.",
+        {{"component",prop("string","Application component, or empty for all.")},{"instance",instance}}, {},false,
+        [this,result](Call &call){return result(AppBridgeClient::call(m_stateDir,{{"action","state"},{"component",call.args.value("component")}},call.args.value("instance").toString()));},false);
+    addTool("get_app_events","Poll bounded asynchronous action/job/account/stats/download events after a sequence number. accepted means started, not completed; completion events/state are authoritative.",
+        {{"after",prop("integer","Return events with sequence greater than this (default 0).")},{"instance",instance}}, {},false,
+        [this,result](Call &call){return result(AppBridgeClient::call(m_stateDir,{{"action","events"},{"after",call.args.value("after").toDouble()}},call.args.value("instance").toString()));},false);
+    addTool("set_app_property","Set a declared writable application property, such as backend.schedulePreferences or credits.budget. No arbitrary object traversal is available.",
+        {{"component",prop("string","Component name.")},{"property",prop("string","Declared writable property name.")},{"value",QJsonObject{}},{"instance",instance}}, {"component","property","value"},false,
+        [this,result](Call &call){return result(AppBridgeClient::call(m_stateDir,{{"action","set_property"},{"component",call.args.value("component")},{"property",call.args.value("property")},{"value",call.args.value("value")}},call.args.value("instance").toString()));},false);
+    m_tools["set_app_property"].definition["annotations"]=QJsonObject{{"readOnlyHint",false},{"destructiveHint",false},{"openWorldHint",false}};
+    addTool("get_app_screenshot","See the current live Reelcut window as a PNG. Token/password fields remain masked as in the UI.",
+        {{"width",QJsonObject{{"type","integer"},{"minimum",180},{"maximum",1920}}},{"instance",instance}}, {},false,
+        [this,result](Call &call){
+            auto args=call.args;args.remove("instance");
+            const auto image=AppBridgeClient::call(m_stateDir,{{"action","screenshot"},{"arguments",args}},call.args.value("instance").toString());
+            if(image.value("isError").toBool())return result(image);
+            QJsonObject output;
+            output["content"]=QJsonArray{QJsonObject{{"type","image"},{"mimeType",image.value("mimeType")},{"data",image.value("data")}}};
+            output["structuredContent"]=QJsonObject{{"width",image.value("width")},{"height",image.value("height")},{"redactedFields",image.value("redactedFields")}};
+            return output;
+        },false);
+    addTool("sample_preview_color","Sample the live composited preview frame at normalized x,y (0..1); explicit equivalent of the eyedropper, without callbacks.",
+        {{"x",QJsonObject{{"type","number"},{"minimum",0},{"maximum",1}}},{"y",QJsonObject{{"type","number"},{"minimum",0},{"maximum",1}}},{"instance",instance}}, {"x","y"},false,
+        [this,result](Call &call){auto args=call.args;args.remove("instance");return result(AppBridgeClient::call(m_stateDir,{{"action","sample_color"},{"arguments",args}},call.args.value("instance").toString()));},false);
+    addTool("launch_app","Explicitly open the Reelcut GUI, optionally on a project. Saved-project tools work without launching it. Requires a desktop display.",
+        {{"project",prop("string","Optional existing .reel project path.")}}, {},false,
+        [](Call &call){
+            QStringList arguments;
+            if(call.args.contains("project")) {
+                const auto path=absolute(call.args.value("project").toString());
+                if(!QFileInfo(path).isFile())return failure("The project file does not exist.");
+                arguments << path;
+            }
+            const auto error=launchDesktop(arguments);
+            if(!error.isEmpty())return failure(error);
+            return json({{"accepted",true},{"next","Use list_app_instances once the window is ready."}});
+        },false);
+    m_tools["launch_app"].definition["annotations"]=QJsonObject{{"readOnlyHint",false},{"destructiveHint",false},{"openWorldHint",false}};
+    auto generated=AutomationRegistry::tools();for(const auto &ui:AutomationRegistry::uiTools())generated.append(ui);
+    for(const auto &entry:generated) {
+        const auto definition=entry.toObject();const auto schema=definition.value("inputSchema").toObject();
+        const auto component=definition.value("component").toString();const auto method=definition.value("method").toString();
+        QStringList required;for(const auto &value:schema.value("required").toArray())required << value.toString();
+        const auto name=definition.value("name").toString();
+        addTool(name,definition.value("description").toString(),schema.value("properties").toObject(),required,false,
+            [this,result,component,method](Call &call){
+                auto args=call.args;const auto instance=args.take("instance").toString();
+                return result(AppBridgeClient::call(m_stateDir,{{"action","invoke"},{"component",component},{"method",method},{"arguments",args}},instance));
+            },false);
+        m_tools[name].definition["inputSchema"]=schema;
+        m_tools[name].definition["annotations"]=definition.value("annotations");
+    }
+    // File exports and opening a GUI have effects even though they don't edit
+    // the .reel model; don't label them read-only merely because edits=false.
+    for(const auto &name:{QString("export"),QString("export_photos"),QString("show_in_app")})
+        m_tools[name].definition["annotations"]=QJsonObject{{"readOnlyHint",false},{"destructiveHint",false},{"openWorldHint",false}};
 }

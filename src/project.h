@@ -45,6 +45,24 @@ struct Clip {
     static QStringList motions();
 };
 
+// A video or photo laid over the main track, made by dragging a clip down
+// off it. Its clip keeps its own trim, speed and framing (zoom and pan inside
+// its box); the layer places that box on the frame. Layers sit on rows
+// (`row` 0, 1, ...): higher rows draw on top, and the videos on one row
+// never overlap in time.
+// Transitions, body effects, photo motion and clip color wheels belong to the
+// main track and are not used here. A layer is cut off where the reel ends.
+struct Layer {
+    Clip clip;
+    double start = 0.0;  // timeline seconds
+    double scale = 1.0;  // the box, as a fraction of the frame: 0.1..1
+    double x = 0.5;      // the box's center, as fractions of the frame
+    double y = 0.5;
+    int row = 0;
+
+    double end() const { return start + clip.duration(); }
+};
+
 // A caption word, in timeline seconds.
 struct Word {
     QString text;
@@ -132,6 +150,9 @@ struct Look {
 
 struct Project {
     QVector<Clip> clips;
+    // Drawn over the clips, kept sorted by row then start, so this is also
+    // the order they draw in. See normalizeLayers().
+    QVector<Layer> layers;
     Music music;
     QVector<Overlay> overlays;
     QVector<Effect> effects;
@@ -145,7 +166,7 @@ struct Project {
     bool captionAuto = true;
     double captionScale = 1.0;  // 0.5 to 2 times the style's size
     Look look;
-    QString platform = "instagram";      // instagram, tiktok
+    QString platform = "instagram";      // an id from Posting::targets(): instagram, facebook, youtube, tiktok
 
     // Where captions sit by default on a platform, as frame fractions (center):
     // in the middle of the safe zone across, and just above the app's own
@@ -192,6 +213,46 @@ struct Project {
     // A body effect on a clip; empty removes it. False if unknown.
     bool setClipBody(int index, const QString &id);
     bool setOverlayValue(int index, const QString &key, const QVariant &value);
+    // How many layer rows there are (rows are numbered 0..layerRows()-1).
+    int layerRows() const;
+    // Sorts the layers by row and start and closes up empty rows.
+    void normalizeLayers();
+    // Puts `layer` on its row, slid to the nearest place where it doesn't
+    // overlap the videos already there; a row past the last makes a new top
+    // row. Returns its index.
+    int placeLayer(Layer layer);
+
+    // What dropping something dragged up or down the timeline does. Rows on
+    // screen: 0 is the main track, 1.. are layer rows 0... `fromRow` is where
+    // the drag started, `moved` how many rows it moved (negative is up).
+    // Within half a row of a neighboring row it joins that row; more than
+    // half a row past it, a layer swaps rows with it. Main-track clips join
+    // the row they're dropped on, or a new top row past the last.
+    struct Drop {
+        QString action;  // none, join, newRow, toTrack, swap, swapTrack
+        int row = -1;    // the layer row joined or swapped with, when there is one
+    };
+    Drop dropTarget(int fromRow, double moved, int index) const;
+
+    // Takes clip `index` off the main track onto layer row `row` (a new top
+    // row when past the last), starting at `start`. Returns the layer's index,
+    // or -1 for a bad index or the last clip on the main track, which has to
+    // stay so there is a picture underneath.
+    int moveClipToLayer(int index, double start, int row = -1);
+    // Moves a layer onto `row` (a new top row when past the last), at `start`.
+    int moveLayerToRow(int index, int row, double start);
+    // Swaps the stacking order of two layer rows; returns `index`'s new index.
+    int swapLayerRows(int index, int otherRow);
+    // Swaps the stacking order of the layer row holding `index` and the main
+    // track: that row's videos become the main track, back to back, and the
+    // main track's clips become a layer row at their old times. Returns the
+    // main-track index of the clip that was layer `index`.
+    int swapRowWithTrack(int index);
+    // Puts a layer back on the main track where timeline time `time` falls;
+    // returns its clip index, or -1 for a bad index.
+    int moveLayerToTrack(int index, double time);
+    // start, in, out, scale, x, y, zoom, panX, panY; values are clamped.
+    bool setLayerValue(int index, const QString &key, double value);
     bool setLookValue(const QString &key, double value);
     // Color wheels: index -1 is the whole reel. Keys as ColorGrade::Grade::set.
     bool setGrade(int index, const QString &key, double value);

@@ -1,4 +1,5 @@
 #pragma once
+#include "accounts.h"
 
 #include <QFileSystemWatcher>
 #include <QHash>
@@ -16,8 +17,11 @@
 
 #include "jobs.h"
 #include "project.h"
+#include "publisher.h"
 
+class FacebookApi;
 class FilePicker;
+class YouTubeApi;
 class QNetworkAccessManager;
 class QNetworkReply;
 class Theme;
@@ -32,6 +36,7 @@ class ThumbProvider;
 class Backend : public QObject {
     Q_OBJECT
     Q_PROPERTY(QVariantList clips READ clips NOTIFY projectChanged)
+    Q_PROPERTY(QVariantList layers READ layers NOTIFY projectChanged)
     Q_PROPERTY(double duration READ duration NOTIFY projectChanged)
     Q_PROPERTY(QVariantList captionLines READ captionLines NOTIFY projectChanged)
     Q_PROPERTY(int wordCount READ wordCount NOTIFY projectChanged)
@@ -50,6 +55,10 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList effects READ effects NOTIFY projectChanged)
     Q_PROPERTY(QVariantList bodyKinds READ bodyKinds CONSTANT)
     Q_PROPERTY(QString platform READ platform NOTIFY projectChanged)
+    // Every platform (src/posting.h) as maps: id, label, limits, safe zone.
+    Q_PROPERTY(QVariantList platforms READ platforms CONSTANT)
+    // The project's platform, as one of those maps.
+    Q_PROPERTY(QVariantMap platformInfo READ platformInfo NOTIFY projectChanged)
     Q_PROPERTY(QString captionFont READ captionFont CONSTANT)
     Q_PROPERTY(double captionScale READ captionScale CONSTANT)
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY projectChanged)
@@ -66,10 +75,22 @@ class Backend : public QObject {
     Q_PROPERTY(QString postHashtags READ postHashtags NOTIFY projectChanged)
     // The Instagram account Reelcut can publish to through Instagram's API, or empty.
     Q_PROPERTY(QString instagramUser READ instagramUser NOTIFY instagramChanged)
+    // The Facebook Page and YouTube channel Reelcut publishes to, or empty.
+    Q_PROPERTY(Accounts *accountSettings READ accountSettings CONSTANT)
+    Q_PROPERTY(QString facebookPage READ facebookPage NOTIFY accountsChanged)
+    Q_PROPERTY(QString youtubeChannel READ youtubeChannel NOTIFY accountsChanged)
     // Scheduled posts (src/postscheduler.h): whether the backend is set up, and what's on it.
     Q_PROPERTY(bool schedulerReady READ schedulerReady NOTIFY schedulerChanged)
     Q_PROPERTY(QVariantList scheduledPosts READ scheduledPosts NOTIFY schedulerChanged)
     Q_PROPERTY(QString schedulerError READ schedulerError NOTIFY schedulerChanged)
+    Q_PROPERTY(QVariantList calendarPosts READ calendarPosts NOTIFY schedulerChanged)
+    Q_PROPERTY(QVariantMap schedulePreferences READ schedulePreferences WRITE setSchedulePreferences NOTIFY schedulePreferencesChanged)
+    // Schedule-page history, separate from the editor's: placeholder adds and
+    // removals and Timing changes. Real scheduled posts can't be brought back.
+    Q_PROPERTY(bool canUndoSchedule READ canUndoSchedule NOTIFY scheduleHistoryChanged)
+    Q_PROPERTY(bool canRedoSchedule READ canRedoSchedule NOTIFY scheduleHistoryChanged)
+    Q_PROPERTY(QString scheduleUndoText READ scheduleUndoText NOTIFY scheduleHistoryChanged)
+    Q_PROPERTY(QString scheduleRedoText READ scheduleRedoText NOTIFY scheduleHistoryChanged)
     Q_PROPERTY(QString whisperState READ whisperState NOTIFY jobChanged)
 
 public:
@@ -80,6 +101,7 @@ public:
     ~Backend() override;
 
     QVariantList clips() const;
+    QVariantList layers() const;
     double duration() const { return m_project.duration(); }
     QVariantList captionLines() const;
     int wordCount() const { return m_project.words.size(); }
@@ -100,6 +122,8 @@ public:
     QVariantList effects() const;
     QVariantList bodyKinds() const;
     QString platform() const { return m_project.platform; }
+    QVariantList platforms() const;
+    QVariantMap platformInfo() const;
     QString captionFont() const;
     // Qt pixel size per ASS font size unit; libass sizes a font by its line
     // height (ascent + descent), Qt by its em, so the preview scales by this.
@@ -133,6 +157,24 @@ public:
     Q_INVOKABLE void addUrls(const QList<QUrl> &urls, int at = -1);
     Q_INVOKABLE void removeClip(int index);
     Q_INVOKABLE void moveClip(int from, int to);
+    // Layers: videos over the main track (see Layer in src/project.h).
+    // Takes a clip off the main track onto layer row `row` (-1: a new top
+    // row) at `start`; returns the layer's index, or -1 (the last clip on
+    // the track stays).
+    Q_INVOKABLE int moveClipToLayer(int index, double start, int row = -1);
+    // What a drop would do (Project::dropTarget): {action, row}.
+    Q_INVOKABLE QVariantMap dropTarget(int fromRow, double moved, int index) const;
+    // Drops a clip or layer dragged `moved` rows up or down, at `start`
+    // (and, for a layer going back on the main track, at timeline `time`).
+    // Returns what is now selected: {kind: "clip"/"layer"/"", index}.
+    Q_INVOKABLE QVariantMap dropClip(int index, double start, double moved);
+    Q_INVOKABLE QVariantMap dropLayer(int index, double start, double moved, double time);
+    // Back onto the main track where `time` falls; returns the clip's index.
+    Q_INVOKABLE int moveLayerToTrack(int index, double time);
+    // start, in, out, scale, x, y, zoom, panX, panY; no undo step of its own
+    // (call checkpoint() first).
+    Q_INVOKABLE void setLayerValue(int index, const QString &key, double value);
+    Q_INVOKABLE void removeLayer(int index);
     Q_INVOKABLE bool split(double time);
     // in, out, speed, zoom, panX, panY; values are clamped to what makes sense
     Q_INVOKABLE void setClipValue(int index, const QString &key, double value);
@@ -193,6 +235,9 @@ public:
     Q_INVOKABLE void newProject();
     Q_INVOKABLE void open();
     Q_INVOKABLE bool openFile(const QString &path);
+    // Deterministic equivalents of the native file picker, shared with MCP.
+    // purpose: media, music, lut, open_project, save_project or export.
+    Q_INVOKABLE bool selectFiles(const QString &purpose, const QStringList &paths);
     Q_INVOKABLE void save();
     Q_INVOKABLE void saveAs();
     Q_INVOKABLE void exportVideo();
@@ -207,6 +252,27 @@ public:
     // for then instead of publishing now.
     Q_INVOKABLE void post(const QString &platform, const QString &caption, const QString &hashtags,
                           bool publish = false, double publishAtMs = 0);
+    // Several platforms at once (instagram, facebook, youtube), each through
+    // its API: checkPost for each, merged, plus YouTube's title rules. Gives
+    // what checkPost does, with the strictest limits of the platforms given.
+    Q_INVOKABLE QVariantMap checkPosts(const QStringList &platforms, const QString &caption, const QString &hashtags,
+                                       const QString &title) const;
+    // Whether every one of the platforms can post at that time: ok and problem.
+    Q_INVOKABLE QVariantMap checkWhen(const QStringList &platforms, double publishAtMs) const;
+    // Exports once, then publishes (or, with publishAtMs, schedules) on each
+    // platform in turn: platformPosted for each, then postPublished or
+    // postScheduled for all. One failing doesn't stop the others.
+    Q_INVOKABLE void postTo(const QStringList &platforms, const QString &caption, const QString &hashtags,
+                            const QString &title, double publishAtMs = 0);
+    // The next `count` open slots on each platform, from the Timing plan
+    // (schedulePreferences): today's slots still ahead, then tomorrow's, and so
+    // on. Skips slots already scheduled and times a platform won't take.
+    // Each: platform, publishAt (ms), label. Fewer when not enough fit.
+    Q_INVOKABLE QVariantList nextOpenSlots(const QStringList &platforms, int count) const;
+    // Exports once, then schedules the reel into the next `count` open slots
+    // on each platform. Never publishes straight away.
+    Q_INVOKABLE void queuePost(const QStringList &platforms, const QString &caption, const QString &hashtags,
+                               const QString &title, int count);
     // A typed time to post at: "2026-11-05 18:30", "tomorrow 9am", "today 6:30pm", "fri 9:00".
     // Gives ok, ms, label ("Thursday, Nov 5 at 6:30 PM · in 13 hours") and problem.
     Q_INVOKABLE QVariantMap parseWhen(const QString &text) const;
@@ -218,12 +284,48 @@ public:
     Q_INVOKABLE void rescheduleScheduled(const QString &id, double publishAtMs);
     Q_INVOKABLE void retryScheduled(const QString &id);
     Q_INVOKABLE void removeScheduled(const QString &id);
+    // Placeholders: calendar cards that hold a slot for a reel still to be made.
+    // They never upload or publish. Each carries a reference reel (the original
+    // to copy), a step-by-step filming guide and a note on what will be posted.
+    // spec: platform, publishAt (ms), title, and optionally reference (local
+    // video path), referenceUrl, note, caption and guide (list of strings).
+    // Gives the new id, or empty when the spec is invalid or the slot is taken.
+    Q_INVOKABLE QString addPlaceholder(const QVariantMap &spec);
+    Q_INVOKABLE bool removePlaceholder(const QString &id);
+    Q_INVOKABLE bool undoSchedule();
+    Q_INVOKABLE bool redoSchedule();
+    bool canUndoSchedule() const { return !m_scheduleUndo.isEmpty(); }
+    bool canRedoSchedule() const { return !m_scheduleRedo.isEmpty(); }
+    QString scheduleUndoText() const;
+    QString scheduleRedoText() const;
     bool schedulerReady() const;
     QVariantList scheduledPosts() const;
+    QVariantList calendarPosts() const;
+    // A frame of a local video for QML, e.g. a scheduled post's preview tile.
+    Q_INVOKABLE QString videoFrame(const QString &path, int ms = 1000);
+    QVariantMap schedulePreferences() const { return m_schedulePreferences; }
+    void setSchedulePreferences(const QVariantMap &preferences);
     QString schedulerError() const;
     class PostScheduler *scheduler() const { return m_scheduler; }
     Q_INVOKABLE void connectInstagram(const QString &token);
     Q_INVOKABLE void disconnectInstagram();
+    // Facebook: a Meta user token, or the connected Instagram one when it's a
+    // Meta (Unified Login) token. Several Pages come back through facebookPages.
+    Q_INVOKABLE void connectFacebook(const QString &token);
+    Q_INVOKABLE bool canConnectFacebookWithInstagram() const;
+    Q_INVOKABLE void connectFacebookWithInstagram();
+    Q_INVOKABLE void chooseFacebookPage(const QString &id);
+    Q_INVOKABLE void disconnectFacebook();
+    QString facebookPage() const;
+    Accounts *accountSettings() const { return m_accountSettings; }
+    // YouTube: opens Google's sign-in for the OAuth client given.
+    Q_INVOKABLE void connectYouTube(const QString &clientId, const QString &clientSecret);
+    Q_INVOKABLE void disconnectYouTube();
+    QString youtubeChannel() const;
+    // The API client for a platform, or null (TikTok has none).
+    Publisher *publisher(const QString &platform) const;
+    FacebookApi *facebook() const { return m_facebook; }
+    YouTubeApi *youtube() const { return m_youtube; }
     Q_INVOKABLE void openLink(const QUrl &url);
     QString instagramUser() const;
     void openForHand(const QString &platform);
@@ -248,11 +350,20 @@ signals:
     void postOpened(const QString &platform, const QString &file, const QString &steps);
     void instagramChanged();
     void instagramConnected(bool ok, const QString &message);
+    void accountsChanged();
+    void facebookConnected(bool ok, const QString &message);
+    // More than one Page: id and name of each, for chooseFacebookPage.
+    void facebookPages(const QVariantList &pages);
+    void youtubeConnected(bool ok, const QString &message);
+    // One platform of a postTo finished: how it went and where the post is.
+    void platformPosted(const QString &platform, bool ok, const QString &message, const QUrl &link);
     // Publishing through the API: what's happening (fraction -1 when unknown), then the result.
     void postProgress(const QString &text, double fraction);
     void postPublished(bool ok, const QString &message, const QUrl &link);
     void postScheduled(bool ok, const QString &message);
     void schedulerChanged();
+    void schedulePreferencesChanged();
+    void scheduleHistoryChanged();
     void projectChanged();
     void jobChanged();
     void messageChanged();
@@ -297,6 +408,47 @@ private:
     QString m_postFile;
     class InstagramApi *m_instagram = nullptr;
     class PostScheduler *m_scheduler = nullptr;
+    Accounts *m_accountSettings = nullptr;
+    FacebookApi *m_facebook = nullptr;
+    YouTubeApi *m_youtube = nullptr;
+
+    // The postTo in progress: the platforms still to go, what to post, and
+    // how each finished so far (platform, ok, message, link).
+    void postNext();
+    void platformDone(const QString &platform, bool ok, const QString &message, const QUrl &link);
+    bool readyToExport();
+    // Checks a post can go out: the platforms in order, caption, connections.
+    bool preparePost(const QStringList &requested, const QString &caption, const QString &hashtags,
+                     const QString &postTitle, QStringList *platforms);
+    // Exports once, then posts each (platform, time) in turn; an invalid time publishes now.
+    void exportAndPost(const QStringList &platforms, const QString &caption, const QString &hashtags,
+                       const QString &postTitle, const QList<QPair<QString, QDateTime>> &items);
+    QStringList m_postQueue;
+    QList<QDateTime> m_postTimes;  // when each of m_postQueue goes out
+    bool m_postScheduledRun = false;
+    QString m_posting;  // the platform being posted to now
+    PostRequest m_postRequest;
+    QVariantList m_postResults;
+    // Facebook and YouTube posts scheduled from here, held by the platforms
+    // themselves: retained for 90 days for calendar confirmation/history.
+    QVariantList m_directScheduled;
+    QVariantList m_placeholders;
+    QString placeholdersFile() const;
+    void loadPlaceholders();
+    bool savePlaceholders() const;
+    // Each step: kind (placeholderAdded, placeholderRemoved, timing), label,
+    // and what it needs to go either way.
+    QVariantList m_scheduleUndo, m_scheduleRedo;
+    void recordSchedule(const QVariantMap &step);
+    bool applySchedule(const QVariantMap &step, bool undo);
+    bool insertPlaceholder(const QVariantMap &placeholder, int index);
+    bool takePlaceholder(const QString &id, QVariantMap *removed = nullptr, int *index = nullptr);
+    bool writeSchedulePreferences(const QVariantMap &normalized);
+    QVariantMap m_scheduleVideos;   // "platform:publishAtMs" -> the exported file
+    QVariantMap m_schedulePreferences;
+    void loadSchedulePreferences();
+    QString directScheduledFile() const;
+    void loadDirectScheduled();
 
     QHash<QString, int> m_thumbKeys;
     QString m_stateDir;

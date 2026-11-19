@@ -19,15 +19,26 @@
 
 namespace {
 
+QString safeError(QNetworkReply *reply, QString error) {
+    const auto items = QUrlQuery(reply->request().url()).queryItems(QUrl::FullyDecoded);
+    for (const auto &item : items) {
+        if (item.first.contains("token") && !item.second.isEmpty()) {
+            error.replace(item.second, "[hidden]");
+            error.replace(QString::fromLatin1(QUrl::toPercentEncoding(item.second)), "[hidden]");
+        }
+    }
+    return error;
+}
+
 // The JSON a reply carried, and Instagram's error message if it's one.
 QJsonObject readJson(QNetworkReply *reply, QString *error) {
     const QByteArray body = reply->readAll();
     const QJsonObject json = QJsonDocument::fromJson(body).object();
     const QString apiError = json.value("error").toObject().value("message").toString();
     if (!apiError.isEmpty())
-        *error = apiError;
+        *error = safeError(reply, apiError);
     else if (reply->error() != QNetworkReply::NoError)
-        *error = reply->errorString();
+        *error = QObject::tr("Could not reach Instagram. Check your connection and try again.");
     return json;
 }
 
@@ -38,9 +49,9 @@ void whenDoneRaw(QNetworkReply *reply, QObject *context,
     QObject::connect(reply, &QNetworkReply::finished, context, [reply, then] {
         const QByteArray body = reply->readAll();
         const QJsonObject json = QJsonDocument::fromJson(body).object();
-        QString error = json.value("error").toObject().value("message").toString();
+        QString error = safeError(reply, json.value("error").toObject().value("message").toString());
         if (error.isEmpty() && reply->error() != QNetworkReply::NoError)
-            error = reply->errorString();
+            error = QObject::tr("Could not reach Instagram. Check your connection and try again.");
         reply->deleteLater();
         then(json, error, body);
     });
@@ -59,7 +70,9 @@ void whenDone(QNetworkReply *reply, QObject *context,
 
 }  // namespace
 
-InstagramApi::InstagramApi(QObject *parent) : QObject(parent), m_net(new QNetworkAccessManager(this)) {
+InstagramApi::InstagramApi(QObject *parent) : Publisher(parent), m_net(new QNetworkAccessManager(this)) {
+    // A stalled request (no bytes for 2 min) fails instead of hanging forever.
+    m_net->setTransferTimeout(120000);
     QTimer::singleShot(0, this, [this] {
         load();
         refreshIfOld();
@@ -126,21 +139,20 @@ QNetworkReply *InstagramApi::get(const QString &path, const QList<QPair<QString,
 }
 
 QNetworkReply *InstagramApi::postForm(const QString &path, const QList<QPair<QString, QString>> &form) {
-    QUrlQuery q;
-    for (const auto &item : form)
-        q.addQueryItem(item.first, item.second);
-    q.addQueryItem("access_token", m_token);
     QNetworkRequest request(QUrl(apiBase() + path));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
-    return m_net->post(request, q.query(QUrl::FullyEncoded).toUtf8());
+    // Percent-encoded throughout, so a "+" in a caption isn't read as a space.
+    return m_net->post(request, Net::formBody(form + QList<QPair<QString, QString>>{{"access_token", m_token}}));
 }
 
 void InstagramApi::connectToken(const QString &token) {
+    const int generation = ++m_connectionGeneration;
     const QString previous = m_token;
     m_token = token.trimmed();
     if (usesUnifiedLogin()) {
         whenDone(get("/me/assigned_instagram_accounts", {{"fields", "id,username"}}), this,
-                 [this, previous](const QJsonObject &json, const QString &error) {
+                 [this, previous, generation](const QJsonObject &json, const QString &error) {
+            if (generation != m_connectionGeneration) return;
             const QJsonArray accounts = json.value("data").toArray();
             QString reason = error;
             if (reason.isEmpty() && accounts.isEmpty())
@@ -164,7 +176,8 @@ void InstagramApi::connectToken(const QString &token) {
         return;
     }
     whenDoneRaw(get("/me", {{"fields", "user_id,username"}}), this,
-                [this, previous](const QJsonObject &json, const QString &error, const QByteArray &body) {
+                [this, previous, generation](const QJsonObject &json, const QString &error, const QByteArray &body) {
+        if (generation != m_connectionGeneration) return;
         if (!error.isEmpty() || json.value("username").toString().isEmpty()) {
             m_token = previous;
             emit connectFinished(false, tr("Instagram didn't accept that token: %1")
@@ -186,6 +199,7 @@ void InstagramApi::connectToken(const QString &token) {
 }
 
 void InstagramApi::disconnect() {
+    ++m_connectionGeneration;
     QFile::remove(accountFile());
     m_token.clear();
     m_userId.clear();
@@ -198,8 +212,10 @@ void InstagramApi::refreshIfOld() {
     // keeps it from running out (60 days) as long as Reelcut gets opened.
     if (usesUnifiedLogin() || m_token.isEmpty() || !m_issued.isValid() || m_issued.daysTo(QDateTime::currentDateTimeUtc()) < 7)
         return;
+    const int generation = m_connectionGeneration;
     whenDone(get("/refresh_access_token", {{"grant_type", "ig_refresh_token"}, {"access_token", m_token}}), this,
-             [this](const QJsonObject &json, const QString &error) {
+             [this, generation](const QJsonObject &json, const QString &error) {
+                 if (generation != m_connectionGeneration) return;
                  if (error.isEmpty() && !json.value("access_token").toString().isEmpty())
                      save(json.value("access_token").toString(), m_userId, m_username, QDateTime::currentDateTimeUtc());
              });

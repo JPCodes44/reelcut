@@ -219,6 +219,7 @@ bool downloadFile(const QString &url, const QString &path, const QString &what, 
         return false;
     }
     QNetworkAccessManager network;
+    network.setTransferTimeout(120000);  // a stalled download fails instead of hanging the worker
     QNetworkRequest request{QUrl(url)};
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply *reply = network.get(request);
@@ -303,6 +304,12 @@ bool exportProject(const Project &project, const QString &accent, const QString 
     for (const Clip &clip : project.clips) {
         if (!QFileInfo::exists(clip.path)) {
             *error = QObject::tr("%1 is missing.").arg(clip.path);
+            return false;
+        }
+    }
+    for (const Layer &layer : project.layers) {
+        if (!QFileInfo::exists(layer.clip.path)) {
+            *error = QObject::tr("%1 is missing.").arg(layer.clip.path);
             return false;
         }
     }

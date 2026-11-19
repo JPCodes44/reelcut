@@ -1,6 +1,9 @@
 #include "project.h"
 
+#include "posting.h"
+
 #include <QColor>
+#include <algorithm>
 #include <QDir>
 #include <QJsonArray>
 
@@ -20,6 +23,9 @@ bool nonFiniteNumber(const QVariant &v) {
 namespace {
 // Shorter than a frame, a cut would leave an empty clip behind.
 constexpr double kMinClip = 1.0 / Project::Fps;
+// The latest a layer may start: keeps export's millisecond delays and filter
+// numbers in range whatever a file or a drag hands in.
+constexpr double kMaxLayerStart = 24 * 3600.0;
 
 QString storePath(const QString &path, const QString &baseDir) {
     if (path.isEmpty() || baseDir.isEmpty())
@@ -31,6 +37,64 @@ QString loadPath(const QString &path, const QString &baseDir) {
     if (path.isEmpty() || baseDir.isEmpty() || QDir::isAbsolutePath(path))
         return path;
     return QDir::cleanPath(QDir(baseDir).absoluteFilePath(path));
+}
+
+QJsonObject clipToJson(const Clip &c, const QString &baseDir) {
+    QJsonObject clip{
+        {"path", storePath(c.path, baseDir)}, {"in", c.in}, {"out", c.out}, {"speed", c.speed},
+        {"zoom", c.zoom}, {"panX", c.panX}, {"panY", c.panY}, {"width", c.width},
+        {"height", c.height}, {"audio", c.audio}, {"sourceDuration", c.sourceDuration},
+        {"still", c.still}, {"motion", c.motion}, {"transition", c.transition},
+        {"transitionSeconds", c.transitionSeconds}, {"body", c.body}, {"bodyAmount", c.bodyAmount},
+    };
+    if (!c.grade.isNeutral())
+        clip["grade"] = c.grade.toJson();
+    return clip;
+}
+
+Clip clipFromJson(const QJsonObject &o, const QString &baseDir) {
+    Clip c;
+    c.path = loadPath(o.value("path").toString(), baseDir);
+    c.in = qMax(0.0, o.value("in").toDouble());  // as setClipValue
+    c.out = o.value("out").toDouble();
+    c.speed = qBound(0.25, o.value("speed").toDouble(1.0), 4.0);
+    c.zoom = qBound(1.0, o.value("zoom").toDouble(1.0), 3.0);
+    c.panX = qBound(-1.0, o.value("panX").toDouble(), 1.0);
+    c.panY = qBound(-1.0, o.value("panY").toDouble(), 1.0);
+    c.width = o.value("width").toInt();
+    c.height = o.value("height").toInt();
+    c.audio = o.value("audio").toBool(true);
+    c.sourceDuration = o.value("sourceDuration").toDouble(c.out);
+    c.still = o.value("still").toBool(false);
+    c.motion = Clip::motions().contains(o.value("motion").toString()) ? o.value("motion").toString() : "none";
+    const Transitions::Kind *kind = Transitions::find(o.value("transition").toString());
+    c.transition = kind ? kind->id : QString();
+    c.transitionSeconds = qBound(Transitions::MinSeconds, o.value("transitionSeconds").toDouble(Transitions::DefaultSeconds),
+                                 Transitions::MaxSeconds);
+    const Body::Kind *body = Body::find(o.value("body").toString());
+    c.body = body ? body->id : QString();
+    c.bodyAmount = qBound(0.0, o.value("bodyAmount").toDouble(c.bodyAmount), 1.0);
+    c.grade = ColorGrade::Grade::fromJson(o.value("grade").toObject());
+    if (c.still) {
+        c.audio = false;
+        c.speed = 1.0;
+        c.sourceDuration = Clip::MaxPhotoSeconds;
+    }
+    // Never past the source, as setClipValue: a damaged file with an
+    // enormous out would make the timeline build a tick per second of it.
+    if (c.sourceDuration > c.in)
+        c.out = qMin(c.out, c.sourceDuration);
+    return c;
+}
+
+// A clip as a layer uses it: the main track's extras (transition, body
+// effect, photo motion, color wheels) don't apply there.
+Clip layerClip(Clip c) {
+    c.transition.clear();
+    c.body.clear();
+    c.motion = "none";
+    c.grade = {};
+    return c;
 }
 }  // namespace
 
@@ -121,17 +185,17 @@ void Project::replaceClipWithRanges(int index, const QVector<QPair<double, doubl
 
 QJsonObject Project::toJson(const QString &baseDir) const {
     QJsonArray clipArray;
-    for (const Clip &c : clips) {
-        QJsonObject clip{
-            {"path", storePath(c.path, baseDir)}, {"in", c.in}, {"out", c.out}, {"speed", c.speed},
-            {"zoom", c.zoom}, {"panX", c.panX}, {"panY", c.panY}, {"width", c.width},
-            {"height", c.height}, {"audio", c.audio}, {"sourceDuration", c.sourceDuration},
-            {"still", c.still}, {"motion", c.motion}, {"transition", c.transition},
-            {"transitionSeconds", c.transitionSeconds}, {"body", c.body}, {"bodyAmount", c.bodyAmount},
-        };
-        if (!c.grade.isNeutral())
-            clip["grade"] = c.grade.toJson();
-        clipArray.append(clip);
+    for (const Clip &c : clips)
+        clipArray.append(clipToJson(c, baseDir));
+    QJsonArray layerArray;
+    for (const Layer &l : layers) {
+        QJsonObject layer = clipToJson(l.clip, baseDir);
+        layer["start"] = l.start;
+        layer["scale"] = l.scale;
+        layer["x"] = l.x;
+        layer["y"] = l.y;
+        layer["row"] = l.row;
+        layerArray.append(layer);
     }
     QJsonArray overlayArray;
     for (const Overlay &o : overlays) {
@@ -156,6 +220,7 @@ QJsonObject Project::toJson(const QString &baseDir) const {
     return {
         {"version", 1},
         {"clips", clipArray},
+        {"layers", layerArray},
         {"music", QJsonObject{{"path", storePath(music.path, baseDir)}, {"volume", music.volume},
                               {"offset", music.offset}, {"duck", music.duck}}},
         {"overlays", overlayArray},
@@ -178,41 +243,24 @@ QJsonObject Project::toJson(const QString &baseDir) const {
 Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
     Project p;
     for (const auto &value : json.value("clips").toArray()) {
-        const QJsonObject o = value.toObject();
-        Clip c;
-        c.path = loadPath(o.value("path").toString(), baseDir);
-        c.in = qMax(0.0, o.value("in").toDouble());  // as setClipValue
-        c.out = o.value("out").toDouble();
-        c.speed = qBound(0.25, o.value("speed").toDouble(1.0), 4.0);
-        c.zoom = qBound(1.0, o.value("zoom").toDouble(1.0), 3.0);
-        c.panX = qBound(-1.0, o.value("panX").toDouble(), 1.0);
-        c.panY = qBound(-1.0, o.value("panY").toDouble(), 1.0);
-        c.width = o.value("width").toInt();
-        c.height = o.value("height").toInt();
-        c.audio = o.value("audio").toBool(true);
-        c.sourceDuration = o.value("sourceDuration").toDouble(c.out);
-        c.still = o.value("still").toBool(false);
-        c.motion = Clip::motions().contains(o.value("motion").toString()) ? o.value("motion").toString() : "none";
-        const Transitions::Kind *kind = Transitions::find(o.value("transition").toString());
-        c.transition = kind ? kind->id : QString();
-        c.transitionSeconds = qBound(Transitions::MinSeconds, o.value("transitionSeconds").toDouble(Transitions::DefaultSeconds),
-                                     Transitions::MaxSeconds);
-        const Body::Kind *body = Body::find(o.value("body").toString());
-        c.body = body ? body->id : QString();
-        c.bodyAmount = qBound(0.0, o.value("bodyAmount").toDouble(c.bodyAmount), 1.0);
-        c.grade = ColorGrade::Grade::fromJson(o.value("grade").toObject());
-        if (c.still) {
-            c.audio = false;
-            c.speed = 1.0;
-            c.sourceDuration = Clip::MaxPhotoSeconds;
-        }
-        // Never past the source, as setClipValue: a damaged file with an
-        // enormous out would make the timeline build a tick per second of it.
-        if (c.sourceDuration > c.in)
-            c.out = qMin(c.out, c.sourceDuration);
+        const Clip c = clipFromJson(value.toObject(), baseDir);
         if (c.out > c.in)
             p.clips.append(c);
     }
+    for (const auto &value : json.value("layers").toArray()) {
+        const QJsonObject o = value.toObject();
+        Layer l;
+        l.clip = layerClip(clipFromJson(o, baseDir));
+        l.start = qBound(0.0, o.value("start").toDouble(), kMaxLayerStart);
+        l.scale = qBound(0.1, o.value("scale").toDouble(1.0), 1.0);
+        l.x = qBound(0.0, o.value("x").toDouble(0.5), 1.0);
+        l.y = qBound(0.0, o.value("y").toDouble(0.5), 1.0);
+        // Files from before rows: each layer on a row of its own.
+        l.row = qMax(0, o.value("row").toInt(int(p.layers.size())));
+        if (l.clip.out > l.clip.in)
+            p.layers.append(l);
+    }
+    p.normalizeLayers();
     const QJsonObject m = json.value("music").toObject();
     p.music.path = loadPath(m.value("path").toString(), baseDir);
     p.music.volume = m.value("volume").toDouble(p.music.volume);
@@ -279,7 +327,7 @@ Project Project::fromJson(const QJsonObject &json, const QString &baseDir) {
     p.look.filter = filter ? filter->id : QString();
     p.look.filterAmount = qBound(0.0, l.value("filterAmount").toDouble(1.0), 1.0);
     p.look.grade = ColorGrade::Grade::fromJson(l.value("grade").toObject());
-    p.platform = json.value("platform").toString(p.platform) == "tiktok" ? "tiktok" : "instagram";
+    p.platform = Posting::normalize(json.value("platform").toString(p.platform));
     // Files from before captionAuto: captions still on the old fixed default
     // count as never moved.
     p.captionAuto = json.contains("captionAuto") ? json.value("captionAuto").toBool()
@@ -524,25 +572,21 @@ bool Project::setFilter(const QString &id) {
 }
 
 namespace {
-// Safe zones in 1080x1920 pixels: what each app's buttons and text leave
-// clear. Keep in step with the dashed outline in Preview.qml.
-struct SafeZone { double left, top, right, bottom; };
-SafeZone safeZone(const QString &platform) {
-    if (platform == "tiktok")
-        return {40, 160, 1080 - 150, 1920 - 480};
-    return {40, 220, 1080 - 130, 1920 - 420};
+// Safe zones come from the platform table (src/posting.cpp).
+Posting::SafeZone safeZone(const QString &platform) {
+    return Posting::find(Posting::normalize(platform))->safe;
 }
 }
 
 QPointF Project::captionHome(const QString &platform) {
-    const SafeZone z = safeZone(platform);
+    const Posting::SafeZone z = safeZone(platform);
     // 190px above the bottom of the safe zone leaves room for two lines of
     // captions before the app's own text starts.
     return {(z.left + z.right) / 2 / 1080.0, (z.bottom - 190) / 1920.0};
 }
 
 void Project::setPlatform(const QString &name) {
-    platform = name == "tiktok" ? "tiktok" : "instagram";
+    platform = Posting::normalize(name);
     if (captionAuto) {
         const QPointF home = captionHome(platform);
         captionX = home.x();
@@ -551,7 +595,7 @@ void Project::setPlatform(const QString &name) {
     }
     // Moved by hand: keep the spot, but not under the new app's buttons. The
     // center stays a caption's half-height (about 90px) inside the zone.
-    const SafeZone z = safeZone(platform);
+    const Posting::SafeZone z = safeZone(platform);
     captionX = qBound((z.left + 120) / 1080.0, captionX, (z.right - 120) / 1080.0);
     captionY = qBound((z.top + 90) / 1920.0, captionY, (z.bottom - 90) / 1920.0);
 }
@@ -656,4 +700,222 @@ int Project::addOverlay(const QString &text, double start, double end) {
     overlay.end = end > overlay.start ? end : qMin(overlay.start + 3.0, qMax(duration(), overlay.start + 1.0));
     overlays.append(overlay);
     return overlays.size() - 1;
+}
+
+int Project::layerRows() const {
+    int rows = 0;
+    for (const Layer &l : layers)
+        rows = qMax(rows, l.row + 1);
+    return rows;
+}
+
+void Project::normalizeLayers() {
+    std::stable_sort(layers.begin(), layers.end(), [](const Layer &a, const Layer &b) {
+        return a.row != b.row ? a.row < b.row : a.start < b.start;
+    });
+    int next = 0, last = -1;
+    for (Layer &l : layers) {
+        if (l.row != last) {
+            last = l.row;
+            ++next;
+        }
+        l.row = next - 1;
+    }
+}
+
+int Project::placeLayer(Layer layer) {
+    layer.row = qBound(0, layer.row, layerRows());
+    // NaN or infinity from a drag would place it nowhere (or forever).
+    layer.start = std::isfinite(layer.start) ? qBound(0.0, layer.start, kMaxLayerStart) : 0.0;
+    const double length = layer.clip.duration();
+    QVector<QPair<double, double>> taken;
+    for (const Layer &l : layers)
+        if (l.row == layer.row)
+            taken.append({l.start, l.end()});
+    auto fits = [&](double start) {
+        if (start < 0.0)
+            return false;
+        for (const auto &t : taken)
+            if (start < t.second - 1e-6 && start + length > t.first + 1e-6)
+                return false;
+        return true;
+    };
+    // Where it was dropped, or the nearest spot just before or after a
+    // video on the row. Right after the last one always fits.
+    QVector<double> candidates{layer.start};
+    for (const auto &t : taken)
+        candidates << t.second << t.first - length;
+    double best = -1.0;
+    for (double c : candidates)
+        if (fits(c) && (best < 0.0 || qAbs(c - layer.start) < qAbs(best - layer.start)))
+            best = c;
+    layer.start = best;
+    // Inserted in order, so closing up empty rows afterwards keeps its index.
+    int at = 0;
+    while (at < layers.size() && (layers[at].row < layer.row || (layers[at].row == layer.row && layers[at].start < layer.start)))
+        ++at;
+    layers.insert(at, layer);
+    normalizeLayers();
+    return at;
+}
+
+Project::Drop Project::dropTarget(int fromRow, double moved, int index) const {
+    // qRound of NaN or infinity is undefined; a negative row is not on screen.
+    if (!std::isfinite(moved) || fromRow < 0)
+        return {"none", -1};
+    const int rows = layerRows();
+    if (fromRow == 0) {
+        // A main-track clip: the row it lands on, or a new top row past the last.
+        const int k = qRound(moved);
+        if (moved < 0.5 || index < 0 || index >= clips.size() || clips.size() < 2)
+            return {"none", -1};
+        if (k <= rows)
+            return {"join", k - 1};
+        return {"newRow", rows};
+    }
+    if (qAbs(moved) < 0.5 || index < 0 || index >= layers.size())
+        return {"none", -1};
+    const int neighbor = fromRow + (moved < 0 ? -1 : 1);
+    const bool past = qAbs(moved) > 1.5;
+    if (neighbor == 0)
+        return {past ? "swapTrack" : "toTrack", -1};
+    if (neighbor > rows) {
+        // Below the last row: a row of its own, unless it already has one.
+        int onRow = 0;
+        for (const Layer &l : layers)
+            onRow += l.row == layers[index].row;
+        return onRow > 1 ? Drop{"newRow", rows} : Drop{"none", -1};
+    }
+    return {past ? "swap" : "join", neighbor - 1};
+}
+
+int Project::moveClipToLayer(int index, double start, int row) {
+    if (index < 0 || index >= clips.size() || clips.size() < 2)
+        return -1;
+    Layer layer;
+    layer.clip = layerClip(clips[index]);
+    layer.start = start;
+    layer.row = row < 0 ? layerRows() : row;
+    clips.remove(index);
+    return placeLayer(layer);
+}
+
+int Project::moveLayerToRow(int index, int row, double start) {
+    if (index < 0 || index >= layers.size())
+        return -1;
+    Layer layer = layers.takeAt(index);
+    // Its old row may now be empty; count rows as they were.
+    const int rows = qMax(layerRows(), layer.row + 1);
+    layer.row = qBound(0, row, rows);
+    layer.start = start;
+    // Keep row numbers stable until it's placed, then close up.
+    return placeLayer(layer);
+}
+
+int Project::swapLayerRows(int index, int otherRow) {
+    if (index < 0 || index >= layers.size() || otherRow < 0 || otherRow >= layerRows())
+        return -1;
+    const int mine = layers[index].row;
+    const double start = layers[index].start;
+    for (Layer &l : layers)
+        l.row = l.row == mine ? otherRow : l.row == otherRow ? mine : l.row;
+    normalizeLayers();
+    // Videos on a row never share a start, so (row, start) finds it again.
+    for (int i = 0; i < layers.size(); ++i)
+        if (layers[i].row == otherRow && layers[i].start == start)
+            return i;
+    return -1;
+}
+
+int Project::swapRowWithTrack(int index) {
+    if (index < 0 || index >= layers.size())
+        return -1;
+    const int row = layers[index].row;
+    // The row's videos, in time order, become the main track.
+    QVector<Clip> track;
+    QVector<Layer> rest;
+    int at = -1;
+    for (int i = 0; i < layers.size(); ++i) {
+        if (layers[i].row == row) {
+            if (i == index)
+                at = track.size();
+            track.append(layers[i].clip);
+        } else {
+            rest.append(layers[i]);
+        }
+    }
+    // The main track's clips become that row, where they played.
+    const QVector<double> starts = clipStarts();
+    for (int i = 0; i < clips.size(); ++i) {
+        Layer l;
+        l.clip = layerClip(clips[i]);
+        l.start = starts[i];
+        l.row = row;
+        rest.append(l);
+    }
+    clips = track;
+    layers = rest;
+    normalizeLayers();
+    // Overlaps from transitions: slide each onto its row again.
+    QVector<Layer> placed = layers;
+    layers.clear();
+    for (const Layer &l : placed)
+        placeLayer(l);
+    return at;
+}
+
+int Project::moveLayerToTrack(int index, double time) {
+    if (index < 0 || index >= layers.size())
+        return -1;
+    // Before the clip under `time` if it lands in that clip's first half, after it otherwise.
+    int at = clips.size();
+    const QVector<double> starts = clipStarts();
+    for (int i = 0; i < clips.size(); ++i) {
+        if (time < starts[i] + clips[i].duration() / 2.0) {
+            at = i;
+            break;
+        }
+    }
+    clips.insert(at, layers[index].clip);
+    layers.remove(index);
+    normalizeLayers();
+    return at;
+}
+
+bool Project::setLayerValue(int index, const QString &key, double value) {
+    if (!std::isfinite(value))
+        return false;
+    if (index < 0 || index >= layers.size())
+        return false;
+    Layer &l = layers[index];
+    if (key == "start") {
+        // Not into the videos either side of it on its row.
+        double lo = 0.0, hi = kMaxLayerStart;
+        for (int i = 0; i < layers.size(); ++i) {
+            if (i == index || layers[i].row != l.row)
+                continue;
+            if (layers[i].start < l.start)
+                lo = qMax(lo, layers[i].end());
+            else
+                hi = qMin(hi, layers[i].start);
+        }
+        l.start = qBound(lo, value, qMax(lo, hi - l.clip.duration()));
+    }
+    else if (key == "scale")
+        l.scale = qBound(0.1, value, 1.0);
+    else if (key == "x")
+        l.x = qBound(0.0, value, 1.0);
+    else if (key == "y")
+        l.y = qBound(0.0, value, 1.0);
+    else if (key == "in" || key == "out" || key == "zoom" || key == "panX" || key == "panY") {
+        // Same limits as a clip on the main track.
+        Project scratch;
+        scratch.clips.append(l.clip);
+        if (!scratch.setClipValue(0, key, value))
+            return false;
+        l.clip = scratch.clips[0];
+    } else {
+        return false;
+    }
+    return true;
 }

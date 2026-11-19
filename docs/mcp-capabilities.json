@@ -1,0 +1,1227 @@
+{
+  "coveragePercent": 100,
+  "definition": "Functional application API coverage; native chooser/drag gestures are mapped to path/value equivalents. This is not line coverage.",
+  "exposed": [
+    "backend.addEffect",
+    "backend.addFisheyeText",
+    "backend.addOverlay",
+    "backend.addUrls",
+    "backend.applyPreset",
+    "backend.canConnectFacebookWithInstagram",
+    "backend.cancelJob",
+    "backend.cancelScheduled",
+    "backend.checkPost",
+    "backend.checkPosts",
+    "backend.checkWhen",
+    "backend.checkpoint",
+    "backend.chooseFacebookPage",
+    "backend.clearCaptions",
+    "backend.clearLut",
+    "backend.connectFacebook",
+    "backend.connectFacebookWithInstagram",
+    "backend.connectInstagram",
+    "backend.connectYouTube",
+    "backend.copyPostText",
+    "backend.cutSilences",
+    "backend.disconnectFacebook",
+    "backend.disconnectInstagram",
+    "backend.disconnectYouTube",
+    "backend.dismissMessage",
+    "backend.dropClip",
+    "backend.dropLayer",
+    "backend.dropTarget",
+    "backend.exportPhotos",
+    "backend.locate",
+    "backend.moveClip",
+    "backend.moveClipToLayer",
+    "backend.moveLayerToTrack",
+    "backend.newProject",
+    "backend.notify",
+    "backend.openFile",
+    "backend.openLink",
+    "backend.parseWhen",
+    "backend.post",
+    "backend.postTo",
+    "backend.redo",
+    "backend.refreshScheduled",
+    "backend.removeClip",
+    "backend.removeEffect",
+    "backend.removeLayer",
+    "backend.removeMusic",
+    "backend.removeOverlay",
+    "backend.removeScheduled",
+    "backend.rescheduleScheduled",
+    "backend.resetCaptionPosition",
+    "backend.retryScheduled",
+    "backend.save",
+    "backend.selectFiles",
+    "backend.setCaptionStyle",
+    "backend.setCaptionValue",
+    "backend.setCaptionY",
+    "backend.setClipBody",
+    "backend.setClipMotion",
+    "backend.setClipTransition",
+    "backend.setClipValue",
+    "backend.setEffectValue",
+    "backend.setFilter",
+    "backend.setGrade",
+    "backend.setLayerValue",
+    "backend.setLookValue",
+    "backend.setMusicValue",
+    "backend.setOverlayValue",
+    "backend.setPlatform",
+    "backend.setPostText",
+    "backend.setWordText",
+    "backend.setupScheduler",
+    "backend.showExport",
+    "backend.showPostVideo",
+    "backend.split",
+    "backend.suggestWhen",
+    "backend.transcribe",
+    "backend.undo",
+    "accounts.cancelSelection",
+    "accounts.connectToken",
+    "accounts.connectYouTube",
+    "accounts.disconnectAccount",
+    "accounts.selectFacebookPage",
+    "accounts.testConnection",
+    "stats.history",
+    "stats.loadDaily",
+    "stats.refresh",
+    "downloads.cancel",
+    "downloads.copyFile",
+    "downloads.copyPath",
+    "downloads.download",
+    "downloads.remove",
+    "downloads.rescan",
+    "downloads.showFolder",
+    "credits.clearSince",
+    "credits.refresh",
+    "credits.resetSince",
+    "credits.signIn",
+    "credits.signOut"
+  ],
+  "exposedMethods": 98,
+  "humanSteps": [
+    "OAuth consent and password/CAPTCHA entry remain in the provider's browser flow.",
+    "Native drag gestures use equivalent local file paths or clipboard payloads; no arbitrary browser or desktop control is exposed."
+  ],
+  "mapped": [
+    {
+      "action": "backend.addMedia",
+      "equivalent": "app_backend_select_files: purpose=media, paths=[local files]"
+    },
+    {
+      "action": "backend.chooseLut",
+      "equivalent": "app_backend_select_files: purpose=lut, paths=[cube file]"
+    },
+    {
+      "action": "backend.chooseMusic",
+      "equivalent": "app_backend_select_files: purpose=music, paths=[audio file]"
+    },
+    {
+      "action": "backend.exportVideo",
+      "equivalent": "app_backend_select_files: purpose=export, paths=[output.mp4]; export for saved projects"
+    },
+    {
+      "action": "backend.open",
+      "equivalent": "app_backend_open_file(path); open_project(path) for saved projects"
+    },
+    {
+      "action": "backend.pixelColor",
+      "equivalent": "sample_preview_color(x,y); preview_frame for rendered output"
+    },
+    {
+      "action": "backend.saveAs",
+      "equivalent": "app_backend_select_files: purpose=save_project, paths=[output.reel]"
+    },
+    {
+      "action": "downloads.startDrag",
+      "equivalent": "get_app_state(downloads) returns local paths; app_downloads_copy_file provides the native file clipboard payload"
+    }
+  ],
+  "mappedMethods": 8,
+  "properties": [
+    {
+      "component": "backend",
+      "property": "clips",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "layers",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "duration",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "captionLines",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "wordCount",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "captionStyle",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "captionX",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "captionY",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "captionAuto",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "captionSize",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "overlays",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "music",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "look",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "filters",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "transitions",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "effectKinds",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "effects",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "bodyKinds",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "platform",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "platforms",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "platformInfo",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "captionFont",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "captionScale",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "canUndo",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "canRedo",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "dirty",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "title",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "busy",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "busyText",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "progress",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "message",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "messageIsError",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "lastExport",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "postCaption",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "postHashtags",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "instagramUser",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "equivalent": "accounts component",
+      "property": "accountSettings"
+    },
+    {
+      "component": "backend",
+      "property": "facebookPage",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "youtubeChannel",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "schedulerReady",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "scheduledPosts",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "schedulerError",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "calendarPosts",
+      "writable": false
+    },
+    {
+      "component": "backend",
+      "property": "schedulePreferences",
+      "writable": true
+    },
+    {
+      "component": "backend",
+      "property": "whisperState",
+      "writable": false
+    },
+    {
+      "component": "accounts",
+      "property": "entries",
+      "writable": false
+    },
+    {
+      "component": "accounts",
+      "property": "facebookPages",
+      "writable": false
+    },
+    {
+      "component": "accounts",
+      "property": "busy",
+      "writable": false
+    },
+    {
+      "component": "stats",
+      "property": "busy",
+      "writable": false
+    },
+    {
+      "component": "stats",
+      "property": "status",
+      "writable": false
+    },
+    {
+      "component": "stats",
+      "property": "refreshed",
+      "writable": false
+    },
+    {
+      "component": "stats",
+      "property": "reels",
+      "writable": false
+    },
+    {
+      "component": "stats",
+      "property": "accounts",
+      "writable": false
+    },
+    {
+      "component": "stats",
+      "property": "metricInfo",
+      "writable": false
+    },
+    {
+      "component": "downloads",
+      "property": "items",
+      "writable": false
+    },
+    {
+      "component": "downloads",
+      "property": "active",
+      "writable": false
+    },
+    {
+      "component": "downloads",
+      "property": "folder",
+      "writable": false
+    },
+    {
+      "component": "downloads",
+      "property": "available",
+      "writable": false
+    },
+    {
+      "component": "credits",
+      "property": "connected",
+      "writable": false
+    },
+    {
+      "component": "credits",
+      "property": "signingIn",
+      "writable": false
+    },
+    {
+      "component": "credits",
+      "property": "status",
+      "writable": false
+    },
+    {
+      "component": "credits",
+      "property": "plan",
+      "writable": false
+    },
+    {
+      "component": "credits",
+      "property": "loaded",
+      "writable": false
+    },
+    {
+      "component": "credits",
+      "property": "balance",
+      "writable": false
+    },
+    {
+      "component": "credits",
+      "property": "spentSince",
+      "writable": false
+    },
+    {
+      "component": "credits",
+      "property": "spentAll",
+      "writable": false
+    },
+    {
+      "component": "credits",
+      "property": "spentToday",
+      "writable": false
+    },
+    {
+      "component": "credits",
+      "property": "spentRecent",
+      "writable": false
+    },
+    {
+      "component": "credits",
+      "property": "since",
+      "writable": false
+    },
+    {
+      "component": "credits",
+      "property": "updated",
+      "writable": false
+    },
+    {
+      "component": "credits",
+      "property": "dollarsPerCredit",
+      "writable": true
+    },
+    {
+      "component": "credits",
+      "property": "budget",
+      "writable": true
+    },
+    {
+      "component": "credits",
+      "property": "overBudget",
+      "writable": false
+    },
+    {
+      "component": "credits",
+      "property": "recent",
+      "writable": false
+    },
+    {
+      "component": "theme",
+      "property": "accent",
+      "writable": false
+    },
+    {
+      "component": "theme",
+      "property": "accentForeground",
+      "writable": false
+    },
+    {
+      "component": "theme",
+      "property": "radius",
+      "writable": false
+    },
+    {
+      "component": "language",
+      "property": "language",
+      "writable": false
+    }
+  ],
+  "totalMethods": 106,
+  "totalProperties": 78,
+  "uiActions": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "component": "ui",
+      "description": "Read non-secret live UI state: navigation, playback, selection, stats/calendar detail and the current post draft.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "method": "state",
+      "name": "app_ui_state"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Open editor, stats, schedule, settings, downloads or help. Settings may select a platform.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          },
+          "page": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "page",
+          "platform"
+        ],
+        "type": "object"
+      },
+      "method": "navigate",
+      "name": "app_ui_navigate"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Seek the live editor, synchronizing all players and the timeline.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          },
+          "seconds": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "seconds"
+        ],
+        "type": "object"
+      },
+      "method": "seek",
+      "name": "app_ui_seek"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Play, pause, toggle, refresh, step_forward or step_backward (one frame).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "method": "playback",
+      "name": "app_ui_playback"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Select a clip, layer, text overlay, effect, captions, music or none, and show its inspector.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "index": {
+            "type": "integer"
+          },
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "index"
+        ],
+        "type": "object"
+      },
+      "method": "select",
+      "name": "app_ui_select"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Delete the currently selected editor item using the UI's selection semantics.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "method": "deleteSelection",
+      "name": "app_ui_delete_selection"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Set editor view options: safeZones, showAppUi, downloadsVisible, helpVisible, inspectorTab, clipWheelsOpen, lookWheelsOpen, timelineZoom (1..40), timelineScroll, musicHeight (52..320), scheduleTimingOpen.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          },
+          "options": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "options"
+        ],
+        "type": "object"
+      },
+      "method": "setOptions",
+      "name": "app_ui_set_options"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Select the Settings accounts or scheduling tab.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          },
+          "tab": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tab"
+        ],
+        "type": "object"
+      },
+      "method": "settingsTab",
+      "name": "app_ui_settings_tab"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Edit Calendar Timing draft fields by platform (start HH:mm, spacingMinutes 60/90/120), optionally Apply the same validated UI action.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "apply": {
+            "type": "boolean"
+          },
+          "fields": {
+            "type": "object"
+          },
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fields",
+          "apply"
+        ],
+        "type": "object"
+      },
+      "method": "scheduleTiming",
+      "name": "app_ui_schedule_timing"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Set Stats platform, periodDays, sortKey, sortDesc or topMetric. Unknown keys and invalid values are rejected.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          },
+          "options": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "options"
+        ],
+        "type": "object"
+      },
+      "method": "statsFilter",
+      "name": "app_ui_stats_filter"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Open a reel's Stats detail and load its daily growth.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "id"
+        ],
+        "type": "object"
+      },
+      "method": "statsSelect",
+      "name": "app_ui_stats_select"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Close Stats detail, preserving filters.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "method": "statsCloseDetail",
+      "name": "app_ui_stats_close_detail"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Show a local calendar date (YYYY-MM-DD); handles local midnight/DST rather than fixed 24-hour shifts.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "date": {
+            "type": "string"
+          },
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "date"
+        ],
+        "type": "object"
+      },
+      "method": "scheduleDay",
+      "name": "app_ui_schedule_day"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "component": "ui",
+      "description": "Read planned slots and cards for a platform on the selected calendar day.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform"
+        ],
+        "type": "object"
+      },
+      "method": "scheduleSlots",
+      "name": "app_ui_schedule_slots"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Choose a future calendar slot and open Post with the platform/time prefilled; does not publish.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "publishAtMs": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "platform",
+          "publishAtMs"
+        ],
+        "type": "object"
+      },
+      "method": "scheduleChoose",
+      "name": "app_ui_schedule_choose"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Open a scheduled/published calendar card by platform/id.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "id"
+        ],
+        "type": "object"
+      },
+      "method": "scheduleDetail",
+      "name": "app_ui_schedule_detail"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Close calendar post detail.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "method": "scheduleCloseDetail",
+      "name": "app_ui_schedule_close_detail"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Open Post for a platform without publishing.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform"
+        ],
+        "type": "object"
+      },
+      "method": "postOpen",
+      "name": "app_ui_post_open"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Set the live Post dialog's draft: title, caption, hashtags, platforms, useApi, scheduleLater, when. Credentials are not draft fields.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "fields": {
+            "type": "object"
+          },
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fields"
+        ],
+        "type": "object"
+      },
+      "method": "postDraft",
+      "name": "app_ui_post_draft"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Explicitly press the Post dialog's enabled Publish/Schedule/Next action using its current validated draft. May publish externally.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "method": "postSubmit",
+      "name": "app_ui_post_submit"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Return from Post connection/scheduler setup to the draft.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "method": "postBack",
+      "name": "app_ui_post_back"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Close idle Post/Settings dialogs; active publishing must be cancelled explicitly first.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "method": "closeDialogs",
+      "name": "app_ui_close_dialogs"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Open or close the preview's caption editor.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          },
+          "open": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "open"
+        ],
+        "type": "object"
+      },
+      "method": "previewPostEditor",
+      "name": "app_ui_preview_post_editor"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Apply Escape semantics: close details/pages, hide help, clear selection.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "method": "escape",
+      "name": "app_ui_escape"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Accept or reject an existing native Reelcut confirmation; no callback or script can be supplied.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "accept": {
+            "type": "boolean"
+          },
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "accept"
+        ],
+        "type": "object"
+      },
+      "method": "resolveConfirmation",
+      "name": "app_ui_resolve_confirmation"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "component": "ui",
+      "description": "Request the GUI to quit. Refuses dirty projects unless discard_unsaved is explicitly true; save via app_backend_select_files first otherwise.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "discard_unsaved": {
+            "type": "boolean"
+          },
+          "instance": {
+            "description": "Live app instance ID when multiple windows are running.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "discard_unsaved"
+        ],
+        "type": "object"
+      },
+      "method": "quit",
+      "name": "app_ui_quit"
+    }
+  ],
+  "unsupported": []
+}

@@ -15,6 +15,8 @@
 #include <QTimer>
 
 PostScheduler::PostScheduler(QObject *parent) : QObject(parent), m_net(new QNetworkAccessManager(this)) {
+    // A stalled request (no bytes for 2 min) fails instead of hanging forever.
+    m_net->setTransferTimeout(120000);
     QTimer::singleShot(0, this, [this] {
         load();
         if (configured())

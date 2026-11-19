@@ -70,6 +70,8 @@ Rectangle {
         if (local >= 0) other.show(n, nc.in + local * nc.speed, playing)
         else other.show(n, nc.in, false)
     }
+    function automationPostEditorVisible() { return postEditor.visible }
+    function automationPostEditor(open) { if (open) postEditor.begin(); else postEditor.close() }
     function refresh() { seek(time) }
     function toggle() { playing ? pause() : play() }
     function play() {
@@ -153,9 +155,17 @@ Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
 
+            // Clicking the empty space around the frame drops the selection.
+            MouseArea {
+                objectName: "stageBackground"
+                anchors.fill: parent
+                onPressed: win.selectionKind = "none"
+            }
+
             // The 9:16 frame, as large as fits.
             Rectangle {
                 id: frame
+                objectName: "previewFrame"
                 readonly property real scaleFactor: height / 1920
                 // Where dragged text and captions snap, in frame pixels: the
                 // frame's center lines and thirds (where the eye goes first),
@@ -186,6 +196,7 @@ Rectangle {
                 // shader that blends them. The filter look applies on top.
                 Item {
                     id: picture
+                    objectName: "previewPicture"
                     anchors.fill: parent
                     layer.enabled: backend.look.filter.length > 0 && backend.look.filterAmount > 0
                     layer.effect: ShaderEffect {
@@ -266,6 +277,22 @@ Rectangle {
                                 fragmentShader: "qrc:/shaders/transition.frag.qsb"
                             }
 
+                            // Layers over the main track, later ones on top,
+                            // under the effect and the look (as in the export).
+                            Repeater {
+                                model: backend.layers.length
+                                delegate: LayerSlot {
+                                    required property int index
+                                    objectName: "layerSlot" + index
+                                    layerIndex: index
+                                    // Higher rows on top; a row's videos never overlap.
+                                    z: 3 + (backend.layers[index] ? backend.layers[index].row || 0 : 0)
+                                    frameWidth: frame.width
+                                    frameHeight: frame.height
+                                    time: root.time
+                                    playing: root.playing
+                                }
+                            }
                         }
                     }
                 }
@@ -369,6 +396,48 @@ Rectangle {
                     }
                 }
 
+                // The selected layer's box: drag to move it, corners or wheel to resize.
+                EditBox {
+                    id: layerBox
+                    objectName: "layerBox"
+                    readonly property int index: win.selectionKind === "layer" ? win.selectedLayer : -1
+                    readonly property var layerData: index >= 0 && index < backend.layers.length ? backend.layers[index] : null
+                    readonly property bool showing: layerData !== null && root.time >= (layerData.start || 0) && root.time < (layerData.end || 0)
+                    readonly property real boxScale: layerData && layerData.scale > 0 ? layerData.scale : 1
+                    visible: showing
+                    selected: showing
+                    snap: frame.snapGuides
+                    width: layerData ? frame.width * boxScale : 0
+                    height: layerData ? frame.height * boxScale : 0
+                    x: layerData ? frame.width * (layerData.x || 0) - width / 2 : 0
+                    y: layerData ? frame.height * (layerData.y || 0) - height / 2 : 0
+                    property real startX
+                    property real startY
+                    property real startScale: 1
+                    // Edits only while the layer it started on is still there,
+                    // and never with a NaN or infinite value (a 0-wide frame).
+                    function edit(key, value) {
+                        if (index >= 0 && index < backend.layers.length && isFinite(value))
+                            backend.setLayerValue(index, key, value)
+                    }
+                    onPressed: {
+                        if (!layerData) return
+                        startX = layerData.x || 0
+                        startY = layerData.y || 0
+                        startScale = boxScale
+                    }
+                    onBegan: backend.checkpoint()
+                    onDragged: function(dx, dy) {
+                        if (frame.width < 1 || frame.height < 1) return
+                        edit("x", startX + dx / frame.width)
+                        edit("y", startY + dy / frame.height)
+                    }
+                    onResized: function(factor) { if (factor > 0) edit("scale", startScale * factor) }
+                    onWheeled: function(steps) {
+                        if (layerData) edit("scale", boxScale * Math.pow(1.05, steps))
+                    }
+                }
+
                 // Temperature, as a light tint over the picture.
                 Rectangle {
                     anchors.fill: parent
@@ -394,8 +463,12 @@ Rectangle {
                     scale: frame.width / 360
                     anchors.centerIn: parent
                     visible: root.showAppUi
-                    tiktok: backend.platform === "tiktok"
-                    username: backend.instagramUser.length > 0 && !tiktok ? backend.instagramUser : "your_account"
+                    platform: backend.platform
+                    // The connected account on that platform, when there is one.
+                    username: (platform === "instagram" ? backend.instagramUser
+                               : platform === "facebook" ? backend.facebookPage
+                               : platform === "youtube" ? backend.youtubeChannel : "") || "your_account"
+                    title: backend.title
                     caption: backend.postCaption
                     hashtags: backend.checkPost(backend.platform, backend.postCaption, backend.postHashtags).tags.join(" ")
                     onEditRequested: postEditor.begin()
@@ -405,11 +478,11 @@ Rectangle {
                     id: safeArea
                     anchors.fill: parent
                     visible: root.safeZones && backend.clips.length > 0
-                    readonly property bool tiktok: backend.platform === "tiktok"
-                    readonly property real topEdge: (tiktok ? 160 : 220) * frame.scaleFactor
-                    readonly property real bottomEdge: height - (tiktok ? 480 : 420) * frame.scaleFactor
-                    readonly property real leftEdge: 40 * frame.scaleFactor
-                    readonly property real rightEdge: width - (tiktok ? 150 : 130) * frame.scaleFactor
+                    readonly property var zone: backend.platformInfo
+                    readonly property real topEdge: zone.safeTop * frame.scaleFactor
+                    readonly property real bottomEdge: zone.safeBottom * frame.scaleFactor
+                    readonly property real leftEdge: zone.safeLeft * frame.scaleFactor
+                    readonly property real rightEdge: zone.safeRight * frame.scaleFactor
                     ShapePath {
                         strokeColor: Qt.rgba(1, 1, 1, 0.7)
                         strokeWidth: 1
@@ -491,7 +564,7 @@ Rectangle {
             Item { Layout.fillWidth: true }
             Button {
                 objectName: "editPostText"
-                text: qsTr("Caption and tags")
+                text: backend.platform === "youtube" ? qsTr("Description and tags") : qsTr("Caption and tags")
                 onClicked: postEditor.begin()
             }
         }
@@ -555,11 +628,11 @@ Rectangle {
             spacing: 8
             Label {
                 Layout.fillWidth: true
-                text: qsTr("%1 preview text").arg(backend.platform === "tiktok" ? "TikTok" : "Instagram")
+                text: qsTr("%1 preview text").arg(backend.platformInfo.label)
                 font.bold: true
                 wrapMode: Text.WordWrap
             }
-            Label { text: qsTr("Caption") }
+            Label { text: backend.platform === "youtube" ? qsTr("Description (optional)") : qsTr("Caption") }
             ScrollView {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 120
@@ -582,7 +655,9 @@ Rectangle {
             }
             Label {
                 Layout.fillWidth: true
-                text: qsTr("Saved with your project and used when posting. App UI is preview only.")
+                text: backend.platform === "youtube"
+                      ? qsTr("Shorts show the title in the feed. This optional description and hashtags are available in the video details. Edit your title in the Post dialog.")
+                      : qsTr("Saved with your project and used when posting. App UI is preview only.")
                 wrapMode: Text.WordWrap
                 font.pixelSize: 12
                 opacity: 0.7

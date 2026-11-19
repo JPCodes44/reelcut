@@ -15,6 +15,9 @@
 #include <QGuiApplication>
 #include <QImage>
 #include <QJsonArray>
+#include <QLocale>
+#include <QSet>
+#include <QUuid>
 #include <QJsonDocument>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -27,6 +30,8 @@
 
 #include "captions.h"
 #include "instagramapi.h"
+#include "facebookapi.h"
+#include "youtubeapi.h"
 #include "postscheduler.h"
 #include "posting.h"
 #include "filepicker.h"
@@ -71,13 +76,42 @@ Backend::Backend(FilePicker *picker, ThumbProvider *thumbs, Theme *theme, QObjec
         setMessage(message, !ok);
         emit instagramConnected(ok, message);
     });
-    connect(m_instagram, &InstagramApi::progress, this, &Backend::postProgress);
-    connect(m_instagram, &InstagramApi::published, this, [this](bool ok, const QString &message, const QUrl &link) {
-        setMessage(ok ? message : message + "\n" + tr("The caption is copied; post it by hand from the page."), !ok);
-        if (!ok)
-            openForHand("instagram");  // the manual way still works
-        emit postPublished(ok, message, link);
+    m_facebook = new FacebookApi(this);
+    m_youtube = new YouTubeApi(this);
+    if (!stateDir.isEmpty()) {
+        m_facebook->stateDir = stateDir;
+        m_youtube->stateDir = stateDir;
+    }
+    m_youtube->openUrl = [this](const QUrl &url) { openLink(url); };
+    connect(m_facebook, &FacebookApi::connectFinished, this, [this](bool ok, const QString &message) {
+        setMessage(message, !ok);
+        emit facebookConnected(ok, message);
     });
+    connect(m_facebook, &FacebookApi::pagesFound, this, &Backend::facebookPages);
+    connect(m_youtube, &YouTubeApi::connectFinished, this, [this](bool ok, const QString &message) {
+        setMessage(message, !ok);
+        emit youtubeConnected(ok, message);
+    });
+    m_accountSettings = new Accounts(m_instagram, m_facebook, m_youtube, stateDir, this);
+    connect(m_accountSettings, &Accounts::connectionRejected, this, [this](const QString &platform, const QString &message) {
+        setMessage(message, true);
+        if (platform == "instagram") emit instagramConnected(false, message);
+        else if (platform == "facebook") emit facebookConnected(false, message);
+    });
+    // Every API publisher reports to the postTo in progress.
+    for (Publisher *p : {static_cast<Publisher *>(m_instagram), static_cast<Publisher *>(m_facebook),
+                         static_cast<Publisher *>(m_youtube)}) {
+        connect(p, &Publisher::progress, this, &Backend::postProgress);
+        connect(p, &Publisher::published, this, [this, p](bool ok, const QString &message, const QUrl &link) {
+            if (m_posting == p->platform())
+                platformDone(p->platform(), ok, message, link);
+        });
+        if (p != m_instagram)
+            connect(p, &Publisher::accountChanged, this, &Backend::accountsChanged);
+    }
+    loadDirectScheduled();
+    loadPlaceholders();
+    loadSchedulePreferences();
     m_scheduler = new PostScheduler(this);
     if (!stateDir.isEmpty())
         m_scheduler->stateDir = stateDir;
@@ -85,8 +119,8 @@ Backend::Backend(FilePicker *picker, ThumbProvider *thumbs, Theme *theme, QObjec
     connect(m_scheduler, &PostScheduler::postsChanged, this, &Backend::schedulerChanged);
     connect(m_scheduler, &PostScheduler::progress, this, &Backend::postProgress);
     connect(m_scheduler, &PostScheduler::scheduled, this, [this](bool ok, const QString &message) {
-        setMessage(message, !ok);
-        emit postScheduled(ok, message);
+        if (m_posting == "instagram")
+            platformDone("instagram", ok, message, {});
     });
     connect(m_scheduler, &PostScheduler::changed, this, [this](bool ok, const QString &message) {
         setMessage(message, !ok);
@@ -153,6 +187,22 @@ QVariantList Backend::clips() const {
             {"bodyMode", Body::find(c.body) ? Body::find(c.body)->previewMode : -1},
             {"mask", !c.body.isEmpty() && Segment::hasMask(c) ? QUrl::fromLocalFile(Segment::maskPath(c)).toString() : QString()},
             {"grade", c.grade.toMap()},
+        });
+    }
+    return list;
+}
+
+QVariantList Backend::layers() const {
+    QVariantList list;
+    for (const Layer &l : m_project.layers) {
+        const Clip &c = l.clip;
+        list.append(QVariantMap{
+            {"path", c.path}, {"name", fileName(c.path)}, {"in", c.in}, {"out", c.out},
+            {"speed", c.speed}, {"zoom", c.zoom}, {"panX", c.panX}, {"panY", c.panY},
+            {"width", c.width}, {"height", c.height}, {"audio", c.audio}, {"still", c.still},
+            {"sourceDuration", c.sourceDuration}, {"start", l.start}, {"end", l.end()},
+            {"duration", c.duration()}, {"scale", l.scale}, {"x", l.x}, {"y", l.y}, {"row", l.row},
+            {"thumb", m_thumbKeys.value(c.path, -1)}, {"offline", !QFileInfo::exists(c.path)},
         });
     }
     return list;
@@ -405,6 +455,76 @@ void Backend::moveClip(int from, int to) {
     changed();
 }
 
+int Backend::moveClipToLayer(int index, double start, int row) {
+    Project next = m_project;
+    const int layer = next.moveClipToLayer(index, start, row);
+    if (layer < 0) {
+        if (index >= 0 && index < m_project.clips.size())
+            setMessage(tr("Keep at least one clip on the main video track to lay others over."), true);
+        return -1;
+    }
+    checkpoint();
+    m_project = next;
+    changed();
+    return layer;
+}
+
+QVariantMap Backend::dropTarget(int fromRow, double moved, int index) const {
+    const Project::Drop drop = m_project.dropTarget(fromRow, moved, index);
+    return {{"action", drop.action}, {"row", drop.row}};
+}
+
+QVariantMap Backend::dropClip(int index, double start, double moved) {
+    const Project::Drop drop = m_project.dropTarget(0, moved, index);
+    if (drop.action != "join" && drop.action != "newRow")
+        return {{"kind", ""}, {"index", -1}};
+    const int layer = moveClipToLayer(index, start, drop.row);
+    return {{"kind", layer >= 0 ? "layer" : ""}, {"index", layer}};
+}
+
+QVariantMap Backend::dropLayer(int index, double start, double moved, double time) {
+    if (index < 0 || index >= m_project.layers.size())
+        return {{"kind", ""}, {"index", -1}};
+    const Project::Drop drop = m_project.dropTarget(m_project.layers[index].row + 1, moved, index);
+    if (drop.action == "none")
+        return {{"kind", ""}, {"index", -1}};
+    checkpoint();
+    QVariantMap result;
+    if (drop.action == "toTrack")
+        result = {{"kind", "clip"}, {"index", m_project.moveLayerToTrack(index, time)}};
+    else if (drop.action == "swapTrack")
+        result = {{"kind", "clip"}, {"index", m_project.swapRowWithTrack(index)}};
+    else if (drop.action == "swap")
+        result = {{"kind", "layer"}, {"index", m_project.swapLayerRows(index, drop.row)}};
+    else
+        result = {{"kind", "layer"}, {"index", m_project.moveLayerToRow(index, drop.row, start)}};
+    changed();
+    return result;
+}
+
+int Backend::moveLayerToTrack(int index, double time) {
+    if (index < 0 || index >= m_project.layers.size())
+        return -1;
+    checkpoint();
+    const int at = m_project.moveLayerToTrack(index, time);
+    changed();
+    return at;
+}
+
+void Backend::setLayerValue(int index, const QString &key, double value) {
+    if (m_project.setLayerValue(index, key, value))
+        changed();
+}
+
+void Backend::removeLayer(int index) {
+    if (index < 0 || index >= m_project.layers.size())
+        return;
+    checkpoint();
+    m_project.layers.remove(index);
+    m_project.normalizeLayers();
+    changed();
+}
+
 bool Backend::split(double time) {
     Project next = m_project;
     if (!next.split(time))
@@ -488,7 +608,7 @@ void Backend::findPeople(std::function<void()> then) {
         if (*stop)
             return;
         if (!error.isEmpty()) {
-            m_afterExport = nullptr;  // a post waiting on this export is abandoned
+            m_afterExport = nullptr;  // the export waiting on the masks won't run
             setMessage(error, true);
             return;
         }
@@ -615,6 +735,7 @@ void Backend::transcribe() {
 void Backend::downloadModel() {
     if (!m_network)
         m_network = new QNetworkAccessManager(this);
+        m_network->setTransferTimeout(120000);
     QDir().mkpath(QFileInfo(modelPath()).absolutePath());
     auto *part = new QFile(modelPath() + ".part", this);
     if (!part->open(QIODevice::WriteOnly)) {
@@ -847,6 +968,17 @@ void Backend::clearLut() {
     changed();
 }
 
+QVariantList Backend::platforms() const {
+    QVariantList out;
+    for (const Posting::Target &t : Posting::targets())
+        out << t.toMap();
+    return out;
+}
+
+QVariantMap Backend::platformInfo() const {
+    return Posting::find(Posting::normalize(m_project.platform))->toMap();
+}
+
 void Backend::setPlatform(const QString &platform) {
     if (platform == m_project.platform)
         return;
@@ -865,6 +997,29 @@ void Backend::resetCaptionPosition() {
 }
 
 // ---- Files ----
+
+bool Backend::selectFiles(const QString &purpose, const QStringList &paths) {
+    const QMap<QString,int> kinds{{"media",FilePicker::Media},{"music",FilePicker::Music},{"lut",FilePicker::Lut},
+        {"open_project",FilePicker::OpenProject},{"save_project",FilePicker::SaveProject},{"export",FilePicker::Export}};
+    if (!kinds.contains(purpose) || paths.isEmpty() || (purpose!="media" && paths.size()!=1)) {
+        setMessage(tr("Choose a valid purpose and file path."),true);return false;
+    }
+    QList<QUrl> urls;
+    for (const auto &path:paths) {
+        const QUrl url=QUrl::fromUserInput(path,{},QUrl::AssumeLocalFile);
+        if (!url.isLocalFile() || ((purpose!="save_project" && purpose!="export") && !QFileInfo::exists(url.toLocalFile()))) {
+            setMessage(tr("Choose an existing local file."),true);return false;
+        }
+        urls << url;
+    }
+    const QString path=urls.first().toLocalFile();
+    if (purpose=="open_project") return openFile(path);
+    if (purpose=="save_project") return writeProject(path.endsWith(".reel")?path:path+".reel");
+    if (purpose=="export" && (busy() || m_project.clips.isEmpty())) {
+        setMessage(tr("Wait for the current job or add a clip before exporting."),true);return false;
+    }
+    picked(kinds.value(purpose),urls);return true;
+}
 
 void Backend::picked(int kind, const QList<QUrl> &urls) {
     if (urls.isEmpty())
@@ -937,6 +1092,8 @@ bool Backend::openFile(const QString &path) {
     m_dirty = false;
     for (const Clip &clip : m_project.clips)
         thumbKey(clip.path);
+    for (const Layer &layer : m_project.layers)
+        thumbKey(layer.clip.path);
     m_onDisk = bytes;
     watchProject();
     recordOpenProject();
@@ -974,6 +1131,8 @@ void Backend::reloadIfChangedOutside() {
     m_dirty = false;
     for (const Clip &clip : m_project.clips)
         thumbKey(clip.path);
+    for (const Layer &layer : m_project.layers)
+        thumbKey(layer.clip.path);
     emit projectChanged();
     setMessage(tr("Updated from outside Reelcut. Ctrl+Z undoes it."), false);
 }
@@ -1034,6 +1193,12 @@ void Backend::exportVideo() {
             return;
         }
     }
+    for (const Layer &layer : m_project.layers) {
+        if (!QFileInfo::exists(layer.clip.path)) {
+            setMessage(tr("%1 is missing, so the reel can't be exported.").arg(layer.clip.path), true);
+            return;
+        }
+    }
     QString folder = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
     if (!QDir(folder).exists())
         folder = QDir::homePath();
@@ -1052,6 +1217,12 @@ QVariantMap Backend::checkPost(const QString &platform, const QString &caption, 
         problems << tr("%1 allows %2 characters; this is %3.").arg(target->label).arg(target->maxChars).arg(text.size());
     if (target && target->maxHashtags > 0 && tags > target->maxHashtags)
         problems << tr("%1 allows %2 hashtags; this has %3.").arg(target->label).arg(target->maxHashtags).arg(tags);
+    const double length = m_project.duration();
+    if (target && target->minSeconds > 0 && !m_project.clips.isEmpty() && length < target->minSeconds - 0.05)
+        problems << tr("%1 reels must be at least %2 seconds; this is %3.")
+                        .arg(target->label).arg(target->minSeconds).arg(length, 0, 'f', 1);
+    if (target && target->maxSeconds > 0 && length > target->maxSeconds + 0.05)
+        problems << tr("%1 allows up to %2 seconds; this is %3.").arg(target->label).arg(target->maxSeconds).arg(length, 0, 'f', 1);
     return {{"text", text}, {"chars", int(text.size())}, {"maxChars", target ? target->maxChars : 0},
             {"hashtags", tags}, {"maxHashtags", target ? target->maxHashtags : 0},
             {"tags", Posting::hashtags(hashtags)}, {"problems", problems}, {"ok", target && problems.isEmpty()}};
@@ -1062,12 +1233,33 @@ QString Backend::instagramUser() const {
 }
 
 void Backend::connectInstagram(const QString &token) {
-    m_instagram->connectToken(token);
+    m_accountSettings->connectToken("instagram", token);
 }
 
 void Backend::disconnectInstagram() {
-    m_instagram->disconnect();
+    m_accountSettings->disconnectAccount("instagram");
 }
+
+void Backend::connectFacebook(const QString &token) { m_accountSettings->connectToken("facebook", token); }
+
+bool Backend::canConnectFacebookWithInstagram() const {
+    // A Meta (Unified Login) token is a Facebook user token too.
+    return m_instagram->connected() && m_instagram->token().startsWith("EAA");
+}
+
+void Backend::connectFacebookWithInstagram() {
+    if (canConnectFacebookWithInstagram())
+        m_accountSettings->connectToken("facebook", m_instagram->token());
+}
+
+void Backend::chooseFacebookPage(const QString &id) { m_accountSettings->selectFacebookPage(id); }
+void Backend::disconnectFacebook() { m_accountSettings->disconnectAccount("facebook"); }
+QString Backend::facebookPage() const { return m_facebook->connected() ? m_facebook->account() : QString(); }
+void Backend::connectYouTube(const QString &clientId, const QString &clientSecret) {
+    m_accountSettings->connectYouTube(clientId, clientSecret);
+}
+void Backend::disconnectYouTube() { m_accountSettings->disconnectAccount("youtube"); }
+QString Backend::youtubeChannel() const { return m_youtube->connected() ? m_youtube->account() : QString(); }
 
 void Backend::openLink(const QUrl &url) {
     if (openUrl)
@@ -1095,41 +1287,45 @@ void Backend::setPostText(const QString &caption, const QString &hashtags, bool 
     changed();
 }
 
-void Backend::post(const QString &platform, const QString &caption, const QString &hashtags, bool publish,
-                   double publishAtMs) {
-    const Posting::Target *target = Posting::find(platform);
-    if (!target || busy() || !checkPost(platform, caption, hashtags).value("ok").toBool())
-        return;
-    const QDateTime when = publishAtMs > 0 ? QDateTime::fromMSecsSinceEpoch(qint64(publishAtMs)) : QDateTime();
-    if (when.isValid()) {
-        if (platform != "instagram" || !publish || !m_instagram->connected()) {
-            setMessage(tr("Scheduling needs a connected Instagram account."), true);
-            return;
-        }
-        if (!m_scheduler->configured()) {
-            setMessage(tr("The scheduler isn't set up yet."), true);
-            return;
-        }
-        if (when < QDateTime::currentDateTime().addSecs(-60)) {
-            setMessage(tr("That time has already passed."), true);
-            return;
-        }
-    }
+bool Backend::readyToExport() {
     if (m_project.clips.isEmpty()) {
         setMessage(tr("Add a clip first."), true);
-        return;
+        return false;
     }
     for (const Clip &clip : m_project.clips)
         if (!QFileInfo::exists(clip.path)) {
             setMessage(tr("%1 is missing, so the reel can't be exported.").arg(clip.path), true);
-            return;
+            return false;
         }
+    for (const Layer &layer : m_project.layers)
+        if (!QFileInfo::exists(layer.clip.path)) {
+            setMessage(tr("%1 is missing, so the reel can't be exported.").arg(layer.clip.path), true);
+            return false;
+        }
+    return true;
+}
+
+void Backend::post(const QString &platform, const QString &caption, const QString &hashtags, bool publish,
+                   double publishAtMs) {
+    // Through the platform's API when it's connected.
+    const Publisher *api = publisher(platform);
+    if (publish && api && api->connected())
+        return postTo({platform}, caption, hashtags, title(), publishAtMs);
+    const Posting::Target *target = Posting::find(platform);
+    if (!target || busy() || !checkPost(platform, caption, hashtags).value("ok").toBool())
+        return;
+    if (publishAtMs > 0) {
+        setMessage(tr("Scheduling needs a connected %1 account.").arg(target->label), true);
+        return;
+    }
+    if (!readyToExport())
+        return;
     // Remember what was typed, and frame for that platform's safe zones.
     if (m_project.postCaption != caption || m_project.postHashtags != hashtags || m_project.platform != platform) {
         checkpoint();
         m_project.postCaption = caption;
         m_project.postHashtags = hashtags;
-        m_project.platform = platform;
+        m_project.setPlatform(platform);
         changed();
     }
     QString folder = !postFolder.isEmpty() ? postFolder : QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
@@ -1137,25 +1333,321 @@ void Backend::post(const QString &platform, const QString &caption, const QStrin
         folder = QDir::homePath();
     const QString output = freePath(folder, title() + "-" + platform, ".mp4");
     const QString text = Posting::text(caption, hashtags);
-    m_afterExport = [this, target, text, publish, when](const QString &file) {
+    m_afterExport = [this, target, text](const QString &file) {
         m_postFile = file;
-        // On the clipboard either way, in case it's finished by hand.
         QGuiApplication::clipboard()->setText(text);
-        if (when.isValid()) {
-            m_scheduler->schedule(file, title(), text, when,
-                                  {m_instagram->userId(), m_instagram->username(), m_instagram->token(),
-                                   m_instagram->apiBase()});
-            return;
-        }
-        if (publish && target->id == "instagram" && m_instagram->connected()) {
-            m_instagram->publish(file, text);
-            return;
-        }
         openForHand(target->id);
         setMessage(tr("%1 is open. Drag in %2, then paste the caption.").arg(target->label, fileName(file)), false);
         emit postOpened(target->id, file, target->steps);
     };
     runExport(output, "h264_nvenc");
+}
+
+QVariantMap Backend::checkPosts(const QStringList &platforms, const QString &caption, const QString &hashtags,
+                                const QString &title) const {
+    QStringList problems;
+    int maxChars = 0, maxHashtags = 0;
+    QVariantMap any;
+    for (const QString &platform : platforms) {
+        const QVariantMap one = checkPost(platform, caption, hashtags);
+        any = one;
+        for (const QVariant &p : one.value("problems").toList())
+            if (!problems.contains(p.toString()))
+                problems << p.toString();
+        const int chars = one.value("maxChars").toInt(), tags = one.value("maxHashtags").toInt();
+        if (chars > 0 && (maxChars == 0 || chars < maxChars))
+            maxChars = chars;
+        if (tags > 0 && (maxHashtags == 0 || tags < maxHashtags))
+            maxHashtags = tags;
+        if (!Posting::find(platform))
+            problems << tr("%1 isn't a platform Reelcut posts to.").arg(platform);
+    }
+    if (platforms.contains("youtube")) {
+        const QString t = title.trimmed();
+        if (t.isEmpty())
+            problems << tr("YouTube needs a title.");
+        else if (t.size() > 100)
+            problems << tr("YouTube titles can be up to 100 characters; this is %1.").arg(t.size());
+        if (t.contains('<') || t.contains('>') || Posting::text(caption, hashtags).contains('<')
+            || Posting::text(caption, hashtags).contains('>'))
+            problems << tr("YouTube doesn't allow < or > in the title or description.");
+    }
+    if (platforms.isEmpty())
+        problems << tr("Pick where to post.");
+    any["maxChars"] = maxChars;
+    any["maxHashtags"] = maxHashtags;
+    any["problems"] = problems;
+    any["ok"] = problems.isEmpty();
+    return any;
+}
+
+QVariantMap Backend::checkWhen(const QStringList &platforms, double publishAtMs) const {
+    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime when = QDateTime::fromMSecsSinceEpoch(qint64(publishAtMs));
+    const qint64 ahead = now.secsTo(when);
+    QString problem;
+    if (ahead < -60)
+        problem = tr("That time has already passed.");
+    else if (platforms.contains("instagram") && !m_scheduler->configured())
+        problem = tr("Scheduling on Instagram needs the scheduler set up.");
+    else if (platforms.contains("facebook") && ahead < 10 * 60)
+        problem = tr("Facebook needs at least 10 minutes' notice to schedule a reel.");
+    else if (platforms.contains("facebook") && ahead > 29LL * 24 * 3600)
+        problem = tr("Facebook schedules reels up to 29 days ahead.");
+    else if (platforms.contains("youtube") && ahead < 60)
+        problem = tr("YouTube needs a time at least a minute away.");
+    return {{"ok", problem.isEmpty()}, {"problem", problem}};
+}
+
+Publisher *Backend::publisher(const QString &platform) const {
+    if (platform == "instagram")
+        return m_instagram;
+    if (platform == "facebook")
+        return m_facebook;
+    if (platform == "youtube")
+        return m_youtube;
+    return nullptr;
+}
+
+bool Backend::preparePost(const QStringList &requested, const QString &caption, const QString &hashtags,
+                          const QString &postTitle, QStringList *platforms) {
+    if (busy() || !m_posting.isEmpty())
+        return false;
+    platforms->clear();
+    for (const QString &id : Posting::ids())  // in the usual order, each once
+        if (requested.contains(id))
+            *platforms << id;
+    const QVariantMap check = checkPosts(requested, caption, hashtags, postTitle);
+    if (!check.value("ok").toBool()) {
+        setMessage(check.value("problems").toStringList().join("\n"), true);
+        return false;
+    }
+    for (const QString &id : *platforms) {
+        const Publisher *api = publisher(id);
+        if (!api || !api->connected()) {
+            setMessage(tr("Connect %1 to publish there.").arg(Posting::find(id)->label), true);
+            return false;
+        }
+    }
+    return true;
+}
+
+void Backend::postTo(const QStringList &requested, const QString &caption, const QString &hashtags,
+                     const QString &postTitle, double publishAtMs) {
+    QStringList platforms;
+    if (!preparePost(requested, caption, hashtags, postTitle, &platforms))
+        return;
+    const QDateTime when = publishAtMs > 0 ? QDateTime::fromMSecsSinceEpoch(qint64(publishAtMs)) : QDateTime();
+    if (when.isValid()) {
+        const QVariantMap ok = checkWhen(platforms, publishAtMs);
+        if (!ok.value("ok").toBool()) {
+            setMessage(ok.value("problem").toString(), true);
+            return;
+        }
+    }
+    QList<QPair<QString, QDateTime>> items;
+    for (const QString &id : platforms)
+        items.append({id, when});
+    exportAndPost(platforms, caption, hashtags, postTitle, items);
+}
+
+QVariantList Backend::nextOpenSlots(const QStringList &requested, int count) const {
+    QVariantList out;
+    if (count < 1)
+        return out;
+    // Taken: anything already planned for that platform at that minute.
+    QSet<QString> taken;
+    for (const QVariant &v : calendarPosts()) {
+        const QVariantMap post = v.toMap();
+        const QString status = post.value("status").toString();
+        if (status == "cancelled" || status == "failed")
+            continue;
+        taken.insert(post.value("platform").toString() + ":"
+                     + QString::number(qint64(post.value("publishAt").toDouble()) / 60000));
+    }
+    // A few minutes' lead, so the export and upload finish before the slot.
+    const QDateTime earliest = QDateTime::currentDateTime().addSecs(5 * 60);
+    const QDate today = QDate::currentDate();
+    for (const QString &platform : Posting::ids()) {
+        if (!requested.contains(platform) || !publisher(platform))  // TikTok is posted by hand
+            continue;
+        const QVariantMap plan = m_schedulePreferences.value(platform).toMap();
+        const int start = plan.value("startMinute").toInt();
+        const int spacing = plan.value("spacingMinutes").toInt();
+        const int perDay = plan.value("slotsPerDay", 10).toInt();
+        if (spacing <= 0)
+            continue;
+        int found = 0;
+        // Facebook takes up to 29 days ahead; nothing looks further than 60.
+        for (int day = 0; day <= 60 && found < count; ++day) {
+            const QDate date = today.addDays(day);
+            for (int i = 0; i < perDay && found < count; ++i) {
+                const int minute = start + i * spacing;
+                const QTime time(minute / 60, minute % 60);
+                const QDateTime at(date, time);
+                if (!at.isValid() || at.time() != time || at < earliest)  // past, or lost to a clock change
+                    continue;
+                const qint64 ms = at.toMSecsSinceEpoch();
+                const QString key = platform + ":" + QString::number(ms / 60000);
+                if (taken.contains(key) || !checkWhen({platform}, double(ms)).value("ok").toBool())
+                    continue;
+                taken.insert(key);
+                ++found;
+                out << QVariantMap{{"platform", platform}, {"publishAt", double(ms)},
+                                   {"label", QLocale().toString(at, "ddd MMM d, HH:mm")}};
+            }
+        }
+    }
+    return out;
+}
+
+void Backend::queuePost(const QStringList &requested, const QString &caption, const QString &hashtags,
+                        const QString &postTitle, int count) {
+    QStringList platforms;
+    if (!preparePost(requested, caption, hashtags, postTitle, &platforms))
+        return;
+    if (platforms.contains("instagram") && !m_scheduler->configured()) {
+        setMessage(tr("Scheduling on Instagram needs the scheduler set up."), true);
+        return;
+    }
+    count = qBound(1, count, 30);
+    const QVariantList open = nextOpenSlots(platforms, count);
+    QList<QPair<QString, QDateTime>> items;
+    for (const QString &id : platforms) {
+        int found = 0;
+        for (const QVariant &v : open)
+            if (v.toMap().value("platform").toString() == id) {
+                items.append({id, QDateTime::fromMSecsSinceEpoch(qint64(v.toMap().value("publishAt").toDouble()))});
+                ++found;
+            }
+        if (found < count) {
+            setMessage(tr("Only %1 of %2 open slots fit on %3. Try a smaller number.")
+                           .arg(found).arg(count).arg(Posting::find(id)->label), true);
+            return;
+        }
+    }
+    // Soonest first, so a slot coming up goes out before ones further away.
+    std::stable_sort(items.begin(), items.end(), [](const auto &a, const auto &b) { return a.second < b.second; });
+    exportAndPost(platforms, caption, hashtags, postTitle, items);
+}
+
+void Backend::exportAndPost(const QStringList &platforms, const QString &caption, const QString &hashtags,
+                            const QString &postTitle, const QList<QPair<QString, QDateTime>> &items) {
+    if (!readyToExport())
+        return;
+    // Remember what was typed; with one platform, frame for its safe zones too.
+    const bool frame = platforms.size() == 1 && m_project.platform != platforms.first();
+    if (m_project.postCaption != caption || m_project.postHashtags != hashtags || frame) {
+        checkpoint();
+        m_project.postCaption = caption;
+        m_project.postHashtags = hashtags;
+        if (frame)
+            m_project.setPlatform(platforms.first());
+        changed();
+    }
+    QString folder = !postFolder.isEmpty() ? postFolder : QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+    if (!QDir(folder).exists())
+        folder = QDir::homePath();
+    const QString output = freePath(folder, title() + "-" + (platforms.size() == 1 ? platforms.first() : QString("post")), ".mp4");
+    const QString text = Posting::text(caption, hashtags);
+    m_afterExport = [this, items, text, postTitle](const QString &file) {
+        m_postFile = file;
+        // On the clipboard either way, in case one is finished by hand.
+        QGuiApplication::clipboard()->setText(text);
+        m_postRequest = {file, text, postTitle.trimmed(), QDateTime()};
+        m_postQueue.clear();
+        m_postTimes.clear();
+        m_postScheduledRun = false;
+        for (const auto &item : items) {
+            m_postQueue << item.first;
+            m_postTimes << item.second;
+            m_postScheduledRun = m_postScheduledRun || item.second.isValid();
+        }
+        m_postResults.clear();
+        postNext();
+    };
+    runExport(output, "h264_nvenc");
+}
+
+void Backend::postNext() {
+    if (m_postQueue.isEmpty()) {
+        m_posting.clear();
+        const bool scheduled = m_postScheduledRun;
+        bool allOk = true;
+        QString firstFailed;
+        QUrl firstLink;
+        QStringList lines;
+        for (const QVariant &v : m_postResults) {
+            const QVariantMap r = v.toMap();
+            const bool ok = r.value("ok").toBool();
+            allOk = allOk && ok;
+            if (!ok && firstFailed.isEmpty())
+                firstFailed = r.value("platform").toString();
+            if (ok && firstLink.isEmpty())
+                firstLink = r.value("link").toUrl();
+            lines << (m_postResults.size() == 1 ? r.value("message").toString()
+                                                : Posting::find(r.value("platform").toString())->label + ": "
+                                                      + r.value("message").toString());
+        }
+        const QString summary = lines.join("\n");
+        if (!firstFailed.isEmpty())
+            openForHand(firstFailed);  // the manual way still works
+        setMessage(allOk ? summary : summary + "\n" + tr("The caption is copied; post it by hand from the page."), !allOk);
+        if (scheduled)
+            emit postScheduled(allOk, summary);
+        else
+            emit postPublished(allOk, summary, firstLink);
+        return;
+    }
+    m_posting = m_postQueue.takeFirst();
+    m_postRequest.when = m_postTimes.isEmpty() ? QDateTime() : m_postTimes.takeFirst();
+    if (m_posting == "instagram" && m_postRequest.when.isValid()) {
+        // Instagram's API can't schedule: Reelcut's own scheduler posts it then.
+        m_scheduler->schedule(m_postRequest.file, title(), m_postRequest.text, m_postRequest.when,
+                              {m_instagram->userId(), m_instagram->username(), m_instagram->token(),
+                               m_instagram->apiBase()});
+        return;
+    }
+    publisher(m_posting)->publish(m_postRequest);
+}
+
+void Backend::platformDone(const QString &platform, bool ok, const QString &message, const QUrl &link) {
+    m_postResults << QVariantMap{{"platform", platform}, {"ok", ok}, {"message", message}, {"link", link}};
+    if (ok && m_postRequest.when.isValid() && !m_postRequest.file.isEmpty()) {
+        // Remember which file each scheduled post is, so the calendar can show it.
+        m_scheduleVideos.insert(platform + ":" + QString::number(m_postRequest.when.toMSecsSinceEpoch()), m_postRequest.file);
+        Net::savePrivate(Net::stateFile(m_stateDir, "schedule-videos.json"),
+                         {{"videos", QJsonObject::fromVariantMap(m_scheduleVideos)}});
+    }
+    if (ok && m_postRequest.when.isValid() && platform != "instagram") {
+        m_directScheduled << QVariantMap{
+            {"id", QUuid::createUuid().toString(QUuid::WithoutBraces)}, {"platform", platform}, {"title", title()},
+            {"caption", m_postRequest.text}, {"publishAt", double(m_postRequest.when.toMSecsSinceEpoch())},
+            {"status", "scheduled"}, {"link", link.toString()}, {"username", publisher(platform)->account()}};
+        QJsonArray list;
+        const qint64 oldest = QDateTime::currentMSecsSinceEpoch() - 90LL * 86400000;
+        for (const QVariant &v : m_directScheduled)
+            if (v.toMap().value("publishAt").toDouble() > oldest)
+                list << QJsonObject::fromVariantMap(v.toMap());
+        Net::savePrivate(directScheduledFile(), {{"posts", list}});
+        emit schedulerChanged();
+    }
+    emit platformPosted(platform, ok, message, link);
+    // After the signal handlers, so a publisher has finished its own call.
+    QTimer::singleShot(0, this, &Backend::postNext);
+}
+
+QString Backend::directScheduledFile() const { return Net::stateFile(m_stateDir, "scheduled-direct.json"); }
+
+void Backend::loadDirectScheduled() {
+    m_scheduleVideos = Net::load(Net::stateFile(m_stateDir, "schedule-videos.json")).value("videos").toObject().toVariantMap();
+    const qint64 oldest = QDateTime::currentMSecsSinceEpoch() - 90LL * 86400000;
+    m_directScheduled.clear();
+    for (const QJsonValue &v : Net::load(directScheduledFile()).value("posts").toArray()) {
+        const QVariantMap post = v.toObject().toVariantMap();
+        if (post.value("publishAt").toDouble() > oldest)  // history is unconfirmed until Stats observes it
+            m_directScheduled << post;
+    }
 }
 
 namespace {
@@ -1247,7 +1739,7 @@ QVariantMap Backend::parseWhen(const QString &text) const {
         return out;
     }
     if (secs > 75LL * 24 * 3600) {
-        out["problem"] = tr("Instagram posts can be scheduled up to 75 days ahead.");
+        out["problem"] = tr("Posts can be scheduled up to 75 days ahead.");
         return out;
     }
     QString in;
@@ -1276,7 +1768,259 @@ QString Backend::suggestWhen(const QString &text, int minutes) const {
 }
 
 bool Backend::schedulerReady() const { return m_scheduler->configured(); }
-QVariantList Backend::scheduledPosts() const { return m_scheduler->posts(); }
+QVariantList Backend::scheduledPosts() const {
+    // The scheduler's Instagram posts, then the ones Facebook and YouTube hold.
+    QVariantList out;
+    for (const QVariant &v : m_scheduler->posts()) {
+        QVariantMap post = v.toMap();
+        post.insert("platform", "instagram");
+        out << post;
+    }
+    const double now = double(QDateTime::currentMSecsSinceEpoch());
+    for (const QVariant &v : m_directScheduled)
+        if (v.toMap().value("publishAt").toDouble() > now)
+            out << v;
+    return out;
+}
+namespace {
+QVariantMap defaultSchedulePreferences() {
+    QVariantMap result;
+    int start = 480;
+    for (const QString &platform : {QStringLiteral("instagram"), QStringLiteral("facebook"), QStringLiteral("youtube"),
+                                    QStringLiteral("tiktok")}) {
+        // YouTube caps uploads per channel per day (about ten before it blocks), and every
+        // scheduled Short uploads straight away, so its plan defaults to fewer slots.
+        result.insert(platform, QVariantMap{{"startMinute", start}, {"spacingMinutes", 90},
+                                            {"slotsPerDay", platform == QLatin1String("youtube") ? 6 : 10}});
+        start += 30;
+    }
+    return result;
+}
+bool normalizeSchedulePreferences(const QVariantMap &input, QVariantMap *result) {
+    QVariantMap out;
+    const QVariantMap defaults = defaultSchedulePreferences();
+    for (const QString &platform : {QStringLiteral("instagram"), QStringLiteral("facebook"), QStringLiteral("youtube"),
+                                    QStringLiteral("tiktok")}) {
+        // Plans saved before a platform had a row keep their other rows.
+        const QVariantMap value = input.contains(platform) ? input.value(platform).toMap() : defaults.value(platform).toMap();
+        bool startOk = false, spacingOk = false, slotsOk = false;
+        const double start = value.value("startMinute").toDouble(&startOk);
+        const double spacing = value.value("spacingMinutes").toDouble(&spacingOk);
+        // Plans saved before slots per day existed take the platform's default.
+        const double perDay = (value.contains("slotsPerDay") ? value : defaults.value(platform).toMap())
+                                 .value("slotsPerDay").toDouble(&slotsOk);
+        if (!startOk || !spacingOk || !slotsOk || !std::isfinite(start) || !std::isfinite(spacing)
+            || !std::isfinite(perDay) || std::floor(start) != start || std::floor(spacing) != spacing
+            || std::floor(perDay) != perDay || perDay < 1 || perDay > 10
+            || start < 0 || (spacing != 60 && spacing != 90 && spacing != 120) || start + (perDay - 1) * spacing >= 1440)
+            return false;
+        out.insert(platform, QVariantMap{{"startMinute", int(start)}, {"spacingMinutes", int(spacing)},
+                                         {"slotsPerDay", int(perDay)}});
+    }
+    *result = out;
+    return true;
+}
+}
+
+void Backend::loadSchedulePreferences() {
+    m_schedulePreferences = defaultSchedulePreferences();
+    const QVariantMap saved = Net::load(Net::stateFile(m_stateDir, "schedule-plan.json"))
+                                  .value("preferences").toObject().toVariantMap();
+    QVariantMap normalized;
+    if (normalizeSchedulePreferences(saved, &normalized)) m_schedulePreferences = normalized;
+}
+
+void Backend::setSchedulePreferences(const QVariantMap &preferences) {
+    QVariantMap normalized;
+    if (!normalizeSchedulePreferences(preferences, &normalized) || normalized == m_schedulePreferences) return;
+    const QVariantMap before = m_schedulePreferences;
+    if (writeSchedulePreferences(normalized))
+        recordSchedule({{"kind", "timing"}, {"label", tr("slot timing change")}, {"before", before}, {"after", normalized}});
+}
+
+bool Backend::writeSchedulePreferences(const QVariantMap &normalized) {
+    if (!Net::savePrivate(Net::stateFile(m_stateDir, "schedule-plan.json"),
+                          {{"preferences", QJsonObject::fromVariantMap(normalized)}})) {
+        setMessage(tr("Couldn't save the schedule timing preferences."), true);
+        return false;
+    }
+    m_schedulePreferences = normalized;
+    emit schedulePreferencesChanged();
+    return true;
+}
+
+QVariantList Backend::calendarPosts() const {
+    QVariantList out;
+    auto withVideo = [this](QVariantMap post) {
+        const QString key = post.value("platform").toString() + ":"
+                            + QString::number(qint64(post.value("publishAt").toDouble()));
+        const QString file = m_scheduleVideos.value(key).toString();
+        if (!file.isEmpty() && QFileInfo::exists(file)) post.insert("video", file);
+        return post;
+    };
+    for (const QVariant &v : m_scheduler->posts()) {
+        QVariantMap post = v.toMap();
+        post.insert("platform", "instagram");
+        out << withVideo(post);
+    }
+    const qint64 oldest = QDateTime::currentMSecsSinceEpoch() - 90LL * 86400000;
+    for (const QVariant &v : m_directScheduled)
+        if (v.toMap().value("publishAt").toDouble() > oldest) out << withVideo(v.toMap());
+    // Placeholders hold their slot on the calendar; nothing ever posts them.
+    for (const QVariant &v : m_placeholders)
+        out << v;
+    return out;
+}
+
+QString Backend::placeholdersFile() const { return Net::stateFile(m_stateDir, "schedule-placeholders.json"); }
+
+void Backend::loadPlaceholders() {
+    m_placeholders.clear();
+    for (const QJsonValue &v : Net::load(placeholdersFile()).value("placeholders").toArray()) {
+        QVariantMap p = v.toObject().toVariantMap();
+        if (p.value("id").toString().isEmpty() || !Posting::ids().contains(p.value("platform").toString())
+            || !(p.value("publishAt").toDouble() > 0))
+            continue;
+        p.insert("status", "placeholder");  // whatever the file says, it never posts
+        m_placeholders << p;
+    }
+}
+
+bool Backend::savePlaceholders() const {
+    QJsonArray list;
+    for (const QVariant &v : m_placeholders)
+        list << QJsonObject::fromVariantMap(v.toMap());
+    return Net::savePrivate(placeholdersFile(), {{"placeholders", list}});
+}
+
+QString Backend::addPlaceholder(const QVariantMap &spec) {
+    const QString platform = spec.value("platform").toString();
+    const double at = spec.value("publishAt").toDouble();
+    const QString name = spec.value("title").toString().trimmed();
+    if (!Posting::ids().contains(platform) || !(at > 0) || !std::isfinite(at) || name.isEmpty()) {
+        setMessage(tr("A placeholder needs a platform, a time and a title."), true);
+        return {};
+    }
+    QStringList guide;
+    for (const QVariant &step : spec.value("guide").toList())
+        if (!step.toString().trimmed().isEmpty()) guide << step.toString().trimmed();
+    const QString id = "placeholder-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QVariantMap placeholder{
+        {"id", id}, {"platform", platform}, {"publishAt", double(qint64(at))}, {"title", name},
+        {"status", "placeholder"}, {"caption", spec.value("caption").toString()},
+        {"note", spec.value("note").toString()}, {"reference", spec.value("reference").toString()},
+        {"referenceUrl", spec.value("referenceUrl").toString()}, {"guide", guide}};
+    if (!insertPlaceholder(placeholder, m_placeholders.size()))
+        return {};
+    recordSchedule({{"kind", "placeholderAdded"}, {"label", tr("add placeholder")}, {"placeholder", placeholder},
+                    {"index", m_placeholders.size() - 1}});
+    return id;
+}
+
+bool Backend::insertPlaceholder(const QVariantMap &placeholder, int index) {
+    const QString platform = placeholder.value("platform").toString();
+    const qint64 minute = qint64(placeholder.value("publishAt").toDouble()) / 60000;
+    for (const QVariant &v : calendarPosts()) {
+        const QVariantMap post = v.toMap();
+        const QString status = post.value("status").toString();
+        if (status != "cancelled" && status != "failed" && post.value("platform").toString() == platform
+            && qint64(post.value("publishAt").toDouble()) / 60000 == minute) {
+            setMessage(tr("That slot is already taken."), true);
+            return false;
+        }
+    }
+    index = qBound(0, index, int(m_placeholders.size()));
+    m_placeholders.insert(index, placeholder);
+    if (!savePlaceholders()) {
+        m_placeholders.removeAt(index);
+        setMessage(tr("Couldn't save the placeholder."), true);
+        return false;
+    }
+    emit schedulerChanged();
+    return true;
+}
+
+bool Backend::takePlaceholder(const QString &id, QVariantMap *removed, int *index) {
+    for (int i = 0; i < m_placeholders.size(); ++i) {
+        if (m_placeholders.at(i).toMap().value("id").toString() != id)
+            continue;
+        const QVariant taken = m_placeholders.takeAt(i);
+        if (!savePlaceholders()) {
+            m_placeholders.insert(i, taken);
+            setMessage(tr("Couldn't remove the placeholder."), true);
+            return false;
+        }
+        if (removed) *removed = taken.toMap();
+        if (index) *index = i;
+        emit schedulerChanged();
+        return true;
+    }
+    return false;
+}
+
+bool Backend::removePlaceholder(const QString &id) {
+    QVariantMap removed;
+    int index = 0;
+    if (!takePlaceholder(id, &removed, &index))
+        return false;
+    recordSchedule({{"kind", "placeholderRemoved"}, {"label", tr("remove placeholder")},
+                    {"placeholder", removed}, {"index", index}});
+    setMessage(tr("Placeholder removed. Ctrl+Z brings it back."), false);
+    return true;
+}
+
+void Backend::recordSchedule(const QVariantMap &step) {
+    m_scheduleUndo << step;
+    while (m_scheduleUndo.size() > 100) m_scheduleUndo.removeFirst();
+    m_scheduleRedo.clear();
+    emit scheduleHistoryChanged();
+}
+
+// Runs a recorded step backwards (undo) or forwards (redo).
+bool Backend::applySchedule(const QVariantMap &step, bool undo) {
+    const QString kind = step.value("kind").toString();
+    const QVariantMap placeholder = step.value("placeholder").toMap();
+    const bool restore = (kind == "placeholderRemoved") == undo;  // put the placeholder (back) in
+    if (kind == "placeholderAdded" || kind == "placeholderRemoved")
+        return restore ? insertPlaceholder(placeholder, step.value("index").toInt())
+                       : takePlaceholder(placeholder.value("id").toString());
+    if (kind == "timing")
+        return writeSchedulePreferences(step.value(undo ? "before" : "after").toMap());
+    return false;
+}
+
+bool Backend::undoSchedule() {
+    if (m_scheduleUndo.isEmpty()) return false;
+    const QVariantMap step = m_scheduleUndo.last().toMap();
+    if (!applySchedule(step, true)) return false;  // e.g. the slot was filled since: keep the step
+    m_scheduleRedo << m_scheduleUndo.takeLast();
+    setMessage(tr("Undid %1.").arg(step.value("label").toString()), false);
+    emit scheduleHistoryChanged();
+    return true;
+}
+
+bool Backend::redoSchedule() {
+    if (m_scheduleRedo.isEmpty()) return false;
+    const QVariantMap step = m_scheduleRedo.last().toMap();
+    if (!applySchedule(step, false)) return false;
+    m_scheduleUndo << m_scheduleRedo.takeLast();
+    setMessage(tr("Redid %1.").arg(step.value("label").toString()), false);
+    emit scheduleHistoryChanged();
+    return true;
+}
+
+QString Backend::scheduleUndoText() const {
+    return m_scheduleUndo.isEmpty() ? QString() : m_scheduleUndo.last().toMap().value("label").toString();
+}
+QString Backend::scheduleRedoText() const {
+    return m_scheduleRedo.isEmpty() ? QString() : m_scheduleRedo.last().toMap().value("label").toString();
+}
+
+QString Backend::videoFrame(const QString &path, int ms) {
+    if (path.isEmpty() || !QFileInfo::exists(path)) return {};
+    return QString("image://thumbs/%1/%2").arg(thumbKey(path)).arg(qMax(0, ms));
+}
+
 QString Backend::schedulerError() const { return m_scheduler->lastError(); }
 void Backend::setupScheduler(const QString &url, const QString &key) { m_scheduler->configure(url, key); }
 void Backend::refreshScheduled() { m_scheduler->refresh(); }
@@ -1337,6 +2081,7 @@ void Backend::runExport(const QString &output, const QString &encoder) {
     const ExportOptions prepared =
         prepareExport(m_project, m_theme ? m_theme->accent() : "#FFD60A", m_work->path(), output, &error);
     if (!error.isEmpty()) {
+        m_afterExport = nullptr;
         setMessage(error, true);
         return;
     }
@@ -1367,7 +2112,7 @@ void Backend::runExport(const QString &output, const QString &encoder) {
 }
 
 void Backend::cancelJob() {
-    // A cancelled export mustn't post (or schedule) on the next, unrelated one.
+    // A cancelled export must not post (or open a site) on the next one.
     m_afterExport = nullptr;
     if (m_stopMasks)
         *m_stopMasks = true;

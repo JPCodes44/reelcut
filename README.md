@@ -1,6 +1,6 @@
 # Reelcut
 
-Make vertical reels for Instagram and TikTok on Omarchy: cut your clips, caption them automatically, give them a look, add music, and export an MP4 that's ready to post.
+Make vertical reels for Instagram, Facebook, YouTube Shorts and TikTok on Omarchy: cut your clips, caption them automatically, give them a look, add music, and export an MP4 that's ready to post.
 
 ![Reelcut editing a reel](docs/screenshot.png)
 
@@ -8,8 +8,9 @@ Make vertical reels for Instagram and TikTok on Omarchy: cut your clips, caption
 
 - **Photos and slideshows**: drop in photos (JPG, PNG, WebP, HEIC) and they become slides with a duration and an optional slow zoom or pan. Export the slideshow as a video, or as a **photo set** for TikTok photo posts: one 1080×1920 JPG per slide with the text and look drawn in, numbered in order. Post the set in TikTok's photo mode and pick the sound in the app (TikTok's library sounds can only be added there).
 - **Cut**: drop in videos, split at the playhead, trim with the handles, reorder, change speed from 0.25× to 4×.
+- **Layers**: drag a clip down off the video track to lay it over the video, picture in picture. Move and resize it in the preview and place it in time. Layers sit on rows, and higher rows draw on top. Drop a video within half a row of another row to put it on that row (it slides to the nearest free spot); drag it more than half a row past a neighboring row and the two rows swap places, the main video track included. Its sound mixes in with the rest.
 - **Transitions**: 15 transitions between clips (dissolve, dip to black, flash, wipes, slides, iris, clock, zoom, pixelate, blur and more), with a live preview. [How they work](docs/effects.md#2-transitions-two-pictures-and-a-progress-value).
-- **Social preview**: switch Instagram/TikTok to preview its app chrome. Click the caption or **Caption and tags** to edit the saved posting text; **Show app UI** hides the chrome. Text wraps inside layout containers and the app UI never appears in exports.
+- **Social preview**: switch between Instagram, Facebook, YouTube and TikTok to preview that app's chrome and safe zones. Click the caption or **Caption and tags** to edit the saved posting text; **Show app UI** hides the chrome. Text wraps inside layout containers and the app UI never appears in exports.
 - **Frame**: every clip fills the 9:16 frame; zoom and pan landscape footage to pick what shows.
 - **Cut silences**: one click removes the pauses from a talking clip.
 - **Body effects**: background blur, color pop, spotlight, neon outline or a solid backdrop behind the person in a clip. A small segmentation model (OpenCV, downloaded once, about 6 MB) finds the person on your computer. [How they work](docs/effects.md#4-body-effects-a-mask-from-a-segmentation-model).
@@ -18,7 +19,15 @@ Make vertical reels for Instagram and TikTok on Omarchy: cut your clips, caption
 - **Effects**: 13 video effects on their own track (shake, zoom pulse, strobe, VHS, RGB split, glitch, vignette, blur, film grain, mono flicker, invert, mirror, light trails), each with intensity and speed. [How they work](docs/effects.md#3-video-effects-a-track-of-timed-filters).
 - **Look**: a library of 20 filters with a strength slider, exposure, contrast, saturation and temperature, six presets, and any `.cube` LUT (including ones from DaVinci Resolve). [How the filters work](docs/effects.md).
 - **Music**: a music track that ducks under speech, and loudness leveled to -14 LUFS.
-- **Post and schedule**: publish a reel straight to a connected Instagram Creator or Business account, or tick **Schedule for later**, type a time (`tomorrow 9am`, `fri 18:30`) and it goes out then, even if your computer is off. Scheduling runs on a small Convex backend you deploy yourself; see [scheduler/README.md](scheduler/README.md).
+- **Post and schedule**: publish a reel straight to a connected Instagram Creator or Business account, a Facebook Page and a YouTube channel, one at a time or all at once from a single export. Tick **Schedule for later**, type a time (`tomorrow 9am`, `fri 18:30`) and it goes out then, even if your computer is off. Facebook (10 minutes to 29 days ahead) and YouTube hold scheduled posts themselves; Instagram's API can't schedule, so its posts go through a small Convex backend you deploy yourself (see [scheduler/README.md](scheduler/README.md)). TikTok is posted by hand: Reelcut exports, opens the upload page and copies the caption.
+
+### Connecting accounts
+
+Each account is connected once from the post dialog and kept in a file under `~/.config/reelcut` that only you can read.
+
+- **Instagram**: a Creator or Business account and a token from your Meta app (Instagram product).
+- **Facebook**: Reels post to a **Page**, not a personal profile. Give the same Meta app the `pages_show_list`, `pages_read_engagement` and `pages_manage_posts` permissions, then use your Instagram connection or paste a user token; Reelcut keeps only the Page's token. Reels must be 3 to 90 seconds.
+- **YouTube**: in Google Cloud, enable the YouTube Data API v3, set up the OAuth consent screen (publish it to *In production*, or Google signs you out every 7 days) and create an OAuth client of type **Desktop app**. Paste its client ID and secret and sign in in the browser, choosing the YouTube channel (or Brand Account) you want to post to. Check the connected channel name before posting. Switching channels on youtube.com does not change Reelcut’s saved authorization; disconnect YouTube in Reelcut and sign in again to change the destination. Uploads are Shorts (up to 3 minutes) with the title you give, the caption as the description, and `#Shorts` added.
 - **Export**: 1080×1920, 30 fps, H.264 and AAC, on the GPU with NVENC when there is one. The preview shows each platform's safe zones so captions don't end up under the buttons.
 
 Projects save as `.reel` files next to your media; the original videos are never changed.
@@ -53,6 +62,7 @@ omarchy-pkg-add whisper-cpp
 | Drag a corner / scroll | Resize text or captions, zoom the picture |
 | Ctrl + drag | Move without snapping to the center, thirds or safe zone |
 | Drag in the timeline | Reorder clips, move text in time, trim either end |
+| Drag a clip or layer up or down | Within half a row of another row: join it. More than half a row past it: swap the two rows |
 | Ctrl+S / Ctrl+Shift+S | Save / save as |
 | Ctrl+O | Open a project |
 | Ctrl+E | Export |
@@ -70,7 +80,7 @@ reelcut export my.reel out.mp4     # render without the window (add --json for s
 
 ## Let an AI agent edit with you (MCP)
 
-`reelcut mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server with every editing feature as a tool. Add it to Claude Code:
+`reelcut mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server for saved-project editing and the live Reelcut app. Add it to Claude Code:
 
 ```sh
 claude mcp add reelcut --scope user -- reelcut mcp
@@ -90,6 +100,32 @@ Then ask for things like "make a reel from these three clips, cut the silences, 
 | `export` | The MP4 |
 | `export_photos` | A photo set for TikTok photo posts |
 | `show_in_app` | Opens the project in the window |
+
+Live tools also cover editor layers/effects, posting, account connections and token expiry status, Stats, Calendar/Timing, downloads, credits, Settings, playback and UI navigation. Start with `get_app_capabilities`, `list_app_instances` and `get_app_state`; poll `get_app_events` for asynchronous completion. Keep the GUI open for live tools. Reconnect your MCP client after updating to discover the expanded tool list. OAuth consent remains in the provider's browser.
+
+See [the measured functional coverage audit](docs/mcp-coverage.md) and [machine-readable inventory](docs/mcp-capabilities.json).
+
+### Watch what agents spend on Higgsfield
+
+When an agent generates through the Higgsfield MCP, the top bar shows the dollars spent and the dollars left (`Higgsfield $4.20 spent · $32.46 left`). Click it to sign in to your Higgsfield account the first time. After that it shows what you've spent **all time**, today, in the last 10 minutes and, after a **Reset**, since the reset. It also shows your balance and every recent charge. The chip counts all time until you reset, and **All time** switches it back. It updates every 20 seconds. Only charges and refunds count; plan credits, top-ups and expiring daily credits don't.
+
+- **$/credit** turns credits into dollars. The default is $0.05, the Plus auto-refill rate of 20 credits per dollar.
+- **Budget** is in dollars, counted from the last reset, or all time without one. When spending passes it, the meter turns red and a desktop notification fires once. Stop the agent then (Esc in Claude Code).
+- Reelcut writes `~/.config/reelcut/higgsfield-status.json` (`spentDollars`, `spentAllTimeDollars`, `balanceDollars`, `overBudget`, …) so scripts and hooks can read it. For example, a Claude Code `PreToolUse` hook can refuse `mcp__*Higgsfield__generate_*` calls while `overBudget` is true.
+
+Reelcut signs in to `mcp.higgsfield.ai/mcp` as its own OAuth client (it registers itself, so there's no key to paste). It calls the same `balance` and `transactions` tools the agent sees. The account lives in `~/.config/reelcut/higgsfield.json`, which only you can read.
+
+## Connection settings
+
+Open **Settings → Connected accounts** from the top bar, with or without an open project. This manages the same Instagram, Facebook and YouTube connections used by Post, Stats and Schedule. TikTok uses your browser sign-in and stores no API token in Reelcut.
+
+Select a platform to connect, replace/reconnect, test, or disconnect. Facebook accepts a Page token or a user token; choose the Page if several are available. YouTube retains the existing Google sign-in flow using your Desktop app OAuth client. The Post dialog links to Settings, and account notices in Stats offer Connect/Reconnect directly.
+
+Settings shows token expiry, data-access expiry (Meta), refresh-token expiry (YouTube), and the last check. Dates use local time with timezone and time remaining. **Never** is shown only when Meta explicitly reports zero; **Unknown** means the provider did not supply an expiry. Google access tokens renew automatically, so their normal hourly expiry does not mark the connection expired. Google may omit refresh-token lifetime; OAuth apps in Testing may require signing in again after seven days.
+
+Meta's [token inspection API](https://developers.facebook.com/docs/graph-api/reference/debug_token/) requires an app access token or an app developer's user token. During Facebook setup, Reelcut uses the supplied user token temporarily to inspect the selected Page token, then keeps only the Page token. If later inspection lacks permission, the last reported dates remain visible with an explanation and a link to Meta's debugger. The dates are never guessed. You can generate or extend Meta tokens with the tools linked in Settings, then replace them here.
+
+The **Scheduling** tab exposes the existing Instagram Convex scheduler setup. Facebook and YouTube continue to schedule natively. Disconnect removes local credentials; access already granted at the provider or tokens already sent to an Instagram scheduler must be managed there separately.
 
 ## Development
 

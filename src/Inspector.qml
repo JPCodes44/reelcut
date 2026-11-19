@@ -11,6 +11,8 @@ Rectangle {
     property int selectedClip: -1
     property int selectedOverlay: -1
     property int selectedEffect: -1
+    // A layer is selected: the Clip tab shows it instead of a clip.
+    property int selectedLayer: -1
     property real playhead: 0
     // A text overlay is selected: text effects apply to it instead of adding new text.
     property bool textSelected: false
@@ -34,6 +36,7 @@ Rectangle {
     }
     property alias currentIndex: tabs.currentIndex
     readonly property var clipData: selectedClip >= 0 && selectedClip < backend.clips.length ? backend.clips[selectedClip] : null
+    readonly property var layerData: selectedLayer >= 0 && selectedLayer < backend.layers.length ? backend.layers[selectedLayer] : null
     readonly property var effectData: selectedEffect >= 0 && selectedEffect < backend.effects.length ? backend.effects[selectedEffect] : null
     signal overlaySelected(int index)
     signal effectSelected(int index)
@@ -59,6 +62,21 @@ Rectangle {
         }
     }
     function removeOverlayLater(index) { Qt.callLater(root.removeOverlayNow, index) }
+    // Layer edits that reshape the layer list (and the preview's players and
+    // the timeline's layer bars) also wait until the click is done.
+    function setLayerValue(key, v) {
+        if (root.selectedLayer >= 0 && root.selectedLayer < backend.layers.length && isFinite(v))
+            backend.setLayerValue(root.selectedLayer, key, v)
+    }
+    function moveLayerToTrackNow(index, time) {
+        if (index < 0 || index >= backend.layers.length) return
+        const at = backend.moveLayerToTrack(index, isFinite(time) ? time : 0)
+        if (at >= 0 && at < backend.clips.length) win.select("clip", at)
+    }
+    function removeLayerNow(index) {
+        if (index >= 0 && index < backend.layers.length)
+            backend.removeLayer(index)
+    }
     function removeOverlayNow(index) {
         if (index >= 0 && index < backend.overlays.length)
             backend.removeOverlay(index)
@@ -97,14 +115,88 @@ Rectangle {
                         Layout.leftMargin: 16
                         Layout.rightMargin: 16
                         Layout.fillWidth: true
-                        visible: root.clipData === null
+                        visible: root.clipData === null && root.layerData === null
                         text: backend.clips.length === 0 ? qsTr("Add clips to start.") : qsTr("Click a clip in the timeline to edit it.")
                         color: "#9a9aa2"
                         wrapMode: Text.Wrap
                     }
 
+                    // ---- Layer ----
                     ColumnLayout {
-                        visible: root.clipData !== null
+                        objectName: "layerPanel"
+                        visible: root.layerData !== null
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 16
+                        Layout.rightMargin: 16
+                        spacing: 12
+
+                        Label {
+                            Layout.fillWidth: true
+                            text: root.layerData ? qsTr("Layer %1 · %2").arg((root.layerData.row || 0) + 1).arg(root.layerData.name || "") : ""
+                            font.bold: true
+                            elide: Text.ElideMiddle
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: !root.layerData ? ""
+                                  : qsTr("Shows %1 → %2 over the video. Drag its box in the preview to move it; drag a corner to resize.")
+                                    .arg(root.seconds(root.layerData.start)).arg(root.seconds(root.layerData.end))
+                            color: "#9a9aa2"
+                            font.pixelSize: 12
+                            wrapMode: Text.Wrap
+                        }
+                        ValueSlider {
+                            label: qsTr("Size")
+                            from: 0.1; to: 1; resetValue: 1
+                            value: root.layerData ? root.layerData.scale : 1
+                            valueText: Math.round(value * 100) + "%"
+                            onMoved: function(v) { root.setLayerValue("scale", v) }
+                        }
+                        ValueSlider {
+                            label: qsTr("Position left / right")
+                            from: 0; to: 1; resetValue: 0.5
+                            value: root.layerData ? root.layerData.x : 0.5
+                            onMoved: function(v) { root.setLayerValue("x", v) }
+                        }
+                        ValueSlider {
+                            label: qsTr("Position up / down")
+                            from: 0; to: 1; resetValue: 0.5
+                            value: root.layerData ? root.layerData.y : 0.5
+                            onMoved: function(v) { root.setLayerValue("y", v) }
+                        }
+                        ValueSlider {
+                            label: qsTr("Zoom")
+                            from: 1; to: 3; resetValue: 1
+                            value: root.layerData ? root.layerData.zoom : 1
+                            valueText: value.toLocaleString(Qt.locale(), 'f', 2) + "×"
+                            onMoved: function(v) { root.setLayerValue("zoom", v) }
+                        }
+                        ValueSlider {
+                            label: qsTr("Pan left / right")
+                            value: root.layerData ? root.layerData.panX : 0
+                            onMoved: function(v) { root.setLayerValue("panX", v) }
+                        }
+                        ValueSlider {
+                            label: qsTr("Pan up / down")
+                            value: root.layerData ? root.layerData.panY : 0
+                            onMoved: function(v) { root.setLayerValue("panY", v) }
+                        }
+                        Button {
+                            Layout.fillWidth: true
+                            text: qsTr("Move to main track")
+                            onClicked: if (root.layerData) Qt.callLater(root.moveLayerToTrackNow, root.selectedLayer, root.layerData.start || 0)
+                        }
+                        Button {
+                            Layout.fillWidth: true
+                            text: qsTr("Delete layer")
+                            flat: true
+                            Material.foreground: "#ff8a80"
+                            onClicked: Qt.callLater(root.removeLayerNow, root.selectedLayer)
+                        }
+                    }
+
+                    ColumnLayout {
+                        visible: root.clipData !== null && root.layerData === null
                         Layout.fillWidth: true
                         Layout.leftMargin: 16
                         Layout.rightMargin: 16
@@ -405,13 +497,13 @@ Rectangle {
                                 wrapMode: Text.WordWrap
                                 color: "#9a9aa2"
                                 text: backend.captionAuto
-                                      ? qsTr("Placed for %1. Moves with the platform.").arg(backend.platform === "tiktok" ? "TikTok" : "Instagram")
+                                      ? qsTr("Placed for %1. Moves with the platform.").arg(backend.platformInfo.label)
                                       : qsTr("Placed by hand.")
                             }
                             Button {
                                 objectName: "captionResetPosition"
                                 visible: !backend.captionAuto
-                                text: qsTr("Place for %1").arg(backend.platform === "tiktok" ? "TikTok" : "Instagram")
+                                text: qsTr("Place for %1").arg(backend.platformInfo.label)
                                 flat: true
                                 Layout.minimumWidth: implicitWidth
                                 onClicked: backend.resetCaptionPosition()
@@ -996,7 +1088,7 @@ Rectangle {
                         Label {
                             Layout.fillWidth: true
                             Layout.topMargin: 8
-                            text: qsTr("Exports are leveled to -14 LUFS, the loudness Instagram and TikTok play at.")
+                            text: qsTr("Exports are leveled to -14 LUFS, the loudness Instagram, Facebook, YouTube and TikTok play at.")
                             color: "#9a9aa2"
                             wrapMode: Text.Wrap
                             font.pixelSize: 12

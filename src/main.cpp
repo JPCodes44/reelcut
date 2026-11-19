@@ -23,10 +23,13 @@
 #include <QUrl>
 
 #include "backend.h"
+#include "appbridge.h"
 #include "downloads.h"
+#include "higgsfield.h"
 #include "jobs.h"
 #include "mcpserver.h"
 #include "portalfilepicker.h"
+#include "stats.h"
 #include "theme.h"
 #include "thumbprovider.h"
 #include "waveformprovider.h"
@@ -142,6 +145,10 @@ int main(int argc, char *argv[]) {
     auto *thumbs = new ThumbProvider();
     Backend backend(&picker, thumbs, &theme);
     Downloads downloads;
+    HiggsfieldCredits higgsfield;
+    // Reads the accounts of Backend's publishers: made after the Backend, so
+    // it's gone before them, and before the engine that shows it.
+    Stats stats(backend.instagram(), backend.facebook(), backend.youtube());
 
     QQmlApplicationEngine engine;
     // The engine takes ownership of the image provider.
@@ -152,9 +159,17 @@ int main(int argc, char *argv[]) {
     engine.rootContext()->setContextProperty("theme", &theme);
     engine.rootContext()->setContextProperty("backend", &backend);
     engine.rootContext()->setContextProperty("downloads", &downloads);
+    engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
+    engine.rootContext()->setContextProperty("stats", &stats);
     engine.load(QUrl("qrc:/Main.qml"));
     if (engine.rootObjects().isEmpty())
         return 1;
+
+    AppBridge bridge;
+    bridge.attach(&backend,&downloads,&stats,&higgsfield,qobject_cast<QQuickWindow *>(engine.rootObjects().first()));
+    bridge.registry().add("theme",&theme);
+    bridge.registry().add("language",&translator);
+    if (!bridge.listen()) qWarning("reelcut: the live MCP interface could not be started");
 
     // A project opens as is; videos are added as clips.
     QList<QUrl> clips;
