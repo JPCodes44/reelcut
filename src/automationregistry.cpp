@@ -87,7 +87,7 @@ QJsonObject descriptor(const QString &component, const QMetaMethod &method) {
     if (component=="backend" && QStringList{"newProject","openFile","selectFiles"}.contains(name))
         properties["discard_unsaved"]=QJsonObject{{"type","boolean"},{"description","Explicitly discard unsaved edits when replacing the current project. Otherwise save it first."}};
     const bool readOnly=isReadOnly(component,name);
-    const bool destructive=QStringList{"newProject","removeClip","removeLayer","removeOverlay","removeEffect","clearCaptions","removeMusic","disconnect","disconnectAccount","disconnectInstagram","disconnectFacebook","disconnectYouTube","remove","signOut","post","postTo","cancelScheduled","removeScheduled","retryScheduled"}.contains(name);
+    const bool destructive=QStringList{"newProject","removeClip","removeLayer","removeOverlay","removeEffect","clearCaptions","removeMusic","disconnect","disconnectAccount","disconnectInstagram","disconnectFacebook","disconnectYouTube","remove","signOut","post","postTo","cancelScheduled","removeScheduled","retryScheduled","removePlaceholder"}.contains(name);
     const bool external=(component=="accounts" && name!="cancelSelection" && name!="disconnectAccount")
         || (component=="stats" && name!="history") || (component=="downloads" && name=="download")
         || (component=="credits" && QStringList{"signIn","refresh","signOut"}.contains(name))

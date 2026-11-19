@@ -5300,6 +5300,10 @@ private slots:
             expect(new Date(targets[0].ms).getDate() === 31, 'slots stay on selected date');
             expect(slots(day, 480, 120).length === 0, 'overflow must not silently become tomorrow');
             expect(slots(day, -1, 90).length === 0 && slots(day, 480, 0).length === 0, 'invalid cadence');
+            expect(slots(day, 540, 90, 6).length === 6 && slots(day, 540, 90, 6)[5].minute === 990, 'six YouTube slots');
+            expect(slots(day, 480, 120, 4).length === 4, 'fewer slots fit where ten would overflow');
+            expect(slots(day, 480, 90, 0).length === 0 && slots(day, 480, 90, 11).length === 0, 'one to ten slots');
+            expect(platformSummary('youtube', [], slots(day, 540, 90, 6)).target === 6, 'summary counts the plan');
             var at = targets[0].ms;
             var scheduled = [
                 {platform:'youtube',id:'local',publishAt:at,title:'Same caption',status:'scheduled',link:'https://youtube.com/shorts/VID1'},
@@ -5353,6 +5357,16 @@ private slots:
             var date=dayStart(at),next=new Date(2027,8,6,0,30).getTime();
             check(dayPosts(date,[],[{platform:'instagram',id:'tomorrow',published:next}],at).length===0,'next day early post excluded');
             check(new Date(addDays(date,1)).getHours()===0,'date navigation does not carry DST gap hour');
+            var prompt=remixPrompt('https://www.tiktok.com/@old','Acme (acme.io)','Hinglish');
+            check(prompt.indexOf('https://www.tiktok.com/@old -> Acme (acme.io)')>=0,'remix prompt names source and brand');
+            check(prompt.indexOf('Hooks in Hinglish')>=0,'remix prompt carries the language');
+            check(prompt.indexOf('~/Videos/Acme remixes/references/')>=0,'remix folder uses the brand name');
+            check(prompt.indexOf('app_backend_add_placeholder')>=0 && prompt.indexOf('post nothing')>=0,'remix prompt only adds placeholders');
+            check(remixPrompt('','','').indexOf('TextInk (textink.ca)')>=0 && remixPrompt('','','').indexOf('Hooks in English')>=0,'remix prompt defaults');
+            var picked=remixPrompt('https://tiktok.com/@a/video/1\n https://instagram.com/reel/B ','','','reels');
+            check(picked.indexOf('Remake these 2 reels')>=0 && picked.indexOf('   - https://tiktok.com/@a/video/1')>=0 && picked.indexOf('   - https://instagram.com/reel/B')>=0,'remix prompt lists picked reels');
+            check(picked.indexOf('--flat-playlist')<0,'reel mode skips profile listing');
+            check(remixPrompt('https://tiktok.com/@a/video/1','','','reels').indexOf('Remake this reel')>=0,'single reel wording');
             errors.join('; ');
         )JS");
         QVERIFY2(result.toString().isEmpty(),qPrintable(result.toString()));
@@ -5377,16 +5391,26 @@ private slots:
         QCOMPARE(defaults.value("instagram").toMap().value("startMinute").toInt(),480);
         QCOMPARE(defaults.value("youtube").toMap().value("spacingMinutes").toInt(),90);
         QVariantMap changed=defaults;
-        changed["youtube"]=QVariantMap{{"startMinute",300},{"spacingMinutes",120}};
+        // YouTube defaults to fewer slots (its per-channel upload cap); the rest keep ten.
+        QCOMPARE(defaults.value("youtube").toMap().value("slotsPerDay").toInt(),6);
+        QCOMPARE(defaults.value("instagram").toMap().value("slotsPerDay").toInt(),10);
+        changed["youtube"]=QVariantMap{{"startMinute",300},{"spacingMinutes",120},{"slotsPerDay",4}};
         QVERIFY(backend.setProperty("schedulePreferences",changed));
         QCOMPARE(backend.property("schedulePreferences").toMap(),changed);
         Backend again(nullptr,nullptr,nullptr,nullptr,state.path());
         QCOMPARE(again.property("schedulePreferences").toMap(),changed);
         QVariantMap bad=changed;
-        bad["youtube"]=QVariantMap{{"startMinute",600},{"spacingMinutes",120}};
+        bad["youtube"]=QVariantMap{{"startMinute",600},{"spacingMinutes",120},{"slotsPerDay",10}};
         backend.setProperty("schedulePreferences",bad);
         QCOMPARE(backend.property("schedulePreferences").toMap(),changed);
         bad["youtube"]=QVariantMap{{"startMinute",300},{"spacingMinutes",75}};
+        backend.setProperty("schedulePreferences",bad);
+        QCOMPARE(backend.property("schedulePreferences").toMap(),changed);
+        bad["youtube"]=QVariantMap{{"startMinute",300},{"spacingMinutes",120},{"slotsPerDay",11}};
+        backend.setProperty("schedulePreferences",bad);
+        QCOMPARE(backend.property("schedulePreferences").toMap(),changed);
+        // Ten two-hour slots from 08:00 overflow midnight.
+        bad["youtube"]=QVariantMap{{"startMinute",480},{"spacingMinutes",120},{"slotsPerDay",10}};
         backend.setProperty("schedulePreferences",bad);
         QCOMPARE(backend.property("schedulePreferences").toMap(),changed);
         write(state.filePath("schedule-plan.json"),"{broken");
@@ -5404,7 +5428,7 @@ private slots:
             QJsonObject{{"id","taken"},{"platform","youtube"},{"publishAt",double(takenAt)},{"status","scheduled"},{"title","t"}}}}}).toJson());
         Backend backend(nullptr,nullptr,nullptr,nullptr,state.path());
         QVariantMap plan=backend.property("schedulePreferences").toMap();
-        plan["youtube"]=QVariantMap{{"startMinute",0},{"spacingMinutes",60}};
+        plan["youtube"]=QVariantMap{{"startMinute",0},{"spacingMinutes",60},{"slotsPerDay",10}};
         QVERIFY(backend.setProperty("schedulePreferences",plan));
 
         const QVariantList open=backend.nextOpenSlots({"youtube"},25);
@@ -5432,6 +5456,13 @@ private slots:
         // Platforms that can't take a scheduled post give none.
         QVERIFY(backend.nextOpenSlots({"tiktok"},3).isEmpty());
         QVERIFY(backend.nextOpenSlots({"youtube"},0).isEmpty());
+        // Fewer slots per day: only the plan's first slots each day are offered.
+        plan["youtube"]=QVariantMap{{"startMinute",0},{"spacingMinutes",60},{"slotsPerDay",3}};
+        QVERIFY(backend.setProperty("schedulePreferences",plan));
+        for (const QVariant &v : backend.nextOpenSlots({"youtube"},9))
+            QVERIFY(QDateTime::fromMSecsSinceEpoch(qint64(v.toMap().value("publishAt").toDouble())).time().hour()<=2);
+        plan["youtube"]=QVariantMap{{"startMinute",0},{"spacingMinutes",60},{"slotsPerDay",10}};
+        QVERIFY(backend.setProperty("schedulePreferences",plan));
         // Several platforms: each gets its own slots.
         plan["facebook"]=QVariantMap{{"startMinute",30},{"spacingMinutes",60}};
         QVERIFY(backend.setProperty("schedulePreferences",plan));
@@ -5443,6 +5474,105 @@ private slots:
             QCOMPARE(QDateTime::fromMSecsSinceEpoch(qint64(v.toMap().value("publishAt").toDouble())).time().minute(),30);
         }
         QCOMPARE(fb,2);
+    }
+
+    void placeholdersHoldSlotsWithoutPostingAndPersist()
+    {
+        QTemporaryDir state;
+        const qint64 at=QDateTime(QDate::currentDate().addDays(2),QTime(8,0)).toMSecsSinceEpoch();
+        QString id;
+        {
+            Backend backend(nullptr,nullptr,nullptr,nullptr,state.path());
+            QVariantMap plan=backend.property("schedulePreferences").toMap();
+            plan["instagram"]=QVariantMap{{"startMinute",480},{"spacingMinutes",90},{"slotsPerDay",10}};
+            QVERIFY(backend.setProperty("schedulePreferences",plan));
+            // Missing title or unknown platform: refused.
+            QVERIFY(backend.addPlaceholder({{"platform","instagram"},{"publishAt",double(at)}}).isEmpty());
+            QVERIFY(backend.addPlaceholder({{"platform","myspace"},{"publishAt",double(at)},{"title","x"}}).isEmpty());
+            id=backend.addPlaceholder({{"platform","instagram"},{"publishAt",double(at)},{"title","Remix 1"},
+                {"reference","/videos/original.mp4"},{"note","TextInk remix"},{"guide",QStringList{"Film A","","Film B"}}});
+            QVERIFY(id.startsWith("placeholder-"));
+            // The slot is taken: a second placeholder there is refused.
+            QVERIFY(backend.addPlaceholder({{"platform","instagram"},{"publishAt",double(at)},{"title","Remix 2"}}).isEmpty());
+            bool found=false;
+            for (const QVariant &v : backend.calendarPosts()) {
+                const QVariantMap p=v.toMap();
+                if (p.value("id")!=id) continue;
+                found=true;
+                QCOMPARE(p.value("status").toString(),QString("placeholder"));
+                QCOMPARE(p.value("reference").toString(),QString("/videos/original.mp4"));
+                QCOMPARE(p.value("guide").toStringList(),QStringList({"Film A","Film B"}));  // blank steps dropped
+            }
+            QVERIFY(found);
+            for (const QVariant &v : backend.nextOpenSlots({"instagram"},30))
+                QVERIFY(qint64(v.toMap().value("publishAt").toDouble())!=at);
+        }
+        // Saved, and a file that claims another status still loads as a placeholder.
+        QFile file(state.filePath("schedule-placeholders.json"));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QByteArray saved=file.readAll(); file.close();
+        saved.replace("\"placeholder\"","\"scheduled\"");
+        write(state.filePath("schedule-placeholders.json"),saved);
+        Backend reloaded(nullptr,nullptr,nullptr,nullptr,state.path());
+        int count=0;
+        for (const QVariant &v : reloaded.calendarPosts())
+            if (v.toMap().value("id")==id) { ++count; QCOMPARE(v.toMap().value("status").toString(),QString("placeholder")); }
+        QCOMPARE(count,1);
+        QVERIFY(!reloaded.removePlaceholder("nope"));
+        QVERIFY(reloaded.removePlaceholder(id));
+        for (const QVariant &v : reloaded.calendarPosts()) QVERIFY(v.toMap().value("id")!=id);
+        Backend after(nullptr,nullptr,nullptr,nullptr,state.path());
+        for (const QVariant &v : after.calendarPosts()) QVERIFY(v.toMap().value("id")!=id);
+    }
+
+    void scheduleUndoBringsBackPlaceholdersAndTiming()
+    {
+        QTemporaryDir state;
+        Backend backend(nullptr,nullptr,nullptr,nullptr,state.path());
+        QVERIFY(!backend.undoSchedule());
+        const qint64 at=QDateTime(QDate::currentDate().addDays(3),QTime(9,30)).toMSecsSinceEpoch();
+        auto has=[&](const QString &id) {
+            for (const QVariant &v : backend.calendarPosts()) if (v.toMap().value("id")==id) return true;
+            return false;
+        };
+        const QString id=backend.addPlaceholder({{"platform","instagram"},{"publishAt",double(at)},{"title","Keep me"},
+                                                 {"guide",QStringList{"Film it"}}});
+        QVERIFY(backend.removePlaceholder(id));
+        QVERIFY(!has(id));
+        QVERIFY(backend.property("canUndoSchedule").toBool());
+        QCOMPARE(backend.property("scheduleUndoText").toString(),QString("remove placeholder"));
+        // Undo the removal: the same placeholder, guide and all, is back and saved.
+        QVERIFY(backend.undoSchedule());
+        QVERIFY(has(id));
+        { Backend reloaded(nullptr,nullptr,nullptr,nullptr,state.path());
+          bool found=false;
+          for (const QVariant &v : reloaded.calendarPosts()) if (v.toMap().value("id")==id) { found=true; QCOMPARE(v.toMap().value("guide").toStringList(),QStringList{"Film it"}); }
+          QVERIFY(found); }
+        QVERIFY(backend.redoSchedule());
+        QVERIFY(!has(id));
+        QVERIFY(backend.undoSchedule());   // removal undone again
+        QVERIFY(backend.undoSchedule());   // then the add itself
+        QVERIFY(!has(id));
+        QVERIFY(!backend.property("canUndoSchedule").toBool());
+        QVERIFY(backend.redoSchedule());   // add again
+        QVERIFY(has(id));
+        // Timing changes undo too, and a new action clears redo.
+        const QVariantMap before=backend.property("schedulePreferences").toMap();
+        QVariantMap plan=before;
+        plan["instagram"]=QVariantMap{{"startMinute",600},{"spacingMinutes",60},{"slotsPerDay",5}};
+        QVERIFY(backend.setProperty("schedulePreferences",plan));
+        QVERIFY(backend.undoSchedule());
+        QCOMPARE(backend.property("schedulePreferences").toMap(),before);
+        QVERIFY(backend.property("canRedoSchedule").toBool());
+        QVERIFY(backend.removePlaceholder(id));
+        QVERIFY(!backend.property("canRedoSchedule").toBool());
+        // A removed placeholder whose slot was filled since stays in the history.
+        const QString other=backend.addPlaceholder({{"platform","instagram"},{"publishAt",double(at)},{"title","Took the slot"}});
+        QVERIFY(!other.isEmpty());
+        QVERIFY(backend.removePlaceholder(other));
+        QVERIFY(backend.addPlaceholder({{"platform","instagram"},{"publishAt",double(at)},{"title","Newer"}}).size()>0);
+        QVERIFY(backend.undoSchedule());   // undoes "Newer" add
+        QVERIFY(backend.undoSchedule());   // brings back "Took the slot"
     }
 
     void schedulePageShowsDailySlotsAndDoesNotPostFromAnEmptyProject()
@@ -5467,7 +5597,7 @@ private slots:
         page->setProperty("selectedDate",selected);
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
-        QTRY_COMPARE(page->property("targetSlotCount").toInt(),40);
+        QTRY_COMPARE(page->property("targetSlotCount").toInt(),36);  // 10 + 10 + 6 (YouTube) + 10
         QCOMPARE(page->property("dailyCount").toInt(),0);
         QVERIFY(findItem(page,"scheduleColumn-instagram"));
         QVERIFY(findItem(page,"scheduleColumn-facebook"));

@@ -40,6 +40,9 @@ ApplicationWindow {
     // Single-key shortcuts must not fire while the user is typing, nor edit
     // the hidden editor while the Stats page covers it.
     readonly property bool typing: settingsPage.visible || statsVisible || scheduleVisible || workflowVisible || (activeFocusItem !== null && activeFocusItem.hasOwnProperty("cursorPosition"))
+    readonly property bool textFocused: activeFocusItem !== null && activeFocusItem.hasOwnProperty("cursorPosition")
+    // Schedule undo: the page is open and no text field has the keys.
+    readonly property bool scheduleKeys: scheduleVisible && !textFocused && !postDialog.visible
 
     // The color picker's eyedropper: the next click on the preview picks a
     // color from the video and hands it to `callback`. Escape cancels.
@@ -218,8 +221,9 @@ ApplicationWindow {
     Shortcut { sequence: "End"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.seek(backend.duration) }
     Shortcut { sequence: "Alt+Left"; enabled: !win.typing && win.selectedClip > 0; context: Qt.ApplicationShortcut; onActivated: { backend.moveClip(win.selectedClip, win.selectedClip - 1); win.selectedClip-- } }
     Shortcut { sequence: "Alt+Right"; enabled: !win.typing && win.selectedClip >= 0 && win.selectedClip < backend.clips.length - 1; context: Qt.ApplicationShortcut; onActivated: { backend.moveClip(win.selectedClip, win.selectedClip + 1); win.selectedClip++ } }
-    Shortcut { sequences: [StandardKey.Undo]; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: backend.undo() }
-    Shortcut { sequences: ["Ctrl+Y", "Ctrl+Shift+Z", StandardKey.Redo]; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: backend.redo() }
+    // On the Schedule page, undo and redo work on its own history (placeholders, timing).
+    Shortcut { sequences: [StandardKey.Undo]; enabled: !win.typing || win.scheduleKeys; context: Qt.ApplicationShortcut; onActivated: win.scheduleVisible ? backend.undoSchedule() : backend.undo() }
+    Shortcut { sequences: ["Ctrl+Y", "Ctrl+Shift+Z", StandardKey.Redo]; enabled: !win.typing || win.scheduleKeys; context: Qt.ApplicationShortcut; onActivated: win.scheduleVisible ? backend.redoSchedule() : backend.redo() }
     Shortcut { sequences: [StandardKey.Save]; context: Qt.ApplicationShortcut; onActivated: backend.save() }
     Shortcut { sequence: "Ctrl+Shift+S"; context: Qt.ApplicationShortcut; onActivated: backend.saveAs() }
     Shortcut { sequences: [StandardKey.Open]; context: Qt.ApplicationShortcut; onActivated: confirm.ask(qsTr("Open another project?"), function() { backend.open() }) }

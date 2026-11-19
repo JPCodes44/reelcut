@@ -85,6 +85,12 @@ class Backend : public QObject {
     Q_PROPERTY(QString schedulerError READ schedulerError NOTIFY schedulerChanged)
     Q_PROPERTY(QVariantList calendarPosts READ calendarPosts NOTIFY schedulerChanged)
     Q_PROPERTY(QVariantMap schedulePreferences READ schedulePreferences WRITE setSchedulePreferences NOTIFY schedulePreferencesChanged)
+    // Schedule-page history, separate from the editor's: placeholder adds and
+    // removals and Timing changes. Real scheduled posts can't be brought back.
+    Q_PROPERTY(bool canUndoSchedule READ canUndoSchedule NOTIFY scheduleHistoryChanged)
+    Q_PROPERTY(bool canRedoSchedule READ canRedoSchedule NOTIFY scheduleHistoryChanged)
+    Q_PROPERTY(QString scheduleUndoText READ scheduleUndoText NOTIFY scheduleHistoryChanged)
+    Q_PROPERTY(QString scheduleRedoText READ scheduleRedoText NOTIFY scheduleHistoryChanged)
     Q_PROPERTY(QString whisperState READ whisperState NOTIFY jobChanged)
 
 public:
@@ -278,6 +284,20 @@ public:
     Q_INVOKABLE void rescheduleScheduled(const QString &id, double publishAtMs);
     Q_INVOKABLE void retryScheduled(const QString &id);
     Q_INVOKABLE void removeScheduled(const QString &id);
+    // Placeholders: calendar cards that hold a slot for a reel still to be made.
+    // They never upload or publish. Each carries a reference reel (the original
+    // to copy), a step-by-step filming guide and a note on what will be posted.
+    // spec: platform, publishAt (ms), title, and optionally reference (local
+    // video path), referenceUrl, note, caption and guide (list of strings).
+    // Gives the new id, or empty when the spec is invalid or the slot is taken.
+    Q_INVOKABLE QString addPlaceholder(const QVariantMap &spec);
+    Q_INVOKABLE bool removePlaceholder(const QString &id);
+    Q_INVOKABLE bool undoSchedule();
+    Q_INVOKABLE bool redoSchedule();
+    bool canUndoSchedule() const { return !m_scheduleUndo.isEmpty(); }
+    bool canRedoSchedule() const { return !m_scheduleRedo.isEmpty(); }
+    QString scheduleUndoText() const;
+    QString scheduleRedoText() const;
     bool schedulerReady() const;
     QVariantList scheduledPosts() const;
     QVariantList calendarPosts() const;
@@ -343,6 +363,7 @@ signals:
     void postScheduled(bool ok, const QString &message);
     void schedulerChanged();
     void schedulePreferencesChanged();
+    void scheduleHistoryChanged();
     void projectChanged();
     void jobChanged();
     void messageChanged();
@@ -411,6 +432,18 @@ private:
     // Facebook and YouTube posts scheduled from here, held by the platforms
     // themselves: retained for 90 days for calendar confirmation/history.
     QVariantList m_directScheduled;
+    QVariantList m_placeholders;
+    QString placeholdersFile() const;
+    void loadPlaceholders();
+    bool savePlaceholders() const;
+    // Each step: kind (placeholderAdded, placeholderRemoved, timing), label,
+    // and what it needs to go either way.
+    QVariantList m_scheduleUndo, m_scheduleRedo;
+    void recordSchedule(const QVariantMap &step);
+    bool applySchedule(const QVariantMap &step, bool undo);
+    bool insertPlaceholder(const QVariantMap &placeholder, int index);
+    bool takePlaceholder(const QString &id, QVariantMap *removed = nullptr, int *index = nullptr);
+    bool writeSchedulePreferences(const QVariantMap &normalized);
     QVariantMap m_scheduleVideos;   // "platform:publishAtMs" -> the exported file
     QVariantMap m_schedulePreferences;
     void loadSchedulePreferences();

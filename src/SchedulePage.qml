@@ -3,6 +3,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls.Material
 import QtQuick.Layouts
+import QtMultimedia
 import "ScheduleLogic.js" as Plan
 
 Rectangle {
@@ -23,7 +24,7 @@ Rectangle {
     readonly property int dailyCount: dailyPosts.length
     readonly property int targetSlotCount: Plan.platforms.reduce(function(n,p) {
         var pref=page.preferences[p];
-        return n + (pref ? Plan.slots(page.selectedDate,pref.startMinute,pref.spacingMinutes).length : 0)
+        return n + (pref ? Plan.slots(page.selectedDate,pref.startMinute,pref.spacingMinutes,pref.slotsPerDay).length : 0)
     },0)
     readonly property bool hasReel: backend.clips.length > 0
     readonly property bool refreshing: typeof stats !== "undefined" && stats ? stats.busy : false
@@ -50,15 +51,16 @@ Rectangle {
     function icon(p) { return {instagram:"camera",facebook:"thumbUp",youtube:"reel",tiktok:"music"}[p] || "reel" }
     function statusText(s) {
         return {planned:qsTr("Planned slot"),scheduled:qsTr("Scheduled"),publishing:qsTr("Publishing"),
-                published:qsTr("Published"),awaiting:qsTr("Awaiting confirmation"),failed:qsTr("Failed"),cancelled:qsTr("Cancelled")}[s] || s
+                published:qsTr("Published"),awaiting:qsTr("Awaiting confirmation"),failed:qsTr("Failed"),cancelled:qsTr("Cancelled"),
+                placeholder:qsTr("Placeholder · to film")}[s] || s
     }
     function statusColor(s,p) {
-        return s==="failed" ? danger : s==="awaiting" ? warning : s==="published" ? (dark ? "#7bd8b2" : "#18794e")
+        return s==="failed" ? danger : s==="awaiting" || s==="placeholder" ? warning : s==="published" ? (dark ? "#7bd8b2" : "#18794e")
                : s==="planned" || s==="cancelled" ? dim : platformColor(p)
     }
     function targets(p) {
         var pref=preferences[p];
-        return pref ? Plan.slots(selectedDate,pref.startMinute,pref.spacingMinutes) : []
+        return pref ? Plan.slots(selectedDate,pref.startMinute,pref.spacingMinutes,pref.slotsPerDay) : []
     }
     function cardsFor(p) {
         var actual=dailyPosts.filter(function(post){return post.platform===p;});
@@ -90,9 +92,10 @@ Rectangle {
         if (!fields || typeof fields !== "object" || Array.isArray(fields) || !Object.keys(fields).every(function(p){return Plan.platforms.indexOf(p)>=0})) return {isError:true,error:"Unknown timing platform."}
         for (const p of Object.keys(fields)) {
             const value=fields[p]
-            if (!value || typeof value !== "object" || Array.isArray(value) || !Object.keys(value).every(function(k){return ["start","spacingMinutes"].indexOf(k)>=0})) return {isError:true,error:"Unknown timing field."}
+            if (!value || typeof value !== "object" || Array.isArray(value) || !Object.keys(value).every(function(k){return ["start","spacingMinutes","slotsPerDay"].indexOf(k)>=0})) return {isError:true,error:"Unknown timing field."}
             if (value.start !== undefined && (typeof value.start !== "string" || Plan.readTime(value.start)<0)) return {isError:true,error:"Use HH:mm for the first slot."}
             if (value.spacingMinutes !== undefined && [60,90,120].indexOf(value.spacingMinutes)<0) return {isError:true,error:"Spacing must be 60, 90 or 120 minutes."}
+            if (value.slotsPerDay !== undefined && (!Number.isInteger(value.slotsPerDay) || value.slotsPerDay<1 || value.slotsPerDay>10)) return {isError:true,error:"Slots per day must be 1 to 10."}
         }
         const before=automationTimingState()
         if (apply) {
@@ -100,7 +103,8 @@ Rectangle {
                 const v=fields[p]||{},old=before[p]
                 const start=Plan.readTime(v.start !== undefined?v.start:old.start)
                 const gap=v.spacingMinutes !== undefined?v.spacingMinutes:old.spacingMinutes
-                if (start<0 || start+9*gap>=1440) return {isError:true,error:"All ten slots must fit in the day."}
+                const count=v.slotsPerDay !== undefined?v.slotsPerDay:old.slotsPerDay
+                if (start<0 || start+(count-1)*gap>=1440) return {isError:true,error:"Every slot must fit in the day."}
             }
         }
         for (let i=0;i<timingRows.count;++i) { const row=timingRows.itemAt(i); if(row && fields[row.modelData]) row.automationSet(fields[row.modelData]) }
@@ -131,7 +135,9 @@ Rectangle {
     function previewFor(post) {
         if (!post || post.source==="slot") return ""
         if (post.thumbnail) return post.thumbnail
-        return post.video ? backend.videoFrame(post.video, 1000) : ""
+        // A placeholder shows its reference reel until the real one exists.
+        var file=post.video || post.reference || ""
+        return file ? backend.videoFrame(file, 1000) : ""
     }
     onSelectedDateChanged: { notice=""; Qt.callLater(revealDay) }
     onVisibleChanged: if(visible) { now=Date.now(); refresh(); Qt.callLater(revealDay) }
@@ -151,7 +157,7 @@ Rectangle {
                 Layout.fillWidth:true
                 Layout.minimumWidth:0
                 Label { text:qsTr("Daily schedule"); color:page.ink; font.pixelSize:24; font.bold:true; Layout.fillWidth:true; elide:Text.ElideRight }
-                Label { text:qsTr("10 videos per platform, in order through the day · your local time"); color:page.dim; font.pixelSize:12; Layout.fillWidth:true; elide:Text.ElideRight }
+                Label { text:qsTr("Up to 10 videos per platform, in order through the day · your local time"); color:page.dim; font.pixelSize:12; Layout.fillWidth:true; elide:Text.ElideRight }
             }
             ToolButton { objectName:"schedulePreviousDay"; text:"‹"; font.pixelSize:26; Accessible.name:qsTr("Previous day"); onClicked:page.selectedDate=Plan.addDays(page.selectedDate,-1) }
             // The date opens a month calendar to jump straight to any day.
@@ -177,6 +183,21 @@ Rectangle {
             }
             ToolButton { objectName:"scheduleNextDay"; text:"›"; font.pixelSize:26; Accessible.name:qsTr("Next day"); onClicked:page.selectedDate=Plan.addDays(page.selectedDate,1) }
             Button { text:qsTr("Today"); flat:true; onClicked:page.selectedDate=Plan.dayStart(Date.now()) }
+            ToolButton {
+                objectName:"scheduleUndo"; text:"↶"; font.pixelSize:20; enabled:backend.canUndoSchedule
+                Accessible.name:qsTr("Undo")
+                ToolTip.visible:hovered; ToolTip.delay:400
+                ToolTip.text:backend.canUndoSchedule ? qsTr("Undo %1 (Ctrl+Z)").arg(backend.scheduleUndoText) : qsTr("Nothing to undo")
+                onClicked:backend.undoSchedule()
+            }
+            ToolButton {
+                objectName:"scheduleRedo"; text:"↷"; font.pixelSize:20; enabled:backend.canRedoSchedule
+                Accessible.name:qsTr("Redo")
+                ToolTip.visible:hovered; ToolTip.delay:400
+                ToolTip.text:backend.canRedoSchedule ? qsTr("Redo %1 (Ctrl+Y)").arg(backend.scheduleRedoText) : qsTr("Nothing to redo")
+                onClicked:backend.redoSchedule()
+            }
+            Button { objectName:"scheduleRemix"; text:qsTr("UGC remix"); flat:true; onClicked:remixPopup.open() }
             Button { objectName:"scheduleTiming"; text:qsTr("Timing"); checkable:true; checked:page.timingOpen; onClicked:page.timingOpen=!page.timingOpen }
             Button { text:page.refreshing ? qsTr("Refreshing…") : qsTr("Refresh"); enabled:!page.refreshing; flat:true; onClicked:page.refresh() }
             ToolButton { text:"✕"; Accessible.name:qsTr("Close Schedule"); onClicked:page.closeRequested() }
@@ -204,11 +225,13 @@ Rectangle {
                             required property string modelData
                             readonly property int start:Plan.readTime(startInput.text)
                             readonly property int gap:[60,90,120][spacingInput.currentIndex]
-                            readonly property bool valid:start>=0 && start+9*gap<1440
-                            function automationDraft() { return {start:startInput.text,spacingMinutes:gap} }
+                            readonly property int count:countInput.value
+                            readonly property bool valid:start>=0 && start+(count-1)*gap<1440
+                            function automationDraft() { return {start:startInput.text,spacingMinutes:gap,slotsPerDay:count} }
                             function automationSet(value) {
                                 if (value.start !== undefined) startInput.text=value.start
                                 if (value.spacingMinutes !== undefined) spacingInput.currentIndex=[60,90,120].indexOf(value.spacingMinutes)
+                                if (value.slotsPerDay !== undefined) countInput.value=value.slotsPerDay
                             }
                             Layout.fillWidth:true; Layout.preferredWidth:1; spacing:6
                             RowLayout {
@@ -251,6 +274,18 @@ Rectangle {
                                         Accessible.name:qsTr("%1 slot spacing").arg(page.labels[timingRow.modelData])
                                     }
                                 }
+                                ColumnLayout {
+                                    spacing:2
+                                    Label { text:qsTr("Per day"); color:page.dim; font.pixelSize:11 }
+                                    SpinBox {
+                                        id:countInput
+                                        objectName:"scheduleCount-"+timingRow.modelData
+                                        from:1; to:10
+                                        value:page.preferences[timingRow.modelData].slotsPerDay || 10
+                                        Layout.preferredWidth:110
+                                        Accessible.name:qsTr("%1 slots per day").arg(page.labels[timingRow.modelData])
+                                    }
+                                }
                             }
                         }
                     }
@@ -259,7 +294,7 @@ Rectangle {
                     Layout.fillWidth:true; spacing:16
                     Label {
                         Layout.fillWidth:true; wrapMode:Text.Wrap
-                        text:qsTr("Use HH:mm. All ten slots must fit before midnight; with two-hour spacing, start before 06:00.")
+                        text:qsTr("Use HH:mm. Every slot must fit before midnight. YouTube uploads each Short when you schedule it, so keep it to about 6 a day.")
                         color:page.dim; font.pixelSize:11
                     }
                     Button {
@@ -268,9 +303,9 @@ Rectangle {
                         enabled:{ for(var i=0;i<timingRows.count;++i) { var row=timingRows.itemAt(i); if(!row || !row.valid) return false } return true }
                         onClicked:{
                             var next={};
-                            for(var i=0;i<timingRows.count;++i){var row=timingRows.itemAt(i);next[row.modelData]={startMinute:row.start,spacingMinutes:row.gap};}
+                            for(var i=0;i<timingRows.count;++i){var row=timingRows.itemAt(i);next[row.modelData]={startMinute:row.start,spacingMinutes:row.gap,slotsPerDay:row.count};}
                             backend.schedulePreferences=next;
-                            page.notice=Plan.platforms.every(function(p) { var saved=backend.schedulePreferences[p]; return saved.startMinute===next[p].startMinute && saved.spacingMinutes===next[p].spacingMinutes })
+                            page.notice=Plan.platforms.every(function(p) { var saved=backend.schedulePreferences[p]; return saved.startMinute===next[p].startMinute && saved.spacingMinutes===next[p].spacingMinutes && saved.slotsPerDay===next[p].slotsPerDay })
                                 ? qsTr("Slot timing saved. Already scheduled posts were not moved.")
                                 : qsTr("Could not save slot timing. Your previous settings are still in use.")
                             Qt.callLater(page.revealDay)
@@ -337,11 +372,13 @@ Rectangle {
                                         }
                                         Label { text:page.labels[platformRow.modelData]; color:page.ink; font.bold:true; font.pixelSize:15; Layout.fillWidth:true; elide:Text.ElideRight }
                                     }
-                                    Label { text:qsTr("%1 / 10").arg(platformRow.summary.covered); color:page.ink; font.bold:true; font.pixelSize:22 }
+                                    Label { text:qsTr("%1 / %2").arg(platformRow.summary.covered).arg(platformRow.summary.target); color:page.ink; font.bold:true; font.pixelSize:22 }
                                     Label { text:qsTr("%1 scheduled · %2 published").arg(platformRow.summary.scheduled).arg(platformRow.summary.published); color:page.dim; font.pixelSize:11 }
+                                    Label { visible:(platformRow.summary.placeholders||0)>0; text:qsTr("%1 placeholders to film").arg(platformRow.summary.placeholders||0); color:page.warning; font.pixelSize:11 }
                                     Label { visible:platformRow.summary.failed>0; text:qsTr("%1 failed").arg(platformRow.summary.failed); color:page.danger; font.pixelSize:11 }
                                     Label { visible:platformRow.summary.awaiting>0; text:qsTr("%1 unconfirmed").arg(platformRow.summary.awaiting); color:page.warning; font.pixelSize:11 }
                                     Label { visible:platformRow.modelData==="tiktok"; text:qsTr("Reminders only · posted by hand"); color:page.dim; font.pixelSize:11; Layout.fillWidth:true; wrapMode:Text.Wrap }
+                                    Label { visible:platformRow.modelData==="youtube"; text:qsTr("Uploads when scheduled · YouTube blocks after about 10 uploads a day"); color:page.dim; font.pixelSize:11; Layout.fillWidth:true; wrapMode:Text.Wrap }
                                     Item { Layout.fillHeight:true }
                                 }
                             }
@@ -406,6 +443,14 @@ Rectangle {
                                                 anchors.fill:parent; anchors.margins:frame.border.width; radius:9
                                                 color:Qt.darker(page.platformColor(postCard.lanePlatform),1.6)
                                                 SocialIcon { anchors.centerIn:parent; width:30; height:30; name:page.icon(postCard.lanePlatform) }
+                                            }
+                                            // Placeholders show the original reel, flagged so it's never mistaken for the post.
+                                            Rectangle {
+                                                visible:postCard.modelData.status==="placeholder"
+                                                anchors.top:parent.top; anchors.left:parent.left; anchors.margins:6
+                                                width:refBadge.implicitWidth+10; height:refBadge.implicitHeight+4; radius:4
+                                                color:page.warning
+                                                Label { id:refBadge; anchors.centerIn:parent; text:qsTr("REFERENCE"); color:"#1b1b20"; font.bold:true; font.pixelSize:9 }
                                             }
                                             Label {
                                                 visible:postCard.empty
@@ -559,18 +604,210 @@ Rectangle {
         }
     }
 
+    // Copies one prompt for Claude Code that remakes a profile's reels as placeholders.
+    Popup {
+        id:remixPopup
+        objectName:"scheduleRemixPopup"
+        parent:Overlay.overlay
+        anchors.centerIn:parent
+        width:Math.min(560,parent ? parent.width-40 : 560)
+        padding:20; modal:true
+        property string mode:"profile"
+        readonly property string prompt:Plan.remixPrompt(mode==="reels" ? remixReels.text : remixSource.text,remixBrand.text,remixLanguage.text,mode)
+        onModeChanged:copied=false
+        property bool copied:false
+        onOpened:copied=false
+        background:Rectangle { color:page.panel; radius:14; border.color:page.line }
+        // QML has no clipboard API; a hidden text field copies for us.
+        TextEdit { id:clipboardHelper; visible:false }
+        contentItem:ColumnLayout {
+            spacing:10
+            Label { text:qsTr("UGC remix prompt"); color:page.ink; font.bold:true; font.pixelSize:18 }
+            Label {
+                Layout.fillWidth:true; wrapMode:Text.Wrap; color:page.dim; font.pixelSize:12
+                text:qsTr("Paste it into Claude Code. It downloads the reels, studies each one, and adds a placeholder per reel to the next open Instagram slots, with the original as the reference and a step-by-step guide of the clips to film. Nothing is posted.")
+            }
+            RowLayout {
+                spacing:6
+                Label { text:qsTr("Remix"); color:page.dim; font.pixelSize:11 }
+                Button { objectName:"scheduleRemixProfile"; text:qsTr("A whole profile"); flat:true; checkable:true; checked:remixPopup.mode==="profile"; onClicked:remixPopup.mode="profile" }
+                Button { objectName:"scheduleRemixReels"; text:qsTr("Individual reels"); flat:true; checkable:true; checked:remixPopup.mode==="reels"; onClicked:remixPopup.mode="reels" }
+            }
+            TextField {
+                id:remixSource; objectName:"scheduleRemixSource"
+                visible:remixPopup.mode==="profile"
+                Layout.fillWidth:true; placeholderText:"https://www.tiktok.com/@account"; selectByMouse:true
+                onTextChanged:remixPopup.copied=false
+            }
+            ColumnLayout {
+                visible:remixPopup.mode==="reels"
+                Layout.fillWidth:true; spacing:4
+                Label { text:qsTr("Reel links, one per line"); color:page.dim; font.pixelSize:11 }
+                // A plain box: Material floats a placeholder into the border, which overlaps typed links.
+                Rectangle {
+                    Layout.fillWidth:true; Layout.preferredHeight:96
+                    radius:6; color:"transparent"
+                    border.width:remixReels.activeFocus ? 2 : 1
+                    border.color:remixReels.activeFocus ? Material.accent : page.line
+                    ScrollView {
+                        anchors.fill:parent; anchors.margins:2
+                        TextArea {
+                            id:remixReels; objectName:"scheduleRemixReelLinks"
+                            wrapMode:TextEdit.NoWrap; selectByMouse:true
+                            color:page.ink; font.pixelSize:12
+                            leftPadding:8; rightPadding:8; topPadding:6; bottomPadding:6
+                            background:Item {}
+                            onTextChanged:remixPopup.copied=false
+                        }
+                    }
+                }
+                Label { text:qsTr("e.g. https://www.tiktok.com/@account/video/… or https://www.instagram.com/reel/…"); color:page.dim; font.pixelSize:11; Layout.fillWidth:true; elide:Text.ElideRight }
+            }
+            RowLayout {
+                Layout.fillWidth:true; spacing:10
+                ColumnLayout {
+                    Layout.fillWidth:true; spacing:2
+                    Label { text:qsTr("For brand"); color:page.dim; font.pixelSize:11 }
+                    TextField { id:remixBrand; objectName:"scheduleRemixBrand"; Layout.fillWidth:true; text:"TextInk (textink.ca)"; selectByMouse:true; onTextChanged:remixPopup.copied=false }
+                }
+                ColumnLayout {
+                    spacing:2
+                    Label { text:qsTr("Hook language"); color:page.dim; font.pixelSize:11 }
+                    TextField { id:remixLanguage; objectName:"scheduleRemixLanguage"; Layout.preferredWidth:140; text:"English"; selectByMouse:true; onTextChanged:remixPopup.copied=false }
+                }
+            }
+            ScrollView {
+                Layout.fillWidth:true; Layout.preferredHeight:220
+                TextArea {
+                    objectName:"scheduleRemixPrompt"
+                    readOnly:true; wrapMode:TextEdit.Wrap; selectByMouse:true
+                    text:remixPopup.prompt; font.pixelSize:11; color:page.ink
+                }
+            }
+            RowLayout {
+                Layout.fillWidth:true
+                Label { visible:remixPopup.copied; text:qsTr("Copied. Paste it into Claude Code."); color:page.dim; font.pixelSize:12 }
+                Item { Layout.fillWidth:true }
+                Button {
+                    objectName:"scheduleRemixCopy"
+                    text:qsTr("Copy prompt"); highlighted:true
+                    onClicked:{ clipboardHelper.text=remixPopup.prompt; clipboardHelper.selectAll(); clipboardHelper.copy(); remixPopup.copied=true }
+                }
+                Button { text:qsTr("Close"); flat:true; onClicked:remixPopup.close() }
+            }
+        }
+    }
+
     Popup {
         id:postDetail
         parent:Overlay.overlay
         anchors.centerIn:parent
-        width:Math.min(460,parent ? parent.width-40 : 460)
+        width:Math.min(placeholder ? 860 : 460,parent ? parent.width-40 : 460)
+        height:placeholder && parent ? Math.min(implicitHeight, parent.height-40) : implicitHeight
         padding:20; modal:true
         background:Rectangle { color:page.panel; radius:14; border.color:page.line }
-        contentItem:ColumnLayout {
+        // The reel's exported file, when it's still on disk: play it right here.
+        readonly property bool placeholder:page.selectedPost !== null && page.selectedPost.status==="placeholder"
+        // A placeholder plays its reference reel: the original to copy, not what gets posted.
+        readonly property string videoFile:!page.selectedPost ? ""
+            : page.selectedPost.video ? String(page.selectedPost.video)
+            : placeholder && page.selectedPost.reference ? String(page.selectedPost.reference) : ""
+        onOpened: if (videoFile.length>0) { reelPlayer.source="file://"+videoFile; reelPlayer.play() }
+        onClosed: { reelPlayer.stop(); reelPlayer.source="" }
+        MediaDevices { id:reelDevices }
+        MediaPlayer {
+            id:reelPlayer
+            objectName:"scheduleReelPlayer"
+            videoOutput:reelVideo
+            loops:MediaPlayer.Infinite
+            audioOutput:AudioOutput { device:reelDevices.defaultAudioOutput; muted:reelMute.checked }
+        }
+        contentItem:GridLayout {
+            columns:postDetail.placeholder ? 2 : 1
+            columnSpacing:20; rowSpacing:12
+          ColumnLayout {
+            Layout.alignment:Qt.AlignTop
             spacing:12
+            Rectangle {
+                visible:postDetail.videoFile.length>0
+                Layout.alignment:Qt.AlignHCenter
+                Layout.preferredHeight:Math.min(480, (page.Window.height||800)-(postDetail.placeholder ? 200 : 300))
+                Layout.preferredWidth:Layout.preferredHeight*9/16
+                radius:10; color:"black"; clip:true
+                // The still covers the gap until the first frame decodes.
+                Image {
+                    anchors.fill:parent
+                    visible:reelPlayer.position===0
+                    source:postDetail.videoFile.length>0 ? page.previewFor(page.selectedPost) : ""
+                    sourceSize.width:540
+                    fillMode:Image.PreserveAspectFit; asynchronous:true
+                }
+                VideoOutput {
+                    id:reelVideo
+                    objectName:"scheduleReelVideo"
+                    anchors.fill:parent
+                    fillMode:VideoOutput.PreserveAspectFit
+                }
+                MouseArea {
+                    anchors.fill:parent
+                    cursorShape:Qt.PointingHandCursor
+                    onClicked:reelPlayer.playbackState===MediaPlayer.PlayingState ? reelPlayer.pause() : reelPlayer.play()
+                }
+                Label {
+                    anchors.centerIn:parent
+                    visible:reelPlayer.playbackState!==MediaPlayer.PlayingState
+                    text:"▶"; color:"white"; font.pixelSize:44; opacity:0.85
+                }
+                Rectangle {
+                    objectName:"scheduleReferenceFlag"
+                    visible:postDetail.placeholder && !page.selectedPost.video
+                    anchors.top:parent.top; anchors.left:parent.left; anchors.right:parent.right
+                    height:flagText.implicitHeight+12
+                    color:page.warning
+                    Label {
+                        id:flagText
+                        anchors.centerIn:parent; width:parent.width-12
+                        horizontalAlignment:Text.AlignHCenter; wrapMode:Text.Wrap
+                        text:qsTr("REFERENCE · original reel to copy. Not what gets posted.")
+                        color:"#1b1b20"; font.bold:true; font.pixelSize:11
+                    }
+                }
+            }
+            RowLayout {
+                visible:postDetail.videoFile.length>0
+                Layout.fillWidth:true; spacing:6
+                ToolButton {
+                    objectName:"scheduleReelPlay"
+                    text:reelPlayer.playbackState===MediaPlayer.PlayingState ? "❚❚" : "▶"
+                    Accessible.name:reelPlayer.playbackState===MediaPlayer.PlayingState ? qsTr("Pause") : qsTr("Play")
+                    onClicked:reelPlayer.playbackState===MediaPlayer.PlayingState ? reelPlayer.pause() : reelPlayer.play()
+                }
+                Slider {
+                    id:reelSeek
+                    objectName:"scheduleReelSeek"
+                    Layout.fillWidth:true
+                    from:0; to:Math.max(1, reelPlayer.duration)
+                    value:pressed ? value : reelPlayer.position
+                    enabled:reelPlayer.seekable
+                    onMoved:reelPlayer.position=value
+                    Accessible.name:qsTr("Position")
+                }
+                Label {
+                    function clock(ms) { var s=Math.floor(ms/1000); return Math.floor(s/60)+":"+String(s%60).padStart(2,"0") }
+                    text:clock(reelPlayer.position)+" / "+clock(reelPlayer.duration)
+                    color:page.dim; font.pixelSize:11
+                }
+                ToolButton {
+                    id:reelMute
+                    objectName:"scheduleReelMute"
+                    checkable:true
+                    text:checked ? "🔇" : "🔊"
+                    Accessible.name:checked ? qsTr("Unmute") : qsTr("Mute")
+                }
+            }
             Image {
-                visible:status===Image.Ready
-                source:page.previewFor(page.selectedPost)
+                visible:postDetail.videoFile.length===0 && status===Image.Ready
+                source:postDetail.videoFile.length===0 ? page.previewFor(page.selectedPost) : ""
                 Layout.alignment:Qt.AlignHCenter
                 Layout.preferredWidth:160; Layout.preferredHeight:284
                 sourceSize.width:320
@@ -584,8 +821,73 @@ Rectangle {
             RowLayout {
                 Item { Layout.fillWidth:true }
                 Button { visible:page.selectedPost && (page.selectedPost.link||"").length>0; text:qsTr("Open on platform"); onClicked:backend.openLink(page.selectedPost.link) }
+                Button { visible:!postDetail.placeholder; text:qsTr("Close"); onClicked:postDetail.close() }
+            }
+          }
+          // The plan for a placeholder: what gets posted, and the clips to film for it.
+          ColumnLayout {
+            visible:postDetail.placeholder
+            Layout.alignment:Qt.AlignTop
+            Layout.fillWidth:true; Layout.fillHeight:true
+            Layout.preferredWidth:380
+            spacing:10
+            Label { text:qsTr("This slot will post"); color:page.dim; font.pixelSize:11; font.bold:true }
+            Label {
+                objectName:"schedulePlaceholderNote"
+                Layout.fillWidth:true; wrapMode:Text.Wrap; color:page.ink
+                text:postDetail.placeholder ? (page.selectedPost.note||qsTr("The finished reel, once it's made.")) : ""
+            }
+            Label {
+                visible:postDetail.placeholder && (page.selectedPost.caption||"").length>0
+                Layout.fillWidth:true; wrapMode:Text.Wrap; color:page.dim; font.pixelSize:12
+                text:postDetail.placeholder ? qsTr("Caption: %1").arg(page.selectedPost.caption||"") : ""
+            }
+            Label {
+                Layout.fillWidth:true; wrapMode:Text.Wrap; color:page.warning; font.pixelSize:12
+                text:qsTr("Nothing posts from a placeholder. Make the reel, then schedule it into this slot after removing the placeholder.")
+            }
+            Rectangle { Layout.fillWidth:true; height:1; color:page.line }
+            Label { text:qsTr("Step by step: clips to film"); color:page.dim; font.pixelSize:11; font.bold:true }
+            ScrollView {
+                id:guideScroll
+                Layout.fillWidth:true; Layout.fillHeight:true
+                contentWidth:availableWidth
+                Layout.preferredHeight:Math.min(guideColumn.implicitHeight, 420)
+                clip:true
+                ColumnLayout {
+                    id:guideColumn
+                    width:guideScroll.availableWidth
+                    spacing:8
+                    Repeater {
+                        objectName:"schedulePlaceholderGuide"
+                        model:postDetail.placeholder ? (page.selectedPost.guide||[]) : []
+                        RowLayout {
+                            id:guideStep
+                            required property int index
+                            required property string modelData
+                            Layout.fillWidth:true; spacing:8
+                            Label { text:(guideStep.index+1)+"."; color:page.warning; font.bold:true; Layout.alignment:Qt.AlignTop }
+                            Label { text:guideStep.modelData; color:page.ink; wrapMode:Text.Wrap; Layout.fillWidth:true; font.pixelSize:13 }
+                        }
+                    }
+                }
+            }
+            RowLayout {
+                Layout.fillWidth:true
+                Button {
+                    visible:postDetail.placeholder && (page.selectedPost.referenceUrl||"").length>0
+                    text:qsTr("Open original"); flat:true
+                    onClicked:backend.openLink(page.selectedPost.referenceUrl)
+                }
+                Item { Layout.fillWidth:true }
+                Button {
+                    objectName:"scheduleRemovePlaceholder"
+                    text:qsTr("Remove placeholder"); flat:true
+                    onClicked:{ if (backend.removePlaceholder(page.selectedPost.id)) postDetail.close() }
+                }
                 Button { text:qsTr("Close"); onClicked:postDetail.close() }
             }
+          }
         }
     }
 }

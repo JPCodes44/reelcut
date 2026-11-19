@@ -110,6 +110,7 @@ Backend::Backend(FilePicker *picker, ThumbProvider *thumbs, Theme *theme, QObjec
             connect(p, &Publisher::accountChanged, this, &Backend::accountsChanged);
     }
     loadDirectScheduled();
+    loadPlaceholders();
     loadSchedulePreferences();
     m_scheduler = new PostScheduler(this);
     if (!stateDir.isEmpty())
@@ -1473,13 +1474,14 @@ QVariantList Backend::nextOpenSlots(const QStringList &requested, int count) con
         const QVariantMap plan = m_schedulePreferences.value(platform).toMap();
         const int start = plan.value("startMinute").toInt();
         const int spacing = plan.value("spacingMinutes").toInt();
+        const int perDay = plan.value("slotsPerDay", 10).toInt();
         if (spacing <= 0)
             continue;
         int found = 0;
         // Facebook takes up to 29 days ahead; nothing looks further than 60.
         for (int day = 0; day <= 60 && found < count; ++day) {
             const QDate date = today.addDays(day);
-            for (int i = 0; i < 10 && found < count; ++i) {
+            for (int i = 0; i < perDay && found < count; ++i) {
                 const int minute = start + i * spacing;
                 const QTime time(minute / 60, minute % 60);
                 const QDateTime at(date, time);
@@ -1786,7 +1788,10 @@ QVariantMap defaultSchedulePreferences() {
     int start = 480;
     for (const QString &platform : {QStringLiteral("instagram"), QStringLiteral("facebook"), QStringLiteral("youtube"),
                                     QStringLiteral("tiktok")}) {
-        result.insert(platform, QVariantMap{{"startMinute", start}, {"spacingMinutes", 90}});
+        // YouTube caps uploads per channel per day (about ten before it blocks), and every
+        // scheduled Short uploads straight away, so its plan defaults to fewer slots.
+        result.insert(platform, QVariantMap{{"startMinute", start}, {"spacingMinutes", 90},
+                                            {"slotsPerDay", platform == QLatin1String("youtube") ? 6 : 10}});
         start += 30;
     }
     return result;
@@ -1798,14 +1803,19 @@ bool normalizeSchedulePreferences(const QVariantMap &input, QVariantMap *result)
                                     QStringLiteral("tiktok")}) {
         // Plans saved before a platform had a row keep their other rows.
         const QVariantMap value = input.contains(platform) ? input.value(platform).toMap() : defaults.value(platform).toMap();
-        bool startOk = false, spacingOk = false;
+        bool startOk = false, spacingOk = false, slotsOk = false;
         const double start = value.value("startMinute").toDouble(&startOk);
         const double spacing = value.value("spacingMinutes").toDouble(&spacingOk);
-        if (!startOk || !spacingOk || !std::isfinite(start) || !std::isfinite(spacing)
-            || std::floor(start) != start || std::floor(spacing) != spacing
-            || start < 0 || (spacing != 60 && spacing != 90 && spacing != 120) || start + 9 * spacing >= 1440)
+        // Plans saved before slots per day existed take the platform's default.
+        const double perDay = (value.contains("slotsPerDay") ? value : defaults.value(platform).toMap())
+                                 .value("slotsPerDay").toDouble(&slotsOk);
+        if (!startOk || !spacingOk || !slotsOk || !std::isfinite(start) || !std::isfinite(spacing)
+            || !std::isfinite(perDay) || std::floor(start) != start || std::floor(spacing) != spacing
+            || std::floor(perDay) != perDay || perDay < 1 || perDay > 10
+            || start < 0 || (spacing != 60 && spacing != 90 && spacing != 120) || start + (perDay - 1) * spacing >= 1440)
             return false;
-        out.insert(platform, QVariantMap{{"startMinute", int(start)}, {"spacingMinutes", int(spacing)}});
+        out.insert(platform, QVariantMap{{"startMinute", int(start)}, {"spacingMinutes", int(spacing)},
+                                         {"slotsPerDay", int(perDay)}});
     }
     *result = out;
     return true;
@@ -1823,13 +1833,20 @@ void Backend::loadSchedulePreferences() {
 void Backend::setSchedulePreferences(const QVariantMap &preferences) {
     QVariantMap normalized;
     if (!normalizeSchedulePreferences(preferences, &normalized) || normalized == m_schedulePreferences) return;
+    const QVariantMap before = m_schedulePreferences;
+    if (writeSchedulePreferences(normalized))
+        recordSchedule({{"kind", "timing"}, {"label", tr("slot timing change")}, {"before", before}, {"after", normalized}});
+}
+
+bool Backend::writeSchedulePreferences(const QVariantMap &normalized) {
     if (!Net::savePrivate(Net::stateFile(m_stateDir, "schedule-plan.json"),
                           {{"preferences", QJsonObject::fromVariantMap(normalized)}})) {
         setMessage(tr("Couldn't save the schedule timing preferences."), true);
-        return;
+        return false;
     }
     m_schedulePreferences = normalized;
     emit schedulePreferencesChanged();
+    return true;
 }
 
 QVariantList Backend::calendarPosts() const {
@@ -1849,7 +1866,154 @@ QVariantList Backend::calendarPosts() const {
     const qint64 oldest = QDateTime::currentMSecsSinceEpoch() - 90LL * 86400000;
     for (const QVariant &v : m_directScheduled)
         if (v.toMap().value("publishAt").toDouble() > oldest) out << withVideo(v.toMap());
+    // Placeholders hold their slot on the calendar; nothing ever posts them.
+    for (const QVariant &v : m_placeholders)
+        out << v;
     return out;
+}
+
+QString Backend::placeholdersFile() const { return Net::stateFile(m_stateDir, "schedule-placeholders.json"); }
+
+void Backend::loadPlaceholders() {
+    m_placeholders.clear();
+    for (const QJsonValue &v : Net::load(placeholdersFile()).value("placeholders").toArray()) {
+        QVariantMap p = v.toObject().toVariantMap();
+        if (p.value("id").toString().isEmpty() || !Posting::ids().contains(p.value("platform").toString())
+            || !(p.value("publishAt").toDouble() > 0))
+            continue;
+        p.insert("status", "placeholder");  // whatever the file says, it never posts
+        m_placeholders << p;
+    }
+}
+
+bool Backend::savePlaceholders() const {
+    QJsonArray list;
+    for (const QVariant &v : m_placeholders)
+        list << QJsonObject::fromVariantMap(v.toMap());
+    return Net::savePrivate(placeholdersFile(), {{"placeholders", list}});
+}
+
+QString Backend::addPlaceholder(const QVariantMap &spec) {
+    const QString platform = spec.value("platform").toString();
+    const double at = spec.value("publishAt").toDouble();
+    const QString name = spec.value("title").toString().trimmed();
+    if (!Posting::ids().contains(platform) || !(at > 0) || !std::isfinite(at) || name.isEmpty()) {
+        setMessage(tr("A placeholder needs a platform, a time and a title."), true);
+        return {};
+    }
+    QStringList guide;
+    for (const QVariant &step : spec.value("guide").toList())
+        if (!step.toString().trimmed().isEmpty()) guide << step.toString().trimmed();
+    const QString id = "placeholder-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QVariantMap placeholder{
+        {"id", id}, {"platform", platform}, {"publishAt", double(qint64(at))}, {"title", name},
+        {"status", "placeholder"}, {"caption", spec.value("caption").toString()},
+        {"note", spec.value("note").toString()}, {"reference", spec.value("reference").toString()},
+        {"referenceUrl", spec.value("referenceUrl").toString()}, {"guide", guide}};
+    if (!insertPlaceholder(placeholder, m_placeholders.size()))
+        return {};
+    recordSchedule({{"kind", "placeholderAdded"}, {"label", tr("add placeholder")}, {"placeholder", placeholder},
+                    {"index", m_placeholders.size() - 1}});
+    return id;
+}
+
+bool Backend::insertPlaceholder(const QVariantMap &placeholder, int index) {
+    const QString platform = placeholder.value("platform").toString();
+    const qint64 minute = qint64(placeholder.value("publishAt").toDouble()) / 60000;
+    for (const QVariant &v : calendarPosts()) {
+        const QVariantMap post = v.toMap();
+        const QString status = post.value("status").toString();
+        if (status != "cancelled" && status != "failed" && post.value("platform").toString() == platform
+            && qint64(post.value("publishAt").toDouble()) / 60000 == minute) {
+            setMessage(tr("That slot is already taken."), true);
+            return false;
+        }
+    }
+    index = qBound(0, index, int(m_placeholders.size()));
+    m_placeholders.insert(index, placeholder);
+    if (!savePlaceholders()) {
+        m_placeholders.removeAt(index);
+        setMessage(tr("Couldn't save the placeholder."), true);
+        return false;
+    }
+    emit schedulerChanged();
+    return true;
+}
+
+bool Backend::takePlaceholder(const QString &id, QVariantMap *removed, int *index) {
+    for (int i = 0; i < m_placeholders.size(); ++i) {
+        if (m_placeholders.at(i).toMap().value("id").toString() != id)
+            continue;
+        const QVariant taken = m_placeholders.takeAt(i);
+        if (!savePlaceholders()) {
+            m_placeholders.insert(i, taken);
+            setMessage(tr("Couldn't remove the placeholder."), true);
+            return false;
+        }
+        if (removed) *removed = taken.toMap();
+        if (index) *index = i;
+        emit schedulerChanged();
+        return true;
+    }
+    return false;
+}
+
+bool Backend::removePlaceholder(const QString &id) {
+    QVariantMap removed;
+    int index = 0;
+    if (!takePlaceholder(id, &removed, &index))
+        return false;
+    recordSchedule({{"kind", "placeholderRemoved"}, {"label", tr("remove placeholder")},
+                    {"placeholder", removed}, {"index", index}});
+    setMessage(tr("Placeholder removed. Ctrl+Z brings it back."), false);
+    return true;
+}
+
+void Backend::recordSchedule(const QVariantMap &step) {
+    m_scheduleUndo << step;
+    while (m_scheduleUndo.size() > 100) m_scheduleUndo.removeFirst();
+    m_scheduleRedo.clear();
+    emit scheduleHistoryChanged();
+}
+
+// Runs a recorded step backwards (undo) or forwards (redo).
+bool Backend::applySchedule(const QVariantMap &step, bool undo) {
+    const QString kind = step.value("kind").toString();
+    const QVariantMap placeholder = step.value("placeholder").toMap();
+    const bool restore = (kind == "placeholderRemoved") == undo;  // put the placeholder (back) in
+    if (kind == "placeholderAdded" || kind == "placeholderRemoved")
+        return restore ? insertPlaceholder(placeholder, step.value("index").toInt())
+                       : takePlaceholder(placeholder.value("id").toString());
+    if (kind == "timing")
+        return writeSchedulePreferences(step.value(undo ? "before" : "after").toMap());
+    return false;
+}
+
+bool Backend::undoSchedule() {
+    if (m_scheduleUndo.isEmpty()) return false;
+    const QVariantMap step = m_scheduleUndo.last().toMap();
+    if (!applySchedule(step, true)) return false;  // e.g. the slot was filled since: keep the step
+    m_scheduleRedo << m_scheduleUndo.takeLast();
+    setMessage(tr("Undid %1.").arg(step.value("label").toString()), false);
+    emit scheduleHistoryChanged();
+    return true;
+}
+
+bool Backend::redoSchedule() {
+    if (m_scheduleRedo.isEmpty()) return false;
+    const QVariantMap step = m_scheduleRedo.last().toMap();
+    if (!applySchedule(step, false)) return false;
+    m_scheduleUndo << m_scheduleRedo.takeLast();
+    setMessage(tr("Redid %1.").arg(step.value("label").toString()), false);
+    emit scheduleHistoryChanged();
+    return true;
+}
+
+QString Backend::scheduleUndoText() const {
+    return m_scheduleUndo.isEmpty() ? QString() : m_scheduleUndo.last().toMap().value("label").toString();
+}
+QString Backend::scheduleRedoText() const {
+    return m_scheduleRedo.isEmpty() ? QString() : m_scheduleRedo.last().toMap().value("label").toString();
 }
 
 QString Backend::videoFrame(const QString &path, int ms) {
