@@ -58,7 +58,7 @@ RowLayout {
     function remember(val) {
         if (val === "" || Qt.color(val).a === 0)
             return
-        let list = (recent.colors || []).filter(function(c) { return c !== val })
+        let list = root.recentColors.filter(function(c) { return c !== val })
         list.unshift(val)
         recent.colors = list.slice(0, 8)
     }
@@ -69,6 +69,13 @@ RowLayout {
         location: StandardPaths.writableLocation(StandardPaths.GenericConfigLocation) + "/reelcut/colors.ini"
         category: "colorPicker"
         property var colors: []
+    }
+    // QSettings hands back a one-entry list as a bare string; always a list here.
+    readonly property var recentColors: {
+        const c = recent.colors
+        if (!c) return []
+        if (typeof c === "string") return [c]
+        return Array.from(c).filter(function(x) { return typeof x === "string" })
     }
 
     Label { text: root.label; Layout.preferredWidth: 72; elide: Text.ElideRight }  // Inspector's labelWidth
@@ -235,7 +242,6 @@ RowLayout {
                     onEditingFinished: {
                         let t = text.trim()
                         if (!t.startsWith("#")) t = "#" + t
-                        const col = Qt.color(t)
                         if (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(t)) {
                             root.load(t)
                             root.commit()
@@ -298,10 +304,10 @@ RowLayout {
             Flow {
                 Layout.fillWidth: true
                 spacing: 6
-                visible: (recent.colors || []).length > 0
+                visible: root.recentColors.length > 0
                 Label { text: qsTr("Recent"); color: "#9a9aa2"; font.pixelSize: 11; height: 28; verticalAlignment: Text.AlignVCenter }
                 Repeater {
-                    model: recent.colors || []
+                    model: root.recentColors
                     delegate: swatchDot
                 }
             }

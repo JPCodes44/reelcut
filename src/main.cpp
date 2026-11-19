@@ -10,6 +10,7 @@
 #include <QIcon>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPointer>
 #include <QProcess>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -22,6 +23,7 @@
 #include <QUrl>
 
 #include "backend.h"
+#include "downloads.h"
 #include "jobs.h"
 #include "mcpserver.h"
 #include "portalfilepicker.h"
@@ -108,6 +110,17 @@ int main(int argc, char *argv[]) {
     if (!qEnvironmentVariableIsSet("QT_FFMPEG_DECODING_HW_DEVICE_TYPES"))
         qputenv("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", "vaapi,cuda");
 
+#ifdef Q_OS_LINUX
+    // Without a display Qt aborts (and dumps core) creating the platform
+    // integration; say what's wrong instead.
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM") && qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")
+        && qEnvironmentVariableIsEmpty("DISPLAY")) {
+        QTextStream(stderr) << "reelcut: no display found (WAYLAND_DISPLAY and DISPLAY are unset).\n"
+                               "Run it from a desktop session, or use `reelcut export` without a window.\n";
+        return 1;
+    }
+#endif
+
     QGuiApplication app(argc, argv);
     app.setApplicationName("reelcut");
     app.setApplicationVersion("0.4.1");
@@ -128,6 +141,7 @@ int main(int argc, char *argv[]) {
     PortalFilePicker picker;
     auto *thumbs = new ThumbProvider();
     Backend backend(&picker, thumbs, &theme);
+    Downloads downloads;
 
     QQmlApplicationEngine engine;
     // The engine takes ownership of the image provider.
@@ -137,6 +151,7 @@ int main(int argc, char *argv[]) {
     engine.rootContext()->setContextProperty("translator", &translator);
     engine.rootContext()->setContextProperty("theme", &theme);
     engine.rootContext()->setContextProperty("backend", &backend);
+    engine.rootContext()->setContextProperty("downloads", &downloads);
     engine.load(QUrl("qrc:/Main.qml"));
     if (engine.rootObjects().isEmpty())
         return 1;
@@ -156,8 +171,9 @@ int main(int argc, char *argv[]) {
     // Live reload while developing: with REELCUT_DEV_RELOAD set, a rebuilt
     // binary replaces the running app. The project is saved, the new build
     // starts on it at the same playhead, and this one exits.
-    if (qEnvironmentVariableIsSet("REELCUT_DEV_RELOAD")) {
-        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+    auto *rootWindow = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+    if (qEnvironmentVariableIsSet("REELCUT_DEV_RELOAD") && rootWindow) {
+        QPointer<QQuickWindow> window = rootWindow;
         const QString exe = QCoreApplication::applicationFilePath();
         const QDateTime built = QFileInfo(exe).lastModified();
         auto *watcher = new QFileSystemWatcher({QFileInfo(exe).absolutePath()}, &app);
@@ -176,13 +192,15 @@ int main(int argc, char *argv[]) {
                 }
                 backend.save();
             }
+            if (!window)
+                return;
             qputenv("REELCUT_RESUME_AT", QByteArray::number(window->property("playhead").toDouble()));
             if (QProcess::startDetached(exe, backend.path().isEmpty() ? QStringList() : QStringList{backend.path()}))
                 QCoreApplication::exit(0);
         });
     }
-    if (qEnvironmentVariableIsSet("REELCUT_RESUME_AT")) {
-        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+    if (qEnvironmentVariableIsSet("REELCUT_RESUME_AT") && rootWindow) {
+        auto *window = rootWindow;
         QTimer::singleShot(500, window, [window] {
             QMetaObject::invokeMethod(window, "seek", Q_ARG(QVariant, qEnvironmentVariable("REELCUT_RESUME_AT").toDouble()));
         });
@@ -194,8 +212,8 @@ int main(int argc, char *argv[]) {
     // [REELCUT_GRAB_SELECT=kind:index] [REELCUT_GRAB_TAB=inspector tab] [REELCUT_GRAB_SIZE=WxH]
     // [REELCUT_GRAB_SCROLL=pixels].
     const QString grab = qEnvironmentVariable("REELCUT_GRAB");
-    if (!grab.isEmpty()) {
-        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+    if (!grab.isEmpty() && rootWindow) {
+        auto *window = rootWindow;
         const int delay = qEnvironmentVariableIntValue("REELCUT_GRAB_SECONDS") * 1000;
         // REELCUT_GRAB_SELECT=clip:0 (or overlay:1, effect:0) selects something first,
         // REELCUT_GRAB_TAB=3 then opens that inspector tab.

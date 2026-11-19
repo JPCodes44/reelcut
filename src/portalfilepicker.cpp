@@ -298,6 +298,9 @@ void PortalFilePicker::requestFile(const QString &method, const QString &title,
 
 void PortalFilePicker::handleResponse(uint response, const QVariantMap &results) {
     const int kind = m_pendingKind;
+    // A Response already queued when its request was cleared or replaced.
+    if (kind == -1)
+        return;
     clearPending();
     if (response != 0)
         return;

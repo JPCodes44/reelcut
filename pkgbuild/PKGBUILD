@@ -1,11 +1,11 @@
 pkgname=reelcut
-pkgver=0.4.1
+pkgver=0.5.0
 pkgrel=1
 pkgdesc='Make vertical reels for Instagram and TikTok: cut, caption, color, music'
 arch=('x86_64' 'aarch64')
 license=('MIT')
 depends=('qt6-base' 'qt6-declarative' 'qt6-multimedia' 'qt6-wayland' 'ffmpeg' 'xdg-desktop-portal' 'noto-fonts' 'ttf-liberation' 'opencv')
-optdepends=('whisper-cpp: automatic captions')
+optdepends=('whisper-cpp: automatic captions' 'yt-dlp: download reels from YouTube, Instagram, TikTok and Facebook')
 makedepends=('gcc' 'make')
 source=()
 sha256sums=()

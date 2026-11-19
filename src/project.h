@@ -78,6 +78,9 @@ struct Overlay {
     bool spacingDefault = true; // the "Default" box: the font's own spacing, letterSpacing kept for later
     bool noShadow = false;      // the "No shadow" box: no shadow whatever its color
     double thickness = 0;       // letters made heavier in their own fill color, pixels 0..20
+    // How the lines line up with each other: "left", "center" or "right". The
+    // block stays centered on x either way; only the lines inside it move.
+    QString align = "center";
 
     QString fontOf() const;
     bool boldOf() const;

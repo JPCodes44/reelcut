@@ -14,6 +14,9 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 
+#include <algorithm>
+#include <csignal>
+#include <exception>
 #include <iostream>
 #include <string>
 
@@ -142,6 +145,8 @@ QString McpServer::openProjectFile(const QString &stateDir) {
 // ---- Protocol ----
 
 int McpServer::run() {
+    // A client that hangs up mid-reply must end the loop, not kill the process.
+    std::signal(SIGPIPE, SIG_IGN);
     std::string line;
     while (std::getline(std::cin, line)) {
         const QByteArray bytes = QByteArray::fromStdString(line).trimmed();
@@ -154,6 +159,8 @@ int McpServer::run() {
                           {"error", QJsonObject{{"code", -32700}, {"message", "Parse error"}}}};
         if (!response.isEmpty())
             std::cout << QJsonDocument(response).toJson(QJsonDocument::Compact).toStdString() << std::endl;
+        if (!std::cout)
+            break;
     }
     return 0;
 }
@@ -265,7 +272,7 @@ QJsonObject McpServer::summary(const Call &call, bool withWords) const {
                                     {"outline", o.colorOf("outline")}, {"shadow", o.colorOf("shadow")},
                                     {"box", o.colorOf("box")}, {"font", o.fontOf()}, {"bold", o.boldOf()},
                                     {"italic", o.italic}, {"outline_width", o.outlineWidthOf()},
-                                    {"shadow_distance", o.shadowDistanceOf()}, {"letter_spacing", o.letterSpacingOf()},
+                                    {"shadow_distance", o.shadowDistanceOf()}, {"letter_spacing", o.letterSpacingOf()}, {"align", o.align},
                                     {"no_shadow", o.noShadow}, {"thickness", o.thickness}});
     }
     QJsonArray effects;
@@ -337,6 +344,11 @@ QJsonObject McpServer::callTool(const QString &name, const QJsonObject &args) {
         return result;
     } catch (const ToolError &e) {
         return failure(e.message);
+    } catch (const std::exception &e) {
+        // An exception escaping here would abort the whole server.
+        return failure(QString("%1 failed: %2").arg(name, QString::fromUtf8(e.what())));
+    } catch (...) {
+        return failure(QString("%1 failed.").arg(name));
     }
 }
 
@@ -623,8 +635,13 @@ void McpServer::defineTools() {
                     const QJsonObject e = value.toObject();
                     edits.append({requireIndex(e, "index", p.words.size(), "word"), e.value("text").toString().simplified()});
                 }
-                // Highest index first, so deletions don't shift the rest.
-                std::sort(edits.begin(), edits.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+                // Highest index first, so deletions don't shift the rest. One edit per
+                // index (the last given wins): deleting a word twice, or deleting then
+                // renaming it, would index past the end.
+                std::stable_sort(edits.begin(), edits.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+                for (int i = int(edits.size()) - 1; i > 0; --i)
+                    if (edits[i].first == edits[i - 1].first)
+                        edits.remove(i - 1);
                 for (const auto &edit : edits) {
                     if (edit.second.isEmpty())
                         p.words.remove(edit.first);
@@ -665,6 +682,8 @@ void McpServer::defineTools() {
             {"letter_spacing", prop("number", "Extra pixels between letters, -20 to 60, or \"default\" for the "
                                               "font's own spacing (the default).")},
             {"no_shadow", prop("boolean", "True turns the shadow off entirely. Default false.")},
+            {"align", enumProp({"left", "center", "right"},
+                               "How the lines of multi-line text line up. The block stays centered on x. Default center.")},
             {"thickness", prop("number", "Makes the letters themselves heavier, in their fill color: pixels at "
                                          "1080x1920, 0 to 20. Default 0. Any outline goes outside it.")}};
     };
@@ -678,7 +697,7 @@ void McpServer::defineTools() {
                                                   {"font", "font"}, {"bold", "bold"}, {"italic", "italic"},
                                                   {"outline_width", "outlineWidth"}, {"shadow_distance", "shadowDistance"},
                                                   {"letter_spacing", "letterSpacing"}, {"no_shadow", "noShadow"},
-                                                  {"thickness", "thickness"}};
+                                                  {"thickness", "thickness"}, {"align", "align"}};
         for (const auto &key : keys)
             if (args.contains(key.first) && !p.setOverlayValue(index, key.second, args.value(key.first).toVariant()))
                 throw ToolError{QString("Invalid %1.").arg(key.first)};

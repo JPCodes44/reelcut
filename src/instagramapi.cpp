@@ -32,9 +32,10 @@ QJsonObject readJson(QNetworkReply *reply, QString *error) {
 }
 
 // Runs `then` once the reply is in, with the raw body too, and lets the reply go.
-void whenDoneRaw(QNetworkReply *reply,
+// `context` is who `then` belongs to: if it's gone, the reply is just dropped.
+void whenDoneRaw(QNetworkReply *reply, QObject *context,
                  const std::function<void(const QJsonObject &, const QString &, const QByteArray &)> &then) {
-    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, then] {
+    QObject::connect(reply, &QNetworkReply::finished, context, [reply, then] {
         const QByteArray body = reply->readAll();
         const QJsonObject json = QJsonDocument::fromJson(body).object();
         QString error = json.value("error").toObject().value("message").toString();
@@ -46,8 +47,9 @@ void whenDoneRaw(QNetworkReply *reply,
 }
 
 // Runs `then` once the reply is in, and lets the reply go.
-void whenDone(QNetworkReply *reply, const std::function<void(const QJsonObject &, const QString &)> &then) {
-    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, then] {
+void whenDone(QNetworkReply *reply, QObject *context,
+              const std::function<void(const QJsonObject &, const QString &)> &then) {
+    QObject::connect(reply, &QNetworkReply::finished, context, [reply, then] {
         QString error;
         const QJsonObject json = readJson(reply, &error);
         reply->deleteLater();
@@ -137,7 +139,7 @@ void InstagramApi::connectToken(const QString &token) {
     const QString previous = m_token;
     m_token = token.trimmed();
     if (usesUnifiedLogin()) {
-        whenDone(get("/me/assigned_instagram_accounts", {{"fields", "id,username"}}),
+        whenDone(get("/me/assigned_instagram_accounts", {{"fields", "id,username"}}), this,
                  [this, previous](const QJsonObject &json, const QString &error) {
             const QJsonArray accounts = json.value("data").toArray();
             QString reason = error;
@@ -161,7 +163,7 @@ void InstagramApi::connectToken(const QString &token) {
         });
         return;
     }
-    whenDoneRaw(get("/me", {{"fields", "user_id,username"}}),
+    whenDoneRaw(get("/me", {{"fields", "user_id,username"}}), this,
                 [this, previous](const QJsonObject &json, const QString &error, const QByteArray &body) {
         if (!error.isEmpty() || json.value("username").toString().isEmpty()) {
             m_token = previous;
@@ -196,7 +198,7 @@ void InstagramApi::refreshIfOld() {
     // keeps it from running out (60 days) as long as Reelcut gets opened.
     if (usesUnifiedLogin() || m_token.isEmpty() || !m_issued.isValid() || m_issued.daysTo(QDateTime::currentDateTimeUtc()) < 7)
         return;
-    whenDone(get("/refresh_access_token", {{"grant_type", "ig_refresh_token"}, {"access_token", m_token}}),
+    whenDone(get("/refresh_access_token", {{"grant_type", "ig_refresh_token"}, {"access_token", m_token}}), this,
              [this](const QJsonObject &json, const QString &error) {
                  if (error.isEmpty() && !json.value("access_token").toString().isEmpty())
                      save(json.value("access_token").toString(), m_userId, m_username, QDateTime::currentDateTimeUtc());
@@ -214,7 +216,7 @@ void InstagramApi::publish(const QString &file, const QString &caption) {
 
 void InstagramApi::createContainer(const QString &file, const QString &caption) {
     emit progress(tr("Starting the reel on Instagram…"), 0.0);
-    whenDone(postForm("/" + m_userId + "/media", {{"media_type", "REELS"}, {"upload_type", "resumable"}, {"caption", caption}}),
+    whenDone(postForm("/" + m_userId + "/media", {{"media_type", "REELS"}, {"upload_type", "resumable"}, {"caption", caption}}), this,
              [this, file](const QJsonObject &json, const QString &error) {
                  const QString container = json.value("id").toString();
                  const QUrl uri(json.value("uri").toString());
@@ -242,7 +244,7 @@ void InstagramApi::upload(const QString &container, const QUrl &uri, const QStri
         if (total > 0)
             emit progress(tr("Uploading the video…"), double(sent) / total);
     });
-    whenDone(reply, [this, container](const QJsonObject &json, const QString &error) {
+    whenDone(reply, this, [this, container](const QJsonObject &json, const QString &error) {
         if (!error.isEmpty() || !json.value("success").toBool(true))
             return finish(false, tr("The upload didn't go through: %1").arg(error.isEmpty() ? tr("refused") : error));
         waitForProcessing(container, 0);
@@ -251,7 +253,7 @@ void InstagramApi::upload(const QString &container, const QUrl &uri, const QStri
 
 void InstagramApi::waitForProcessing(const QString &container, int tries) {
     emit progress(tr("Instagram is processing the video…"), -1);
-    whenDone(get("/" + container, {{"fields", "status_code,status"}}),
+    whenDone(get("/" + container, {{"fields", "status_code,status"}}), this,
              [this, container, tries](const QJsonObject &json, const QString &error) {
                  const QString status = json.value("status_code").toString();
                  if (!error.isEmpty())
@@ -269,11 +271,11 @@ void InstagramApi::waitForProcessing(const QString &container, int tries) {
 
 void InstagramApi::publishContainer(const QString &container) {
     emit progress(tr("Publishing…"), 1.0);
-    whenDone(postForm("/" + m_userId + "/media_publish", {{"creation_id", container}}), [this](const QJsonObject &json, const QString &error) {
+    whenDone(postForm("/" + m_userId + "/media_publish", {{"creation_id", container}}), this, [this](const QJsonObject &json, const QString &error) {
         const QString media = json.value("id").toString();
         if (!error.isEmpty() || media.isEmpty())
             return finish(false, tr("Instagram didn't publish it: %1").arg(error.isEmpty() ? tr("no post came back") : error));
-        whenDone(get("/" + media, {{"fields", "permalink"}}), [this](const QJsonObject &post, const QString &) {
+        whenDone(get("/" + media, {{"fields", "permalink"}}), this, [this](const QJsonObject &post, const QString &) {
             finish(true, tr("Posted to Instagram."), QUrl(post.value("permalink").toString()));
         });
     });

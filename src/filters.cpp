@@ -220,6 +220,8 @@ QImage stripImage(const Look &look) {
     // 64 levels per channel. Blue picks the tile (8 across, 8 down);
     // red runs left to right inside a tile, green top to bottom.
     QImage image(512, 512, QImage::Format_RGB32);
+    if (image.isNull())
+        return image;  // out of memory: scanLine() would be null
     for (int b = 0; b < 64; ++b) {
         const int tileX = (b % 8) * 64;
         const int tileY = (b / 8) * 64;

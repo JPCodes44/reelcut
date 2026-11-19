@@ -4,6 +4,8 @@
 #include "effects.h"
 #include "transitions.h"
 
+#include <QImageReader>
+
 #include <algorithm>
 #include <cmath>
 
@@ -84,7 +86,7 @@ QStringList joinClips(const Project &project, bool withVideo, bool withAudio) {
             const Transitions::Kind *kind = Transitions::find(project.clips[i - 1].transition);
             if (withVideo)
                 out << QString("%1[v%2]xfade=transition=%3:duration=%4:offset=%5%6")
-                           .arg(video).arg(i).arg(kind->xfade, num(overlap), num(starts[i]), nextVideo);
+                           .arg(video).arg(i).arg(kind ? kind->xfade : QStringLiteral("fade"), num(overlap), num(starts[i]), nextVideo);
             if (withAudio)
                 out << QString("%1[a%2]acrossfade=d=%3:c1=tri:c2=tri%4").arg(audio).arg(i).arg(num(overlap), nextAudio);
         } else {
@@ -214,13 +216,25 @@ QStringList clipInputs(const Project &project) {
     QStringList args;
     for (const Clip &clip : project.clips) {
         // A photo becomes a stream of the same frame, as long as it shows.
-        if (clip.still)
-            args << "-loop" << "1" << "-framerate" << QString::number(Project::Fps) << "-t" << num(clip.duration() + 0.1);
-        args << "-i" << clip.path;
+        args << stillInputArgs(clip) << "-i" << clip.path;
     }
     return args;
 }
 }  // namespace
+
+QStringList stillInputArgs(const Clip &clip) {
+    if (!clip.still)
+        return {};
+    // Only ffmpeg's image demuxers take -loop/-framerate; a single-frame
+    // video or GIF (also a still) is looped as a stream instead.
+    QStringList args;
+    const QByteArray image = QImageReader::imageFormat(clip.path);
+    if (!image.isEmpty() && image != "gif")
+        args << "-loop" << "1" << "-framerate" << QString::number(Project::Fps);
+    else
+        args << "-stream_loop" << "-1";
+    return args << "-t" << num(clip.duration() + 0.1);
+}
 
 QString num(double value, int decimals) {
     QString text = QString::number(value, 'f', decimals);

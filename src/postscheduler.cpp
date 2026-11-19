@@ -56,15 +56,21 @@ void PostScheduler::configure(const QString &url, const QString &key) {
 
 // One Convex function over its HTTP API: POST <url>/api/<query|mutation>.
 void PostScheduler::call(const QString &kind, const QString &path, QJsonObject args, const Then &then) {
-    if (!configured())
-        return then(false, {}, tr("The scheduler isn't set up (%1).").arg(configFile()));
+    if (!configured()) {
+        // Queued, like a network reply: the caller (often a QML button whose
+        // delegate is rebuilt by postsChanged) must have returned first.
+        const QString msg = tr("The scheduler isn't set up (%1).").arg(configFile());
+        QMetaObject::invokeMethod(this, [then, msg] { then(false, {}, msg); }, Qt::QueuedConnection);
+        return;
+    }
     args.insert("secret", m_key);
     QNetworkRequest request(QUrl(m_url + "/api/" + kind));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     const QByteArray body =
         QJsonDocument(QJsonObject{{"path", path}, {"args", args}, {"format", "json"}}).toJson(QJsonDocument::Compact);
     QNetworkReply *reply = m_net->post(request, body);
-    connect(reply, &QNetworkReply::finished, reply, [reply, then] {
+    // `then` works on this object, so the reply is dropped if it's gone first.
+    connect(reply, &QNetworkReply::finished, this, [reply, then] {
         const QJsonObject json = QJsonDocument::fromJson(reply->readAll()).object();
         reply->deleteLater();
         if (json.value("status").toString() == "success")
@@ -98,12 +104,15 @@ void PostScheduler::schedule(const QString &file, const QString &title, const QS
     call("mutation", "posts:uploadUrl", {}, [=, this](bool ok, const QJsonValue &value, const QString &error) {
         if (!ok)
             return finish(false, tr("The scheduler didn't answer: %1").arg(error));
+        const QUrl uploadUrl(value.toString());
+        if (!uploadUrl.isValid() || uploadUrl.scheme().isEmpty())
+            return finish(false, tr("The scheduler didn't answer: %1").arg(tr("no upload address came back")));
         auto *source = new QFile(file, this);
         if (!source->open(QIODevice::ReadOnly)) {
             delete source;
             return finish(false, tr("Couldn't read %1.").arg(file));
         }
-        QNetworkRequest request(QUrl(value.toString()));
+        QNetworkRequest request(uploadUrl);
         request.setHeader(QNetworkRequest::ContentTypeHeader, "video/mp4");
         QNetworkReply *upload = m_net->post(request, source);
         source->setParent(upload);

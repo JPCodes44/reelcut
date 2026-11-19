@@ -9,6 +9,7 @@ HEADERS += \
     src/backend.h \
     src/bodyeffects.h \
     src/captions.h \
+    src/downloads.h \
     src/effects.h \
     src/exportgraph.h \
     src/filepicker.h \
@@ -36,6 +37,7 @@ SOURCES += \
     src/backend.cpp \
     src/bodyeffects.cpp \
     src/captions.cpp \
+    src/downloads.cpp \
     src/effects.cpp \
     src/exportgraph.cpp \
     src/filters.cpp \

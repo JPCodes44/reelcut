@@ -1,6 +1,5 @@
 #include "segment.h"
 
-#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
@@ -11,6 +10,7 @@
 #include <opencv2/dnn.hpp>
 
 #include <cmath>
+#include <stdexcept>
 
 #include "bodyeffects.h"
 #include "exportgraph.h"
@@ -36,7 +36,7 @@ MaskFn loadModel(const QString &path, QString *error) {
     auto net = std::make_shared<cv::dnn::Net>();
     try {
         *net = cv::dnn::readNet(path.toStdString());
-    } catch (const cv::Exception &e) {
+    } catch (const std::exception &e) {
         *error = QObject::tr("Could not load the person model: %1").arg(QString::fromStdString(e.what()));
         return {};
     }
@@ -51,6 +51,10 @@ MaskFn loadModel(const QString &path, QString *error) {
         image.convertTo(scaled, CV_32FC3, 2.0 / 255.0, -1.0);
         net->setInput(cv::dnn::blobFromImage(scaled));
         const cv::Mat out = net->forward();  // 1 x 2 x 192 x 192: background, person scores
+        // Anything else (a different or damaged model) would be read past its end.
+        if (out.dims != 4 || out.size[0] < 1 || out.size[1] < 2 || out.size[2] * out.size[3] != ModelSize * ModelSize
+            || out.depth() != CV_32F)
+            throw std::runtime_error("unexpected output from the person model");
         const float *background = out.ptr<float>(0, 0);
         const float *person = out.ptr<float>(0, 1);
         for (int i = 0; i < ModelSize * ModelSize; ++i) {
@@ -69,7 +73,15 @@ QString maskPath(const Clip &clip) {
                                     num(clip.panY, 4), clip.still ? "still" : "video", clip.motion,
                                     QString::number(clip.width), QString::number(clip.height)}
                             .join('|');
-    const QString hash = QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha1).toHex().left(20);
+    // FNV-1a, not QCryptographicHash: Qt routes that through OpenSSL's provider
+    // loader, which races with TLS on QNetworkAccessManager's thread and can
+    // double-free (seen under ASan). This runs on every clips() read from QML.
+    quint64 h = 1469598103934665603ULL;
+    for (const char c : key.toUtf8()) {
+        h ^= static_cast<unsigned char>(c);
+        h *= 1099511628211ULL;
+    }
+    const QString hash = QString::number(h, 16).rightJustified(16, '0');
     return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/masks/" + hash + ".mp4";
 }
 
@@ -84,9 +96,7 @@ bool makeMask(const Clip &clip, const MaskFn &fn, const QString &output,
 
     // Decode: the clip's own export chain, shrunk to the model's input.
     QStringList decodeArgs{"-hide_banner", "-nostdin", "-loglevel", "error"};
-    if (clip.still)
-        decodeArgs << "-loop" << "1" << "-framerate" << QString::number(Project::Fps) << "-t" << num(clip.duration() + 0.1);
-    decodeArgs << "-i" << clip.path << "-filter_complex"
+    decodeArgs << stillInputArgs(clip) << "-i" << clip.path << "-filter_complex"
                << clipVideoChain(clip, "[0:v]") + QString(",scale=%1:%1:flags=area,format=rgb24[out]").arg(ModelSize)
                << "-map" << "[out]" << "-f" << "rawvideo" << "-";
     // Encode: grey frames, scaled up to a 9:16 mask video.
@@ -109,15 +119,25 @@ bool makeMask(const Clip &clip, const MaskFn &fn, const QString &output,
     QByteArray mask(ModelSize * ModelSize, '\0');
     int done = 0;
     bool cancelled = false;
+    QString modelError;
     while (true) {
         while (frame.size() < frameBytes && (decode.bytesAvailable() > 0 || decode.waitForReadyRead(30000)))
             frame += decode.read(frameBytes - frame.size());
         if (frame.size() < frameBytes)
             break;  // end of the clip
-        fn(reinterpret_cast<const unsigned char *>(frame.constData()), reinterpret_cast<unsigned char *>(mask.data()));
+        // The model throws (OpenCV) on bad input; an exception would end up
+        // rethrown from a QFuture on the main thread and abort the app.
+        try {
+            fn(reinterpret_cast<const unsigned char *>(frame.constData()), reinterpret_cast<unsigned char *>(mask.data()));
+        } catch (const std::exception &e) {
+            modelError = QString::fromStdString(e.what());
+            break;
+        }
         encode.write(mask);
+        // Stop waiting if the encoder died: its buffer would never drain.
         while (encode.bytesToWrite() > (1 << 20))
-            encode.waitForBytesWritten(30000);
+            if (!encode.waitForBytesWritten(30000))
+                break;
         frame.clear();
         ++done;
         if (progress && !progress(qMin(1.0, double(done) / expected))) {
@@ -127,6 +147,13 @@ bool makeMask(const Clip &clip, const MaskFn &fn, const QString &output,
     }
     decode.kill();
     decode.waitForFinished(5000);
+    if (!modelError.isEmpty()) {
+        encode.kill();
+        encode.waitForFinished(5000);
+        QFile::remove(part);
+        *error = QObject::tr("Could not find the person: %1").arg(modelError);
+        return false;
+    }
     encode.closeWriteChannel();
     const bool encoded = encode.waitForFinished(120000) && encode.exitCode() == 0;
     if (cancelled || !encoded || done == 0) {

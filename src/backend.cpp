@@ -1,3 +1,4 @@
+#include <cmath>
 #include "backend.h"
 
 #include <QClipboard>
@@ -17,6 +18,7 @@
 #include <QJsonDocument>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
@@ -112,8 +114,18 @@ Backend::Backend(FilePicker *picker, ThumbProvider *thumbs, Theme *theme, QObjec
 }
 
 Backend::~Backend() {
-    if (m_download)
+    // Nothing may call back into this half-destroyed object: the running
+    // job's finished signal fires from ~Job (after m_then is gone), and an
+    // aborted download emits finished synchronously.
+    m_job.disconnect(this);
+    m_then = nullptr;
+    m_afterExport = nullptr;
+    if (m_stopMasks)
+        *m_stopMasks = true;
+    if (m_download) {
+        m_download->disconnect(this);
         m_download->abort();
+    }
 }
 
 // ---- State for QML ----
@@ -171,7 +183,7 @@ QVariantList Backend::overlays() const {
                                 {"outlineWidth", o.outlineWidth}, {"shadowDistance", o.shadowDistance},
                                 {"letterSpacing", o.letterSpacing}, {"spacingDefault", o.spacingDefault},
                                 {"letterSpacingValue", o.letterSpacingOf()}, {"fontFamily", o.fontOf()},
-                                {"noShadow", o.noShadow}, {"thickness", o.thickness},
+                                {"noShadow", o.noShadow}, {"thickness", o.thickness}, {"align", o.align},
                                 {"defaultFont", [&o] { Overlay d = o; d.font.clear(); return d.fontOf(); }()},
                                 {"isBold", o.boldOf()}, {"outlineWidthValue", o.outlineWidthOf()},
                                 {"shadowDistanceValue", o.shadowDistanceOf()}});
@@ -317,7 +329,7 @@ void Backend::addMedia() {
         m_picker->open(FilePicker::Media);
 }
 
-void Backend::addUrls(const QList<QUrl> &urls) {
+void Backend::addUrls(const QList<QUrl> &urls, int at) {
     QStringList paths;
     for (const QUrl &url : urls)
         if (url.isLocalFile())
@@ -329,7 +341,7 @@ void Backend::addUrls(const QList<QUrl> &urls) {
     ++m_probing;
     setBusy(tr("Reading clips…"));
     auto *watcher = new QFutureWatcher<QList<media::VideoInfo>>(this);
-    connect(watcher, &QFutureWatcher<QList<media::VideoInfo>>::finished, this, [this, watcher] {
+    connect(watcher, &QFutureWatcher<QList<media::VideoInfo>>::finished, this, [this, watcher, at]() mutable {
         const QList<media::VideoInfo> infos = watcher->result();
         watcher->deleteLater();
         if (--m_probing == 0)
@@ -347,7 +359,10 @@ void Backend::addUrls(const QList<QUrl> &urls) {
             added = true;
             const Clip clip = media::clipFor(info);
             thumbKey(info.path);
-            m_project.clips.append(clip);
+            if (at >= 0 && at <= m_project.clips.size())
+                m_project.clips.insert(at++, clip);
+            else
+                m_project.clips.append(clip);
         }
         if (added)
             changed();
@@ -433,7 +448,7 @@ void Backend::setGrade(int index, const QString &key, double value) {
 
 QString Backend::pixelColor(const QVariant &image, double x, double y) const {
     const QImage img = image.value<QImage>();
-    if (img.isNull())
+    if (img.isNull() || !std::isfinite(x) || !std::isfinite(y))
         return {};
     const int px = qBound(0, qRound(x * (img.width() - 1)), img.width() - 1);
     const int py = qBound(0, qRound(y * (img.height() - 1)), img.height() - 1);
@@ -473,17 +488,27 @@ void Backend::findPeople(std::function<void()> then) {
         if (*stop)
             return;
         if (!error.isEmpty()) {
+            m_afterExport = nullptr;  // a post waiting on this export is abandoned
             setMessage(error, true);
             return;
         }
         if (then)
             then();
     });
-    watcher->setFuture(QtConcurrent::run([this, project, stop] {
+    // The worker never touches `this` directly: the Backend may be gone by
+    // the time it reports, so progress is posted via the app and checked there.
+    QPointer<Backend> self(this);
+    watcher->setFuture(QtConcurrent::run([self, project, stop] {
         QString error;
-        Segment::ensureMasks(project, [this, stop](double f) {
-            QMetaObject::invokeMethod(this, [this, f] { setBusy(tr("Finding the person…"), f); }, Qt::QueuedConnection);
-            return !*stop;
+        Segment::ensureMasks(project, [self, stop](double f) {
+            if (*stop)
+                return false;
+            if (QCoreApplication *app = QCoreApplication::instance())
+                QMetaObject::invokeMethod(app, [self, f] {
+                    if (self)
+                        self->setBusy(Backend::tr("Finding the person…"), f);
+                }, Qt::QueuedConnection);
+            return true;
         }, &error);
         return *stop ? QString() : error;
     }));
@@ -533,6 +558,10 @@ void Backend::cutSilences(int index) {
     const Clip clip = m_project.clips[index];
     if (!clip.audio) {
         setMessage(tr("This clip has no sound to find silences in."), true);
+        return;
+    }
+    if (m_job.isRunning()) {  // a cancelled tool still exiting; its finished would run this job's m_then
+        setMessage(tr("Wait for the current job to finish, then try again."), true);
         return;
     }
     setBusy(tr("Finding silences…"));
@@ -597,18 +626,20 @@ void Backend::downloadModel() {
     QNetworkRequest request{QUrl(whisperModelUrl())};
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     m_download = m_network->get(request);
-    connect(m_download, &QNetworkReply::readyRead, this, [this, part] { part->write(m_download->readAll()); });
+    QNetworkReply *reply = m_download;
+    connect(reply, &QNetworkReply::readyRead, this, [reply, part] { part->write(reply->readAll()); });
     connect(m_download, &QNetworkReply::downloadProgress, this, [this](qint64 got, qint64 total) {
         m_progress = total > 0 ? double(got) / total : -1.0;
         emit jobChanged();
     });
-    connect(m_download, &QNetworkReply::finished, this, [this, part] {
-        part->write(m_download->readAll());
+    connect(m_download, &QNetworkReply::finished, this, [this, reply, part] {
+        part->write(reply->readAll());
         part->close();
-        const bool ok = m_download->error() == QNetworkReply::NoError;
-        const QString error = m_download->errorString();
-        m_download->deleteLater();
-        m_download = nullptr;
+        const bool ok = reply->error() == QNetworkReply::NoError;
+        const QString error = reply->errorString();
+        reply->deleteLater();
+        if (m_download == reply)
+            m_download = nullptr;
         clearBusy();
         if (!ok) {
             part->remove();
@@ -626,6 +657,10 @@ void Backend::downloadModel() {
 }
 
 void Backend::startTranscription() {
+    if (m_job.isRunning()) {  // a cancelled tool still exiting; its finished would run this job's m_then
+        setMessage(tr("Wait for the current job to finish, then try again."), true);
+        return;
+    }
     m_work = std::make_unique<QTemporaryDir>();
     const QString wav = m_work->filePath("audio.wav");
     const Project snapshot = m_project;
@@ -832,7 +867,11 @@ void Backend::resetCaptionPosition() {
 // ---- Files ----
 
 void Backend::picked(int kind, const QList<QUrl> &urls) {
+    if (urls.isEmpty())
+        return;
     const QString path = urls.first().toLocalFile();
+    if (path.isEmpty() && kind != FilePicker::Media)
+        return;
     switch (kind) {
     case FilePicker::Media:
         addUrls(urls);
@@ -854,6 +893,11 @@ void Backend::picked(int kind, const QList<QUrl> &urls) {
         writeProject(path.endsWith(".reel") ? path : path + ".reel");
         break;
     case FilePicker::Export: {
+        // A job started while the dialog was open owns m_job and m_work.
+        if (busy()) {
+            setMessage(tr("Wait for the current job to finish, then export again."), true);
+            break;
+        }
         const QString output = path.endsWith(".mp4", Qt::CaseInsensitive) ? path : path + ".mp4";
         runExport(output, "h264_nvenc");
         break;
@@ -1268,9 +1312,25 @@ void Backend::runExport(const QString &output, const QString &encoder) {
     // Body effects need their person masks before ffmpeg can use them.
     for (const Clip &clip : m_project.clips) {
         if (Body::find(clip.body) && !Segment::hasMask(clip)) {
-            findPeople([this, output, encoder] { runExport(output, encoder); });
+            findPeople([this, output, encoder] {
+                // A mask that still isn't there would send this back to
+                // findPeople forever.
+                for (const Clip &c : m_project.clips) {
+                    if (Body::find(c.body) && !Segment::hasMask(c)) {
+                        m_afterExport = nullptr;
+                        setMessage(tr("Couldn't find the person in every clip, so the reel can't be exported."), true);
+                        return;
+                    }
+                }
+                runExport(output, encoder);
+            });
             return;
         }
+    }
+    if (m_job.isRunning()) {  // a cancelled tool still exiting; its finished would run this job's m_then
+        m_afterExport = nullptr;
+        setMessage(tr("Wait for the current job to finish, then try again."), true);
+        return;
     }
     m_work = std::make_unique<QTemporaryDir>();
     QString error;
@@ -1307,6 +1367,8 @@ void Backend::runExport(const QString &output, const QString &encoder) {
 }
 
 void Backend::cancelJob() {
+    // A cancelled export mustn't post (or schedule) on the next, unrelated one.
+    m_afterExport = nullptr;
     if (m_stopMasks)
         *m_stopMasks = true;
     if (m_download) {

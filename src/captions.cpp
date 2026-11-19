@@ -1,6 +1,8 @@
 #include "captions.h"
 
 #include <QColor>
+#include <QFontMetricsF>
+#include <QTextLayout>
 #include <QStringList>
 
 #include <cmath>
@@ -47,6 +49,43 @@ QString escape(QString text) {
     text.replace('{', '(').replace('}', ')');
     text.replace('\n', "\\N");
     return text;
+}
+
+// Left- or right-aligned text: the lines as the preview wraps them, and how
+// far the widest one reaches either side of the block's center, so the ASS
+// anchor (\an4 / \an6) can sit on the block's edge instead of its middle.
+struct Wrapped { QString text; double halfWidth = 0; };
+Wrapped wrapLikePreview(const Overlay &overlay) {
+    // The preview sizes the text so its ascent + descent is the ASS font size.
+    QFont font(overlay.fontOf());
+    font.setBold(overlay.boldOf());
+    font.setItalic(overlay.italic);
+    font.setPixelSize(1000);
+    const QFontMetricsF unit(font);
+    const double scale = unit.ascent() + unit.descent() > 0 ? 1000.0 / (unit.ascent() + unit.descent()) : 1.0;
+    font.setPixelSize(qMax(1, qRound(overlay.size * scale)));
+    font.setLetterSpacing(QFont::AbsoluteSpacing, overlay.letterSpacingOf());
+    const double wrapWidth = Project::Width * 0.94;
+    QStringList lines;
+    double widest = 0;
+    for (const QString &paragraph : overlay.text.split('\n')) {
+        QTextLayout layout(paragraph, font);
+        QTextOption option;
+        option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+        layout.setTextOption(option);
+        layout.beginLayout();
+        bool any = false;
+        for (QTextLine line = layout.createLine(); line.isValid(); line = layout.createLine()) {
+            line.setLineWidth(wrapWidth);
+            lines << paragraph.mid(line.textStart(), line.textLength()).trimmed();
+            widest = qMax(widest, line.naturalTextWidth());
+            any = true;
+        }
+        layout.endLayout();
+        if (!any)
+            lines << QString();
+    }
+    return {lines.join('\n'), qMin(widest, wrapWidth) / 2};
 }
 
 QString position(double x, double y) {
@@ -176,8 +215,20 @@ QString assDocument(const Project &project, const QString &accent) {
     for (const Overlay &overlay : project.overlays) {
         if (overlay.text.trimmed().isEmpty() || overlay.end <= overlay.start || overlay.style == "fisheye")
             continue;  // fisheye text is an image laid over by the export (src/fisheyetext.h)
-        const int x = qRound(overlay.x * Project::Width), y = qRound(overlay.y * Project::Height);
-        QString tags = QString("\\an5\\fs%1").arg(overlay.size);
+        int x = qRound(overlay.x * Project::Width);
+        const int y = qRound(overlay.y * Project::Height);
+        QString text = overlay.text;
+        QString anchor = "\\an5";
+        if (overlay.align != "center") {
+            // libass lines up the lines on the side the anchor is on; wrapped
+            // here so the lines break where the preview breaks them.
+            const Wrapped wrapped = wrapLikePreview(overlay);
+            text = wrapped.text;
+            const bool left = overlay.align == "left";
+            anchor = left ? "\\an4" : "\\an6";
+            x += qRound(left ? -wrapped.halfWidth : wrapped.halfWidth);
+        }
+        QString tags = QString("%1\\fs%2").arg(anchor).arg(overlay.size);
         // Type: font, weight, slant, letter spacing (\fsp, in pixels).
         tags += QString("\\fn%1\\b%2\\i%3").arg(QString(overlay.fontOf()).remove('\\').remove('}'))
                     .arg(overlay.boldOf() ? 1 : 0).arg(overlay.italic ? 1 : 0);
@@ -215,9 +266,9 @@ QString assDocument(const Project &project, const QString &accent) {
         if (shadow.alpha() > 0 && overlay.shadowDistanceOf() > 0 && !overlay.noShadow)
             base += colorTag(4, shadow) + QString("\\shad%1").arg(num(overlay.shadowDistanceOf(), 1));
         ass += dialogue(overlay.start, overlay.end, box.alpha() > 0 ? "HookBox" : "Hook",
-                        "{" + base + "}" + escape(overlay.text));
+                        "{" + base + "}" + escape(text));
         if (half > 0 && (outlined || box.alpha() > 0))
-            ass += dialogue(overlay.start, overlay.end, "Hook", "{" + tags + thick + "}" + escape(overlay.text), 1);
+            ass += dialogue(overlay.start, overlay.end, "Hook", "{" + tags + thick + "}" + escape(text), 1);
     }
     return ass;
 }

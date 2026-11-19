@@ -73,7 +73,7 @@ QImage waveform::render(const QString &path, double start, double duration, cons
             const int first = int(position);
             // Above native sample density, give each sample its own time span.
             const int last = qMin(size.width() - 1,
-                qMax(first, int(std::ceil((frame + 1) * double(size.width()) / samples)) - 1));
+                qMax(first, int(qMin(double(size.width()), std::ceil((frame + 1) * double(size.width()) / samples))) - 1));
             for (int channel = 0; channel < channels; ++channel) {
                 const quint32 bits = qFromLittleEndian<quint32>(pending.constData() + i * bytesPerFrame + channel * 4);
                 float value;

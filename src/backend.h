@@ -129,7 +129,8 @@ public:
 
     // Clips
     Q_INVOKABLE void addMedia();
-    Q_INVOKABLE void addUrls(const QList<QUrl> &urls);
+    // Adds videos as clips at `at` (clip index), or at the end when -1.
+    Q_INVOKABLE void addUrls(const QList<QUrl> &urls, int at = -1);
     Q_INVOKABLE void removeClip(int index);
     Q_INVOKABLE void moveClip(int from, int to);
     Q_INVOKABLE bool split(double time);
@@ -238,6 +239,8 @@ public:
     Q_INVOKABLE void exportPhotos();
     Q_INVOKABLE void cancelJob();
     Q_INVOKABLE void dismissMessage();
+    // Shows a message in the window's toast (errors stay until dismissed).
+    Q_INVOKABLE void notify(const QString &text, bool error = false) { setMessage(text, error); }
     Q_INVOKABLE void showExport();
 
 signals:

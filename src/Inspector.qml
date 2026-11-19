@@ -39,7 +39,30 @@ Rectangle {
     signal effectSelected(int index)
     signal seekRequested(real t)
 
-    function seconds(value) { return value.toLocaleString(Qt.locale(), 'f', 2) + " s" }
+    function seconds(value) { return (Number(value) || 0).toLocaleString(Qt.locale(), 'f', 2) + " s" }
+
+    // Edits that rebuild or shrink a Repeater's model run after the click,
+    // key press or focus change that asked for them, never inside it, so
+    // the delegate handling that event isn't destroyed under it.
+    property var pendingWordEdits: []
+    function queueWordEdit(index, text) {
+        pendingWordEdits = pendingWordEdits.concat([{ index: index, text: text }])
+        Qt.callLater(root.applyWordEdits)
+    }
+    function applyWordEdits() {
+        const edits = pendingWordEdits
+        pendingWordEdits = []
+        for (const e of edits) {
+            if (e.index < 0 || e.index >= backend.wordCount) continue
+            backend.checkpoint()
+            backend.setWordText(e.index, e.text)
+        }
+    }
+    function removeOverlayLater(index) { Qt.callLater(root.removeOverlayNow, index) }
+    function removeOverlayNow(index) {
+        if (index >= 0 && index < backend.overlays.length)
+            backend.removeOverlay(index)
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -456,13 +479,15 @@ Rectangle {
                                             anchors.fill: parent
                                             topPadding: 2
                                             bottomPadding: 2
+                                            // The edit rebuilds backend.captionLines, which destroys this
+                                            // delegate (and the one being clicked). Doing that inside the
+                                            // focus change or key press that commits it can crash, so the
+                                            // write waits until the event is done.
                                             function commit() {
                                                 if (!wordItem.editing) return
                                                 wordItem.editing = false
-                                                if (text !== wordItem.modelData.text) {
-                                                    backend.checkpoint()
-                                                    backend.setWordText(wordItem.modelData.index, text)
-                                                }
+                                                if (text !== wordItem.modelData.text)
+                                                    root.queueWordEdit(wordItem.modelData.index, text)
                                             }
                                             onAccepted: commit()
                                             onActiveFocusChanged: if (!activeFocus) commit()
@@ -543,7 +568,7 @@ Rectangle {
                                         id: startBox
                                         Layout.fillWidth: true
                                         from: 0; to: Math.ceil(backend.duration * 10); editable: true
-                                        value: Math.round(card.modelData.start * 10)
+                                        value: Math.round((card.modelData.start || 0) * 10)
                                         textFromValue: function(v) { return (v / 10).toLocaleString(Qt.locale(), 'f', 1) }
                                         valueFromText: function(t) { return Math.round(Number.fromLocaleString(Qt.locale(), t) * 10) }
                                         onValueModified: { backend.checkpoint(); backend.setOverlayValue(card.index, "start", value / 10) }
@@ -556,7 +581,7 @@ Rectangle {
                                     SpinBox {
                                         Layout.fillWidth: true
                                         from: 1; to: Math.ceil(backend.duration * 10) + 10; editable: true
-                                        value: Math.round(card.modelData.end * 10)
+                                        value: Math.round((card.modelData.end || 0) * 10)
                                         textFromValue: function(v) { return (v / 10).toLocaleString(Qt.locale(), 'f', 1) }
                                         valueFromText: function(t) { return Math.round(Number.fromLocaleString(Qt.locale(), t) * 10) }
                                         onValueModified: { backend.checkpoint(); backend.setOverlayValue(card.index, "end", value / 10) }
@@ -632,6 +657,33 @@ Rectangle {
                                         onClicked: { backend.checkpoint(); backend.setOverlayValue(card.index, "italic", checked) }
                                         ToolTip.visible: hovered
                                         ToolTip.text: qsTr("Italic")
+                                    }
+                                }
+                                // How the lines line up with each other.
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    Label { text: qsTr("Align"); Layout.preferredWidth: root.labelWidth }
+                                    Repeater {
+                                        model: [{ id: "left", label: qsTr("Left") }, { id: "center", label: qsTr("Center") },
+                                                { id: "right", label: qsTr("Right") }]
+                                        Button {
+                                            required property var modelData
+                                            objectName: "overlayAlign-" + modelData.id + card.index
+                                            Layout.fillWidth: true
+                                            Layout.preferredWidth: 1
+                                            text: modelData.label
+                                            flat: !checked
+                                            highlighted: checked
+                                            checkable: true
+                                            checked: (card.modelData.align || "center") === modelData.id
+                                            onClicked: {
+                                                backend.checkpoint()
+                                                backend.setOverlayValue(card.index, "align", modelData.id)
+                                            }
+                                            ToolTip.visible: hovered
+                                            ToolTip.text: qsTr("Line up the lines on the %1").arg(modelData.label.toLowerCase())
+                                        }
                                     }
                                 }
                                 // Double-click a label to go back to the style's default.
@@ -747,7 +799,8 @@ Rectangle {
                                     text: qsTr("Delete")
                                     flat: true
                                     Material.foreground: "#ff8a80"
-                                    onClicked: backend.removeOverlay(card.index)
+                                    // Deleting the last card destroys this button: wait until its click is done.
+                                    onClicked: root.removeOverlayLater(card.index)
                                 }
                             }
                         }

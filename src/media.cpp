@@ -5,6 +5,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QtNumeric>
 #include <QProcess>
 #include <QStandardPaths>
 
@@ -136,6 +137,8 @@ VideoInfo probe(const QString &path) {
         std::swap(info.width, info.height);
 
     info.start = root.value("format").toObject().value("start_time").toString().toDouble();
+    if (!qIsFinite(info.start))
+        info.start = 0.0;
 
     // Photos come through ffmpeg's image demuxers (image2, png_pipe, ...) or
     // as a single-frame stream; they play for as long as the edit says.
@@ -165,9 +168,18 @@ VideoInfo probe(const QString &path) {
         }
     }
 
-    info.ok = info.duration > 0.0;
-    if (!info.ok)
+    // "inf"/"nan" parse as numbers; a clip that long breaks every time sum.
+    info.ok = info.duration > 0.0 && qIsFinite(info.duration);
+    if (!info.ok) {
         info.error = "Video has a zero or invalid duration.";
+        return info;
+    }
+    // A video stream without a size (an undecodable codec) can't be framed;
+    // its 0 width/height would be divided by downstream.
+    if (info.width <= 0 || info.height <= 0) {
+        info.ok = false;
+        info.error = "Could not read this video's size.";
+    }
     return info;
 }
 

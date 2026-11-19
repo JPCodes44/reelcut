@@ -22,6 +22,7 @@ ApplicationWindow {
     readonly property color dim: "#9a9aa2"
     property bool helpVisible: false
     property bool safeZones: true
+    property bool downloadsVisible: true
     property int selectedClip: -1
     property int selectedOverlay: -1
     property int selectedEffect: -1
@@ -37,7 +38,8 @@ ApplicationWindow {
     function startEyedropper(callback) { eyedropperCallback = callback }
 
     function seek(t) {
-        playhead = Math.max(0, Math.min(t, backend.duration))
+        if (!isFinite(t)) t = 0
+        playhead = Math.max(0, Math.min(t, isFinite(backend.duration) ? backend.duration : 0))
         preview.seek(playhead)
     }
     function step(seconds) {
@@ -66,6 +68,7 @@ ApplicationWindow {
             selectionKind = "none"
         } else if (selectionKind === "overlay" && selectedOverlay >= 0) {
             backend.removeOverlay(selectedOverlay)
+            selectedOverlay = -1
             selectionKind = "none"
         } else if (selectionKind === "captions") {
             backend.clearCaptions()
@@ -73,6 +76,12 @@ ApplicationWindow {
         } else if (selectedClip >= 0) {
             backend.removeClip(selectedClip)
         }
+    }
+
+    Connections {
+        target: downloads
+        function onFinished(path, title) { backend.notify(qsTr("Downloaded “%1”. Drag it onto the timeline.").arg(title)) }
+        function onFailed(message) { backend.notify(message, true) }
     }
 
     Connections {
@@ -84,17 +93,23 @@ ApplicationWindow {
                 win.selectedOverlay = -1
             if (win.selectedEffect >= backend.effects.length)
                 win.selectedEffect = -1
+            if (win.selectedClip < -1)
+                win.selectedClip = -1
             if (win.playhead > backend.duration)
                 win.seek(backend.duration)
             else
-                preview.refresh()
+                // Not from inside the signal: the edit may come from a delegate's
+                // handler mid-event, and reloading the players there (once per
+                // slider step) is what the media backend handles worst.
+                // callLater also folds several changes in one pass into one reload.
+                Qt.callLater(preview.refresh)
         }
     }
 
     Shortcut { sequence: "Escape"; enabled: win.eyedropperCallback !== null; context: Qt.ApplicationShortcut; onActivated: win.eyedropperCallback = null }
     Shortcut { sequence: "?"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.helpVisible = !win.helpVisible }
     Shortcut { sequence: "Esc"; context: Qt.ApplicationShortcut; onActivated: { win.helpVisible = false; win.selectionKind = "none"; win.contentItem.forceActiveFocus() } }
-    Shortcut { sequence: "Q"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.close() }
+    Shortcut { sequence: "Q"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: confirm.ask(backend.dirty ? qsTr("Quit without saving your changes?") : qsTr("Quit Reelcut?"), function() { win.closeConfirmed = true; win.close() }) }
     Shortcut { sequence: "Space"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: preview.toggle() }
     Shortcut { sequence: "S"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: backend.split(win.playhead) }
     Shortcut { sequence: "I"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: backend.addMedia() }
@@ -160,6 +175,18 @@ ApplicationWindow {
                         HoverHandler { id: overDuration }
                     }
                     Item { Layout.fillWidth: true }
+                    ToolButton {
+                        objectName: "downloadsToggle"
+                        Layout.minimumWidth: implicitWidth
+                        text: qsTr("Downloads")
+                        checkable: true
+                        checked: win.downloadsVisible
+                        onToggled: win.downloadsVisible = checked
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("Download reels from YouTube, Instagram, TikTok or Facebook")
+                    }
+                    ToolSeparator {}
                     ButtonGroup { id: platforms }
                     Repeater {
                         model: [{ id: "instagram", label: qsTr("Instagram") }, { id: "tiktok", label: qsTr("TikTok") }]
@@ -216,6 +243,16 @@ ApplicationWindow {
                 Layout.fillHeight: true
                 spacing: 0
 
+                DownloadsPanel {
+                    id: downloadsPanel
+                    objectName: "downloadsPanel"
+                    visible: win.downloadsVisible
+                    Layout.preferredWidth: 260
+                    Layout.fillHeight: true
+                }
+
+                Rectangle { visible: win.downloadsVisible; Layout.fillHeight: true; Layout.preferredWidth: 1; color: win.line }
+
                 Preview {
                     id: preview
                     objectName: "preview"
@@ -266,18 +303,28 @@ ApplicationWindow {
         }
 
         // Videos can be dropped anywhere on the window.
+        // Over the timeline's video lane, they go in where they're dropped.
         DropArea {
+            id: windowDrop
             anchors.fill: parent
             keys: ["text/uri-list"]
+            function timelineIndex(x, y) {
+                const p = timeline.mapFromItem(windowDrop, x, y)
+                return timeline.insertIndexAt(p.x, p.y)
+            }
+            onPositionChanged: function(drag) { timeline.dropIndex = timelineIndex(drag.x, drag.y) }
+            onExited: timeline.dropIndex = -1
             onDropped: function(drop) {
+                const at = timelineIndex(drop.x, drop.y)
+                timeline.dropIndex = -1
                 if (drop.hasUrls) {
-                    backend.addUrls(drop.urls)
-                    drop.accept()
+                    backend.addUrls(drop.urls, at)
+                    drop.accept(Qt.CopyAction)
                 }
             }
             Rectangle {
                 anchors.fill: parent
-                visible: parent.containsDrag
+                visible: parent.containsDrag && timeline.dropIndex < 0
                 color: Qt.rgba(0, 0, 0, 0.55)
                 border.color: theme.accent
                 border.width: 3

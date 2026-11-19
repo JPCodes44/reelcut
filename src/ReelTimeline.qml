@@ -15,7 +15,9 @@ Rectangle {
     property int selectedEffect: -1
     property real zoom: 1
     readonly property real gutter: 74
-    readonly property real fitPps: Math.max(8, (width - gutter - 24) / Math.max(backend.duration, 5))
+    // Finite duration only: a NaN here would make every x and width NaN.
+    readonly property real safeDuration: isFinite(backend.duration) ? Math.max(0, backend.duration) : 0
+    readonly property real fitPps: Math.max(8, (width - gutter - 24) / Math.max(safeDuration, 5))
     readonly property real pps: fitPps * zoom
     readonly property real rulerH: 22
     readonly property real videoH: 76
@@ -36,6 +38,21 @@ Rectangle {
         const x = playhead * pps
         if (x < flick.contentX || x > flick.contentX + flick.width - 20)
             flick.contentX = Math.max(0, Math.min(x - flick.width * 0.3, flick.contentWidth - flick.width))
+    }
+
+    // Where a video dragged in from outside would land: a clip index, or -1.
+    property int dropIndex: -1
+    // The clip index a drop at (x, y) in the timeline inserts at; -1 when
+    // (x, y) is off the video lane, which adds at the end instead.
+    function insertIndexAt(x, y) {
+        if (y < videoY - laneGap || y > videoY + videoH + laneGap || x < gutter)
+            return -1
+        const t = (x - gutter + flick.contentX) / pps
+        const clips = backend.clips
+        for (let i = 0; i < clips.length; ++i)
+            if (t < clips[i].start + clips[i].duration / 2)
+                return i
+        return clips.length
     }
 
     signal seekRequested(real t)
@@ -134,7 +151,7 @@ Rectangle {
         id: flick
         anchors.fill: parent
         anchors.leftMargin: root.gutter
-        contentWidth: Math.max(width, backend.duration * root.pps + 40)
+        contentWidth: Math.max(width, root.safeDuration * root.pps + 40)
         contentHeight: height
         clip: true
         boundsBehavior: Flickable.StopAtBounds
@@ -154,7 +171,7 @@ Rectangle {
             width: flick.contentWidth
             height: flick.height
             preventStealing: true
-            onPressed: function(mouse) { root.seekRequested(mouse.x / root.pps) }
+            onPressed: function(mouse) { root.seekRequested(Math.max(0, mouse.x / root.pps)) }
             onPositionChanged: function(mouse) { if (pressed) root.seekRequested(Math.max(0, mouse.x / root.pps)) }
         }
 
@@ -176,7 +193,8 @@ Rectangle {
 
         // Ruler
         Repeater {
-            model: Math.ceil(backend.duration) + 1
+            // Capped: an absurd duration would mean millions of tick items.
+            model: Math.min(Math.ceil(root.safeDuration) + 1, 10000)
             delegate: Item {
                 required property int index
                 readonly property int every: root.pps < 18 ? 5 : root.pps < 40 ? 2 : 1
@@ -205,11 +223,11 @@ Rectangle {
                 required property int index
                 readonly property bool selected: index === root.selectedClip
                 property real dragOffset: 0
-                x: modelData.start * root.pps + dragOffset
+                x: (modelData.start || 0) * root.pps + dragOffset
                 z: dragOffset !== 0 ? 10 : 0
                 opacity: dragOffset !== 0 ? 0.8 : 1
                 y: root.videoY
-                width: Math.max(4, modelData.duration * root.pps - 2)
+                width: Math.max(4, (modelData.duration || 0) * root.pps - 2)
                 height: root.videoH
                 radius: Math.min(4, theme.radius)
                 color: modelData.offline ? "#5a2020" : "#26262c"
@@ -222,17 +240,23 @@ Rectangle {
                     x: 2
                     y: 2
                     Repeater {
-                        model: Math.max(1, Math.ceil((clipItem.width - 4) / 44))
+                        // Capped: a long clip zoomed in would otherwise be tens of thousands of items.
+                        model: Math.min(2000, Math.max(1, Math.ceil((clipItem.width - 4) / 44)))
                         delegate: Image {
                             required property int index
-                            readonly property real tileSeconds: 44 / root.pps * clipItem.modelData.speed
+                            readonly property real tileSeconds: 44 / root.pps * (clipItem.modelData.speed || 1)
+                            // Zoomed in, a long clip has hundreds of tiles; each frame is an
+                            // ffmpeg run, so only tiles near the view ask for one.
+                            readonly property real tileX: clipItem.x + 2 + index * 44
+                            readonly property bool nearView: tileX + 44 > flick.contentX - 400
+                                                             && tileX < flick.contentX + flick.width + 400
                             width: 44
                             height: root.videoH - 4
                             fillMode: Image.PreserveAspectCrop
                             asynchronous: true
                             cache: true
                             sourceSize.height: 90
-                            source: clipItem.modelData.thumb > 0
+                            source: nearView && clipItem.modelData.thumb > 0
                                     ? "image://thumbs/" + clipItem.modelData.thumb + "/"
                                       + (clipItem.modelData.still ? 0
                                          : Math.round(Math.min(clipItem.modelData.out - 0.05, clipItem.modelData.in + (index + 0.5) * tileSeconds) * 10) * 100)
@@ -303,10 +327,10 @@ Rectangle {
                         if (dragging) {
                             // Drop where the clip's middle lands.
                             const middle = clipItem.modelData.start + clipItem.modelData.duration / 2 + clipItem.dragOffset / root.pps
-                            const target = backend.locate(Math.max(0, Math.min(middle, backend.duration))).index
+                            const target = isFinite(middle) ? backend.locate(Math.max(0, Math.min(middle, backend.duration))).index : -1
                             clipItem.dragOffset = 0
                             dragging = false
-                            if (target >= 0 && target !== clipItem.index) {
+                            if (target >= 0 && target < backend.clips.length && target !== clipItem.index) {
                                 backend.moveClip(clipItem.index, target)
                                 root.clipSelected(target)
                             }
@@ -336,12 +360,14 @@ Rectangle {
                                 backend.checkpoint()
                                 root.clipSelected(clipItem.index)
                                 startX = mapToItem(flick.contentItem, mouse.x, 0).x
-                                startValue = clipItem.modelData[parent.modelData]
+                                startValue = clipItem.modelData[parent.modelData] || 0
                             }
                             onPositionChanged: function(mouse) {
                                 if (!pressed) return
                                 const dx = mapToItem(flick.contentItem, mouse.x, 0).x - startX
-                                backend.setClipValue(clipItem.index, parent.modelData, startValue + dx / root.pps * clipItem.modelData.speed)
+                                const v = startValue + dx / root.pps * (clipItem.modelData.speed || 1)
+                                if (isFinite(v))
+                                    backend.setClipValue(clipItem.index, parent.modelData, v)
                             }
                         }
                     }
@@ -387,7 +413,7 @@ Rectangle {
                 readonly property var modelData: backend.clips[index] || ({})
                 objectName: "transition" + index
                 visible: (modelData.overlap || 0) > 0
-                x: (modelData.start + modelData.duration - (modelData.overlap || 0)) * root.pps
+                x: ((modelData.start || 0) + (modelData.duration || 0) - (modelData.overlap || 0)) * root.pps
                 y: root.videoY + root.videoH - 14
                 z: 5
                 width: Math.max(10, (modelData.overlap || 0) * root.pps)
@@ -410,9 +436,9 @@ Rectangle {
                 // Items stay put while their entry changes, so a drag survives edits.
                 readonly property var modelData: backend.overlays[index] || ({})
                 required property int index
-                x: modelData.start * root.pps
+                x: (modelData.start || 0) * root.pps
                 y: root.textY
-                width: Math.max(3, (modelData.end - modelData.start) * root.pps - 1)
+                width: Math.max(3, ((modelData.end || 0) - (modelData.start || 0)) * root.pps - 1)
                 height: root.laneH
                 radius: Math.min(4, theme.radius)
                 color: index === root.selectedOverlay ? theme.accent : Qt.rgba(1, 1, 1, 0.2)
@@ -450,6 +476,8 @@ Rectangle {
                     onPositionChanged: function(mouse) {
                         if (!pressed) return
                         const dt = (mapToItem(flick.contentItem, mouse.x, 0).x - startX) / root.pps
+                        // A NaN would reach the C++ side as an end time of NaN.
+                        if (!isFinite(dt) || !isFinite(startStart) || !isFinite(startEnd)) return
                         if (!moving && Math.abs(dt * root.pps) < 3) return
                         if (!moving) {
                             moving = true
@@ -485,9 +513,9 @@ Rectangle {
                 readonly property var modelData: backend.effects[index] || ({})
                 required property int index
                 readonly property bool selected: index === root.selectedEffect
-                x: modelData.start * root.pps
+                x: (modelData.start || 0) * root.pps
                 y: root.effectsY
-                width: Math.max(3, (modelData.end - modelData.start) * root.pps - 1)
+                width: Math.max(3, ((modelData.end || 0) - (modelData.start || 0)) * root.pps - 1)
                 height: root.laneH
                 radius: Math.min(4, theme.radius)
                 color: selected ? theme.accent : Qt.rgba(0.75, 0.45, 1, 0.45)
@@ -524,6 +552,8 @@ Rectangle {
                     onPositionChanged: function(mouse) {
                         if (!pressed) return
                         const dt = (mapToItem(flick.contentItem, mouse.x, 0).x - startX) / root.pps
+                        // A NaN would reach the C++ side as an end time of NaN.
+                        if (!isFinite(dt) || !isFinite(startStart) || !isFinite(startEnd)) return
                         if (!moving && Math.abs(dt * root.pps) < 3) return
                         if (!moving) {
                             moving = true
@@ -555,7 +585,7 @@ Rectangle {
             visible: backend.music.set
             x: 0
             y: root.musicY
-            width: backend.duration * root.pps
+            width: Math.max(1, root.safeDuration * root.pps)
             height: root.musicH
             radius: Math.min(4, theme.radius)
             color: Qt.rgba(0.35, 0.55, 1, 0.35)
@@ -586,6 +616,19 @@ Rectangle {
                 elide: Text.ElideRight
             }
             MouseArea { anchors.fill: parent; onClicked: root.musicSelected() }
+        }
+
+        // Insertion marker while a video is dragged over the video lane
+        Rectangle {
+            visible: root.dropIndex >= 0
+            readonly property var at: backend.clips[root.dropIndex]
+            x: (at ? at.start : backend.duration) * root.pps - 2
+            y: root.videoY - 4
+            z: 20
+            width: 4
+            height: root.videoH + 8
+            radius: 2
+            color: theme.accent
         }
 
         // Playhead

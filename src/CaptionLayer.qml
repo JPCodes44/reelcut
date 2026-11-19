@@ -54,7 +54,7 @@ Item {
                 delegate: Text {
                     required property var modelData
                     required property int index
-                    text: modelData.text.toUpperCase()
+                    text: String(modelData.text || "").toUpperCase()
                     font.family: backend.captionFont
                     font.bold: true
                     font.pixelSize: root.captionPx
@@ -73,7 +73,7 @@ Item {
             visible: root.style === "pop"
             anchors.centerIn: parent
             readonly property var word: root.line && root.spoken >= 0 ? root.line.words[root.spoken] : null
-            text: word ? word.text.toUpperCase() : ""
+            text: word ? String(word.text || "").toUpperCase() : ""
             font.family: backend.captionFont
             font.bold: true
             font.pixelSize: root.captionPx
@@ -123,10 +123,10 @@ Item {
             }
             onBegan: backend.checkpoint()
             onDragged: function(dx, dy) {
-                backend.setCaptionValue("x", startX + dx / root.width)
-                backend.setCaptionValue("y", startY + dy / root.height)
+                backend.setCaptionValue("x", startX + dx / Math.max(1, root.width))
+                backend.setCaptionValue("y", startY + dy / Math.max(1, root.height))
             }
-            onResized: function(factor) { backend.setCaptionValue("scale", startSize * factor) }
+            onResized: function(factor) { if (isFinite(factor)) backend.setCaptionValue("scale", startSize * factor) }
             onWheeled: function(steps) { backend.setCaptionValue("scale", backend.captionSize * Math.pow(1.08, steps)) }
         }
     }
@@ -143,7 +143,7 @@ Item {
             readonly property real entrance: root.animate ? Math.min(1, Math.max(0, age / 0.25)) : 1
             // Fisheye text is drawn flat, then seen through a lens (src/fisheyetext.h).
             readonly property bool fisheye: modelData.style === "fisheye"
-            visible: root.time >= modelData.start && root.time < modelData.end && modelData.text.length > 0
+            visible: root.time >= modelData.start && root.time < modelData.end && String(modelData.text || "").length > 0
             // Colors, with the style's defaults filled in (Overlay::colorOf).
             readonly property color fillColor: modelData.fillColor || "white"
             readonly property color outlineColor: modelData.outlineColor || "black"
@@ -159,7 +159,13 @@ Item {
             readonly property real half: (modelData.thickness || 0) / 2 * root.scaleFactor
             function ring(radius) {
                 const list = []
-                for (let r = radius; r > 0.01; r -= 1)
+                // A huge or non-finite radius (a typo'd outline width) would make
+                // thousands of text copies, or loop forever; cap the copies.
+                if (!isFinite(radius) || radius <= 0)
+                    return list
+                radius = Math.min(radius, 400)
+                const step = Math.max(1, radius / 32)
+                for (let r = radius; r > 0.01; r -= step)
                     for (let i = 0; i < 16; ++i)
                         list.push([r * Math.cos(i * Math.PI / 8), r * Math.sin(i * Math.PI / 8)])
                 return list
@@ -233,8 +239,9 @@ Item {
                     id: label
                     objectName: "overlayText" + overlay.index
                     width: Math.min(implicitWidth, root.width * 0.94)
-                    text: overlay.modelData.text
-                    horizontalAlignment: Text.AlignHCenter
+                    text: overlay.modelData.text || ""
+                    horizontalAlignment: overlay.modelData.align === "left" ? Text.AlignLeft
+                                         : overlay.modelData.align === "right" ? Text.AlignRight : Text.AlignHCenter
                     wrapMode: Text.Wrap
                     font.family: overlay.modelData.fontFamily || backend.captionFont
                     font.bold: overlay.modelData.isBold === undefined ? !overlay.fisheye : overlay.modelData.isBold
@@ -258,8 +265,12 @@ Item {
                                     lens.width, lens.height)
                 // The lens enlarges the middle about 1.5x, so capture the text 3x finer
                 // than it shows; the shader averages 4 samples per pixel from it.
-                textureSize: Qt.size(Math.ceil(lens.width * 3 * Screen.devicePixelRatio),
-                                     Math.ceil(lens.height * 3 * Screen.devicePixelRatio))
+                // Kept under the GPU's texture limit: big fisheye text at 3x would ask
+                // for a texture the driver can't allocate.
+                readonly property real fine: Math.min(3 * Screen.devicePixelRatio,
+                                                      8192 / Math.max(1, lens.width, lens.height))
+                textureSize: Qt.size(Math.max(1, Math.ceil(lens.width * fine)),
+                                     Math.max(1, Math.ceil(lens.height * fine)))
                 smooth: true
             }
             ShaderEffect {
@@ -310,12 +321,17 @@ Item {
                 }
                 onBegan: backend.checkpoint()
                 onDragged: function(dx, dy) {
-                    backend.setOverlayValue(overlay.index, "x", startX + dx / root.width)
-                    backend.setOverlayValue(overlay.index, "y", startY + dy / root.height)
+                    if (overlay.index >= backend.overlays.length) return
+                    backend.setOverlayValue(overlay.index, "x", startX + dx / Math.max(1, root.width))
+                    backend.setOverlayValue(overlay.index, "y", startY + dy / Math.max(1, root.height))
                 }
-                onResized: function(factor) { backend.setOverlayValue(overlay.index, "size", Math.round(startSize * factor)) }
+                onResized: function(factor) {
+                    if (isFinite(factor) && overlay.index < backend.overlays.length)
+                        backend.setOverlayValue(overlay.index, "size", Math.round(startSize * factor))
+                }
                 onWheeled: function(steps) {
-                    backend.setOverlayValue(overlay.index, "size", Math.round(overlay.modelData.size * Math.pow(1.08, steps)))
+                    if (overlay.index < backend.overlays.length && isFinite(steps))
+                        backend.setOverlayValue(overlay.index, "size", Math.round(overlay.modelData.size * Math.pow(1.08, steps)))
                 }
             }
         }

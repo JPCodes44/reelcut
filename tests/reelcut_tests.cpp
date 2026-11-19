@@ -1,4 +1,5 @@
 #include <QClipboard>
+#include <QMimeData>
 #include <QDir>
 #include <QFile>
 #include <QGuiApplication>
@@ -19,6 +20,7 @@
 #include <QQuickWindow>
 
 #include "backend.h"
+#include "downloads.h"
 #include "waveformprovider.h"
 #include "thumbprovider.h"
 #include "captions.h"
@@ -74,6 +76,13 @@ bool runFfmpeg(const QStringList &args) {
 
 // A stand-in for graph.instagram.com and Meta's upload host, on localhost:
 // answers the calls InstagramApi makes and remembers them.
+
+// An empty downloads library for windows under test.
+static Downloads *testDownloads() {
+    static Downloads *downloads = new Downloads(nullptr, (new QTemporaryDir)->path());
+    return downloads;
+}
+
 class FakeInstagram : public QObject {
 public:
     struct Call { QString method, path; QUrlQuery query; QByteArray body; QHash<QString, QString> headers; };
@@ -248,6 +257,80 @@ class ReelcutTests : public QObject {
     Q_OBJECT
 
 private slots:
+    // Saved downloads read by their title, newest first, ready to drag in.
+    void downloadsLibrary()
+    {
+        QCOMPARE(Downloads::titleFor("Me at the zoo [jNQXAC9IVRw].mp4"), QString("Me at the zoo"));
+        QCOMPARE(Downloads::titleFor("plain name.mp4"), QString("plain name"));
+        QCOMPARE(Downloads::titleFor("[abc].mp4"), QString("[abc]"));
+
+        const QStringList args = Downloads::ytDlpArgs("https://www.tiktok.com/@a/video/1", "/x");
+        QCOMPARE(args.last(), QString("https://www.tiktok.com/@a/video/1"));
+        QCOMPARE(args.at(args.size() - 2), QString("--"));  // a link can't pass as an option
+        QVERIFY(args.contains("--no-playlist"));
+        QCOMPARE(args.at(args.indexOf("-P") + 1), QString("/x"));
+
+        QTemporaryDir dir;
+        write(dir.filePath("Old one [a1].mp4"), "x");
+        write(dir.filePath("Old one [a1].jpg"), "x");
+        QFile old(dir.filePath("Old one [a1].mp4"));
+        QVERIFY(old.open(QIODevice::ReadWrite));
+        QVERIFY(old.setFileTime(QDateTime::currentDateTime().addSecs(-60), QFileDevice::FileModificationTime));
+        old.close();
+        write(dir.filePath("New one [b2].webm"), "x");
+        write(dir.filePath("Half done [c3].f137.mp4"), "x");
+        write(dir.filePath("notes.txt"), "x");
+        Downloads downloads(nullptr, dir.path());
+        const QVariantList items = downloads.items();
+        QCOMPARE(items.size(), 2);
+        QCOMPARE(items[0].toMap()["title"].toString(), QString("New one"));
+        QVERIFY(items[0].toMap()["thumb"].toUrl().isEmpty());
+        QCOMPARE(items[1].toMap()["title"].toString(), QString("Old one"));
+        QVERIFY(items[1].toMap()["thumb"].toUrl().isLocalFile());
+
+        // Not links: refused before yt-dlp runs.
+        QSignalSpy failed(&downloads, &Downloads::failed);
+        QVERIFY(!downloads.download("hello"));
+        QVERIFY(!downloads.download("file:///etc/passwd"));
+        QCOMPARE(failed.size(), 2);
+        QVERIFY(downloads.active().isEmpty());
+
+        // Deleting takes the thumbnail too, and nothing outside the folder.
+        QTemporaryDir other;
+        write(other.filePath("keep.mp4"), "x");
+        downloads.remove(other.filePath("keep.mp4"));
+        QVERIFY(QFile::exists(other.filePath("keep.mp4")));
+        downloads.remove(dir.filePath("Old one [a1].mp4"));
+        QVERIFY(!QFile::exists(dir.filePath("Old one [a1].mp4")));
+        QVERIFY(!QFile::exists(dir.filePath("Old one [a1].jpg")));
+        QCOMPARE(downloads.items().size(), 1);
+
+        // Dragged or copied out, a video is a file to other apps and a path to terminals.
+        const QString kept = dir.filePath("New one [b2].webm");
+        std::unique_ptr<QMimeData> mime(Downloads::mimeFor(kept));
+        QCOMPARE(mime->urls(), QList<QUrl>{QUrl::fromLocalFile(kept)});
+        QCOMPARE(mime->text(), kept);
+        QVERIFY(mime->data("text/uri-list").startsWith("file:///"));
+    }
+
+    // A video dropped onto the timeline goes in where it was dropped.
+    void addUrlsAtIndex()
+    {
+        QTemporaryDir dir, state, themeDir;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240",
+                           "-frames:v", "1", dir.filePath("a.jpg")}));
+        QVERIFY(QFile::copy(dir.filePath("a.jpg"), dir.filePath("b.jpg")));
+        QVERIFY(QFile::copy(dir.filePath("a.jpg"), dir.filePath("c.jpg")));
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        backend.addUrls({QUrl::fromLocalFile(dir.filePath("a.jpg")), QUrl::fromLocalFile(dir.filePath("b.jpg"))});
+        QTRY_COMPARE(backend.project().clips.size(), 2);
+        backend.addUrls({QUrl::fromLocalFile(dir.filePath("c.jpg"))}, 1);
+        QTRY_COMPARE(backend.project().clips.size(), 3);
+        QVERIFY(backend.project().clips[1].path.endsWith("c.jpg"));
+        QVERIFY(backend.project().clips[2].path.endsWith("b.jpg"));
+    }
+
     void musicWaveformResizesByDraggingItsTopEdge()
     {
         QTemporaryDir dir, state;
@@ -270,6 +353,7 @@ private slots:
         engine.addImageProvider("waveforms", new WaveformProvider());
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
         engine.loadData(R"(
             import QtQuick
             import QtQuick.Window
@@ -358,6 +442,7 @@ private slots:
         engine.addImageProvider("waveforms", new WaveformProvider());
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
         engine.loadData("import QtQuick\nItem { width: 800; height: 278; ReelTimeline { anchors.fill: parent } }",
             QUrl("qrc:/TimelineWaveformTest.qml"));
         QVERIFY(!engine.rootObjects().isEmpty());
@@ -1635,6 +1720,7 @@ private slots:
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
         engine.load(QUrl("qrc:/Main.qml"));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
@@ -1719,6 +1805,7 @@ private slots:
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
         engine.load(QUrl("qrc:/Main.qml"));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
@@ -1838,6 +1925,7 @@ private slots:
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 860);
@@ -1903,6 +1991,7 @@ private slots:
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 900);
@@ -2074,6 +2163,7 @@ private slots:
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 900);
@@ -2320,6 +2410,7 @@ private slots:
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 900);
@@ -2584,6 +2675,7 @@ private slots:
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
         engine.load(QUrl("qrc:/Main.qml"));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
@@ -2691,6 +2783,7 @@ private slots:
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 900);
@@ -2728,6 +2821,83 @@ private slots:
         QCOMPARE(backend.project().platform, QString("tiktok"));
         QTRY_COMPARE(postDialog->property("stage").toString(), QString("ready"));
         QFile::remove(file);
+    }
+
+    void textLinesAlignLeftCenterOrRight()
+    {
+        // Saved, loaded, set by name; anything else is refused.
+        Project p;
+        p.addOverlay("My\nhandwriting...", 0, 3);
+        QCOMPARE(p.overlays[0].align, QString("center"));
+        QVERIFY(p.setOverlayValue(0, "align", "left"));
+        QVERIFY(!p.setOverlayValue(0, "align", "justify"));
+        QCOMPARE(p.overlays[0].align, QString("left"));
+        QCOMPARE(Project::fromJson(p.toJson()).overlays[0].align, QString("left"));
+        QJsonObject old = p.toJson();
+        QJsonArray list = old["overlays"].toArray();
+        QJsonObject first = list[0].toObject();
+        first.remove("align");
+        list[0] = first;
+        old["overlays"] = list;
+        QCOMPARE(Project::fromJson(old).overlays[0].align, QString("center"));  // older projects
+
+        // The export anchors on the block's edge: left of center for left,
+        // right of it for right, lines broken where the preview breaks them.
+        auto dialogueOf = [](const Project &project) {
+            for (const QString &line : assDocument(project, "#ffffff").split('\n'))
+                if (line.startsWith("Dialogue:") && line.contains("Hook"))
+                    return line;
+            return QString();
+        };
+        p.overlays[0].animation = "none";
+        p.overlays[0].x = 0.5;
+        p.setOverlayValue(0, "align", "center");
+        QVERIFY(dialogueOf(p).contains("\\an5"));
+        QVERIFY(dialogueOf(p).contains("\\pos(540,"));
+        p.setOverlayValue(0, "align", "left");
+        const QString left = dialogueOf(p);
+        QVERIFY2(left.contains("\\an4"), qPrintable(left));
+        QVERIFY(left.contains("My\\Nhandwriting..."));
+        const int leftX = QRegularExpression("\\\\pos\\((\\d+),").match(left).captured(1).toInt();
+        p.setOverlayValue(0, "align", "right");
+        const QString right = dialogueOf(p);
+        QVERIFY(right.contains("\\an6"));
+        const int rightX = QRegularExpression("\\\\pos\\((\\d+),").match(right).captured(1).toInt();
+        QVERIFY2(leftX < 540 && rightX > 540, qPrintable(QString("%1 %2").arg(leftX).arg(rightX)));
+        QVERIFY(qAbs((540 - leftX) - (rightX - 540)) <= 1);  // the same block, either edge
+        QVERIFY(rightX - leftX > 300);  // about as wide as "handwriting..."
+
+        // A long line wraps into explicit lines for libass.
+        p.overlays[0].text = "a much longer hook line that will certainly need wrapping across the frame";
+        QVERIFY(dialogueOf(p).contains("\\N"));
+
+        // Fisheye text, drawn here: the short line sits at the side picked.
+        Overlay f;
+        f.style = "fisheye";
+        f.text = "WWWWWWWW\nW";
+        f.fill = "#ffffffff";
+        f.outlineWidth = 0;
+        f.noShadow = true;
+        auto shortLineX = [](const Overlay &o) {
+            const QImage img = FisheyeText::render(o);
+            // The bottom line's ink: the lowest row with any, then its mean x.
+            for (int y = img.height() - 1; y >= 0; --y) {
+                double sum = 0;
+                int n = 0;
+                for (int x = 0; x < img.width(); ++x)
+                    if (qAlpha(img.pixel(x, y)) > 128) { sum += x; ++n; }
+                if (n > 0)
+                    return sum / n;
+            }
+            return -1.0;
+        };
+        f.align = "left";
+        const double l = shortLineX(f);
+        f.align = "center";
+        const double c = shortLineX(f);
+        f.align = "right";
+        const double r = shortLineX(f);
+        QVERIFY2(l < c - 50 && c < r - 50, qPrintable(QString("%1 %2 %3").arg(l).arg(c).arg(r)));
     }
 
     void scheduleTimesReadTheWayPeopleTypeThem()
@@ -2854,6 +3024,7 @@ private slots:
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 900);
@@ -3077,6 +3248,7 @@ private slots:
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty("theme", &theme);
         engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
         engine.load(QUrl("qrc:/Main.qml"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         window->resize(1360, 900);

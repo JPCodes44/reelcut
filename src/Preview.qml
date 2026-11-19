@@ -43,6 +43,7 @@ Rectangle {
     function slotFor(i) { return i % 2 === 0 ? slotEven : slotOdd }
 
     function seek(t) {
+        if (!isFinite(t)) t = 0
         const at = backend.locate(t)
         clipIndex = at.index
         if (at.index < 0) {
@@ -84,10 +85,13 @@ Rectangle {
         music.pause()
     }
 
+    MediaDevices { id: mediaDevices }
+
     MediaPlayer {
         id: music
         source: backend.music.set ? "file://" + backend.music.path : ""
-        audioOutput: AudioOutput { volume: backend.music.volume }
+        // Follow the system's default output, so switching it (Super+Q) moves Reelcut's sound too.
+        audioOutput: AudioOutput { device: mediaDevices.defaultAudioOutput; volume: backend.music.volume }
         function sync(t) {
             if (!backend.music.set) return
             position = (backend.music.offset + t) * 1000
@@ -107,6 +111,8 @@ Rectangle {
             if (!c || cur.loading) return
             const now = Date.now()
             const t = c.still ? root.time + (now - root.lastTick) / 1000 : cur.reached()
+            // The slot is a step behind an edit (it hasn't reloaded yet): wait for it.
+            if (!isFinite(t) || t < 0) return
             const done = c.still ? t >= c.start + c.duration : cur.finished()
             root.lastTick = now
 
@@ -323,14 +329,15 @@ Rectangle {
                     property real spanX
                     property real spanY
                     onPressed: {
+                        if (!root.currentClip) return
                         win.select("clip", root.clipIndex)
                         startPanX = root.currentClip.panX
                         startPanY = root.currentClip.panY
                         startZoom = root.currentClip.zoom
                         // How far a pan of 1 moves the picture, as framed now.
                         const framed = root.slotFor(root.clipIndex).framedItem
-                        spanX = (framed.width - frame.width) / 2
-                        spanY = (framed.height - frame.height) / 2
+                        spanX = framed ? (framed.width - frame.width) / 2 : 0
+                        spanY = framed ? (framed.height - frame.height) / 2 : 0
                     }
                     onBegan: backend.checkpoint()
                     // Pan snaps to centered (0) and to the picture's edges (±1)
@@ -355,8 +362,9 @@ Rectangle {
                             guideY = py[1]
                         }
                     }
-                    onResized: function(factor) { backend.setClipValue(root.clipIndex, "zoom", startZoom * factor) }
+                    onResized: function(factor) { if (isFinite(factor) && factor > 0) backend.setClipValue(root.clipIndex, "zoom", startZoom * factor) }
                     onWheeled: function(steps) {
+                        if (!root.currentClip) return
                         backend.setClipValue(root.clipIndex, "zoom", root.currentClip.zoom * Math.pow(1.05, steps))
                     }
                 }

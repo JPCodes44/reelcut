@@ -361,14 +361,18 @@ Popup {
                             visible: modelData.status === "failed"
                             flat: true
                             text: qsTr("Retry")
-                            onClicked: backend.retryScheduled(modelData.id)
+                            // The list rebuilds when the scheduler answers (synchronously when
+                            // it isn't set up), destroying this button: act after the click.
+                            onClicked: { const id = modelData.id; Qt.callLater(function() { backend.retryScheduled(id) }) }
                         }
                         Button {
                             visible: modelData.status !== "publishing"
                             flat: true
                             text: modelData.status === "failed" ? qsTr("Remove") : qsTr("Cancel")
-                            onClicked: modelData.status === "failed" ? backend.removeScheduled(modelData.id)
-                                                                     : backend.cancelScheduled(modelData.id)
+                            onClicked: {
+                                const id = modelData.id, failed = modelData.status === "failed"
+                                Qt.callLater(function() { failed ? backend.removeScheduled(id) : backend.cancelScheduled(id) })
+                            }
                         }
                     }
                 }
