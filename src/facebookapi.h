@@ -16,7 +16,7 @@ class QNetworkReply;
 // API only posts to Pages, not personal profiles. Connecting takes a Meta
 // user token with pages_show_list, pages_read_engagement and
 // pages_manage_posts (the Instagram token works when the same Meta app has
-// them); Reelcut keeps only the Page's own token, which doesn't expire.
+// them); Reelcut keeps only the Page's own token. Meta reports its lifetime.
 //   1. POST /<page>/video_reels  upload_phase=start   -> video_id, upload_url
 //   2. POST <upload_url>         the bytes, Authorization: OAuth <page token>
 //   3. POST /<page>/video_reels  upload_phase=finish, video_state=PUBLISHED,
@@ -36,6 +36,10 @@ public:
     void publish(const PostRequest &post) override;
 
     QString pageId() const { return m_pageId; }
+    // The Page's own token and the Graph address, for reading the Page's
+    // reels and insights (src/stats.h).
+    QString pageToken() const { return m_pageToken; }
+    QString apiBase() const { return base(); }
     QString accountFile() const;
 
     // Finds the Pages the user token manages: one is connected at once,
@@ -43,6 +47,8 @@ public:
     void connectToken(const QString &userToken);
     void choosePage(const QString &id);
     void disconnect();
+    void cancelConnect();
+    QJsonObject tokenMetadata() const { return m_tokenMetadata; }
 
     // Tests point these at a stand-in server.
     QString graphBase;  // empty: https://graph.facebook.com/v26.0
@@ -70,4 +76,7 @@ private:
     QString m_pageId, m_pageName, m_pageToken;
     QVector<Page> m_candidates;  // Pages offered, waiting for choosePage
     bool m_busy = false;
+    int m_connectGeneration = 0;
+    QString m_inspectionToken;
+    QJsonObject m_tokenMetadata;
 };

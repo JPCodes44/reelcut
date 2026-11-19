@@ -80,7 +80,7 @@ reelcut export my.reel out.mp4     # render without the window (add --json for s
 
 ## Let an AI agent edit with you (MCP)
 
-`reelcut mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server with every editing feature as a tool. Add it to Claude Code:
+`reelcut mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server for saved-project editing and the live Reelcut app. Add it to Claude Code:
 
 ```sh
 claude mcp add reelcut --scope user -- reelcut mcp
@@ -101,6 +101,10 @@ Then ask for things like "make a reel from these three clips, cut the silences, 
 | `export_photos` | A photo set for TikTok photo posts |
 | `show_in_app` | Opens the project in the window |
 
+Live tools also cover editor layers/effects, posting, account connections and token expiry status, Stats, Calendar/Timing, downloads, credits, Settings, playback and UI navigation. Start with `get_app_capabilities`, `list_app_instances` and `get_app_state`; poll `get_app_events` for asynchronous completion. Keep the GUI open for live tools. Reconnect your MCP client after updating to discover the expanded tool list. OAuth consent remains in the provider's browser.
+
+See [the measured functional coverage audit](docs/mcp-coverage.md) and [machine-readable inventory](docs/mcp-capabilities.json).
+
 ### Watch what agents spend on Higgsfield
 
 When an agent generates through the Higgsfield MCP, the top bar shows the dollars spent and the dollars left (`Higgsfield $4.20 spent · $32.46 left`). Click it to sign in to your Higgsfield account the first time. After that it shows what you've spent **all time**, today, in the last 10 minutes and, after a **Reset**, since the reset. It also shows your balance and every recent charge. The chip counts all time until you reset, and **All time** switches it back. It updates every 20 seconds. Only charges and refunds count; plan credits, top-ups and expiring daily credits don't.
@@ -110,6 +114,18 @@ When an agent generates through the Higgsfield MCP, the top bar shows the dollar
 - Reelcut writes `~/.config/reelcut/higgsfield-status.json` (`spentDollars`, `spentAllTimeDollars`, `balanceDollars`, `overBudget`, …) so scripts and hooks can read it. For example, a Claude Code `PreToolUse` hook can refuse `mcp__*Higgsfield__generate_*` calls while `overBudget` is true.
 
 Reelcut signs in to `mcp.higgsfield.ai/mcp` as its own OAuth client (it registers itself, so there's no key to paste). It calls the same `balance` and `transactions` tools the agent sees. The account lives in `~/.config/reelcut/higgsfield.json`, which only you can read.
+
+## Connection settings
+
+Open **Settings → Connected accounts** from the top bar, with or without an open project. This manages the same Instagram, Facebook and YouTube connections used by Post, Stats and Schedule. TikTok uses your browser sign-in and stores no API token in Reelcut.
+
+Select a platform to connect, replace/reconnect, test, or disconnect. Facebook accepts a Page token or a user token; choose the Page if several are available. YouTube retains the existing Google sign-in flow using your Desktop app OAuth client. The Post dialog links to Settings, and account notices in Stats offer Connect/Reconnect directly.
+
+Settings shows token expiry, data-access expiry (Meta), refresh-token expiry (YouTube), and the last check. Dates use local time with timezone and time remaining. **Never** is shown only when Meta explicitly reports zero; **Unknown** means the provider did not supply an expiry. Google access tokens renew automatically, so their normal hourly expiry does not mark the connection expired. Google may omit refresh-token lifetime; OAuth apps in Testing may require signing in again after seven days.
+
+Meta's [token inspection API](https://developers.facebook.com/docs/graph-api/reference/debug_token/) requires an app access token or an app developer's user token. During Facebook setup, Reelcut uses the supplied user token temporarily to inspect the selected Page token, then keeps only the Page token. If later inspection lacks permission, the last reported dates remain visible with an explanation and a link to Meta's debugger. The dates are never guessed. You can generate or extend Meta tokens with the tools linked in Settings, then replace them here.
+
+The **Scheduling** tab exposes the existing Instagram Convex scheduler setup. Facebook and YouTube continue to schedule natively. Disconnect removes local credentials; access already granted at the provider or tokens already sent to an Instagram scheduler must be managed there separately.
 
 ## Development
 

@@ -58,8 +58,13 @@ void PostScheduler::configure(const QString &url, const QString &key) {
 
 // One Convex function over its HTTP API: POST <url>/api/<query|mutation>.
 void PostScheduler::call(const QString &kind, const QString &path, QJsonObject args, const Then &then) {
-    if (!configured())
-        return then(false, {}, tr("The scheduler isn't set up (%1).").arg(configFile()));
+    if (!configured()) {
+        // Queued, like a network reply: the caller (often a QML button whose
+        // delegate is rebuilt by postsChanged) must have returned first.
+        const QString msg = tr("The scheduler isn't set up (%1).").arg(configFile());
+        QMetaObject::invokeMethod(this, [then, msg] { then(false, {}, msg); }, Qt::QueuedConnection);
+        return;
+    }
     args.insert("secret", m_key);
     QNetworkRequest request(QUrl(m_url + "/api/" + kind));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");

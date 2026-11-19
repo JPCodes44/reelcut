@@ -75,4 +75,5 @@ private:
     QString m_userId;  // the account's Instagram id, used in the publish calls
     QDateTime m_issued;
     bool m_busy = false;
+    int m_connectionGeneration = 0;
 };

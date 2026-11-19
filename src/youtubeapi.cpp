@@ -10,6 +10,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPointer>
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QTcpServer>
@@ -56,10 +57,13 @@ void YouTubeApi::load() {
     m_refreshToken = json.value("refreshToken").toString();
     m_channelId = json.value("channelId").toString();
     m_channelTitle = json.value("channelTitle").toString();
+    m_accessExpires = QDateTime::fromString(json.value("accessExpires").toString(), Qt::ISODate);
+    m_refreshExpires = QDateTime::fromString(json.value("refreshExpires").toString(), Qt::ISODate);
     emit accountChanged();
 }
 
 void YouTubeApi::connectClient(const QString &clientId, const QString &clientSecret) {
+    ++m_authGeneration;
     stopListening();
     m_pendingId = clientId.trimmed();
     m_pendingSecret = clientSecret.trimmed();
@@ -130,7 +134,8 @@ void YouTubeApi::connectClient(const QString &clientId, const QString &clientSec
     q.addQueryItem("redirect_uri", QString::fromLatin1(QUrl::toPercentEncoding(m_redirect)));
     q.addQueryItem("response_type", "code");
     q.addQueryItem("scope", QString::fromLatin1(QUrl::toPercentEncoding(
-                                "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly")));
+                                "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly "
+                                "https://www.googleapis.com/auth/yt-analytics.readonly")));
     q.addQueryItem("access_type", "offline");
     q.addQueryItem("prompt", "select_account%20consent");
     q.addQueryItem("state", m_state);
@@ -167,9 +172,11 @@ QNetworkReply *YouTubeApi::postToken(const QList<QPair<QString, QString>> &form)
 void YouTubeApi::signedIn(const QString &code) {
     stopListening();
     const QString id = m_pendingId, secret = m_pendingSecret;
+    const int generation = m_authGeneration;
     Net::whenDone(postToken({{"code", code}, {"client_id", id}, {"client_secret", secret}, {"redirect_uri", m_redirect},
                              {"grant_type", "authorization_code"}, {"code_verifier", m_verifier}}), this,
-                  [this, id, secret](const Net::Response &r) {
+                  [this, id, secret, generation](const Net::Response &r) {
+        if (generation != m_authGeneration) return;
         const QString access = r.json.value("access_token").toString();
         const QString refresh = r.json.value("refresh_token").toString();
         if (!r.error.isEmpty() || access.isEmpty() || refresh.isEmpty())
@@ -178,7 +185,10 @@ void YouTubeApi::signedIn(const QString &code) {
         QNetworkRequest request(QUrl(apiBase + "/channels?part=snippet&mine=true"));
         request.setRawHeader("Authorization", "Bearer " + access.toUtf8());
         const QDateTime expires = QDateTime::currentDateTimeUtc().addSecs(r.json.value("expires_in").toInt(3600));
-        Net::whenDone(m_net->get(request), this, [this, id, secret, access, refresh, expires](const Net::Response &c) {
+        const auto refreshLifetime = r.json.value("refresh_token_expires_in").toVariant().toLongLong();
+        const auto refreshExpires = refreshLifetime > 0 ? QDateTime::currentDateTimeUtc().addSecs(refreshLifetime) : QDateTime();
+        Net::whenDone(m_net->get(request), this, [this, id, secret, access, refresh, expires, refreshExpires, generation](const Net::Response &c) {
+            if (generation != m_authGeneration) return;
             const QJsonObject channel = c.json.value("items").toArray().at(0).toObject();
             const QString title = channel.value("snippet").toObject().value("title").toString();
             if (!c.error.isEmpty() || channel.value("id").toString().isEmpty())
@@ -189,12 +199,14 @@ void YouTubeApi::signedIn(const QString &code) {
             m_refreshToken = refresh;
             m_accessToken = access;
             m_accessExpires = expires;
+            m_refreshExpires = refreshExpires;
             m_channelId = channel.value("id").toString();
             m_channelTitle = title;
             m_pendingSecret.clear();
             m_verifier.clear();
             Net::savePrivate(accountFile(), {{"clientId", id}, {"clientSecret", secret}, {"refreshToken", refresh},
-                                             {"channelId", m_channelId}, {"channelTitle", title}});
+                                             {"channelId", m_channelId}, {"channelTitle", title},
+                                             {"accessExpires", expires.toString(Qt::ISODate)}, {"refreshExpires", refreshExpires.toString(Qt::ISODate)}});
             emit accountChanged();
             emit connectFinished(true, tr("Connected to the YouTube channel %1.").arg(title));
         });
@@ -202,6 +214,10 @@ void YouTubeApi::signedIn(const QString &code) {
 }
 
 void YouTubeApi::disconnect() {
+    ++m_authGeneration;
+    stopListening();
+    m_pendingSecret.clear(); m_verifier.clear();
+    m_accessExpires = {}; m_refreshExpires = {};
     QFile::remove(accountFile());
     m_clientId.clear();
     m_clientSecret.clear();
@@ -215,9 +231,11 @@ void YouTubeApi::disconnect() {
 void YouTubeApi::withAccess(const std::function<void(const QString &error)> &then) {
     if (!m_accessToken.isEmpty() && QDateTime::currentDateTimeUtc().secsTo(m_accessExpires) > 60)
         return then({});
+    const int generation = m_authGeneration;
     Net::whenDone(postToken({{"client_id", m_clientId}, {"client_secret", m_clientSecret},
                              {"refresh_token", m_refreshToken}, {"grant_type", "refresh_token"}}), this,
-                  [this, then](const Net::Response &r) {
+                  [this, then, generation](const Net::Response &r) {
+        if (generation != m_authGeneration) return then(tr("The YouTube connection changed. Try again."));
         if (r.json.value("error").toString() == "invalid_grant") {
             // Revoked, or expired: Google ends refresh tokens of apps still in
             // "Testing" after 7 days. Only signing in again helps.
@@ -229,7 +247,24 @@ void YouTubeApi::withAccess(const std::function<void(const QString &error)> &the
             return then(tr("Couldn't renew access to YouTube: %1").arg(r.error.isEmpty() ? tr("no token came back") : r.error));
         m_accessToken = access;
         m_accessExpires = QDateTime::currentDateTimeUtc().addSecs(r.json.value("expires_in").toInt(3600));
+        auto saved = Net::load(accountFile());
+        saved["accessExpires"] = m_accessExpires.toString(Qt::ISODate);
+        const auto refreshLifetime = r.json.value("refresh_token_expires_in").toVariant().toLongLong();
+        if (refreshLifetime > 0) m_refreshExpires = QDateTime::currentDateTimeUtc().addSecs(refreshLifetime);
+        saved["refreshExpires"] = m_refreshExpires.toString(Qt::ISODate);
+        Net::savePrivate(accountFile(), saved);
+        emit tokenTimesChanged();
         then({});
+    });
+}
+
+void YouTubeApi::freshAccess(QObject *context, const std::function<void(const QString &, const QString &)> &then) {
+    if (!connected())
+        return then({}, tr("Connect your YouTube channel first."));
+    QPointer<QObject> guard(context);
+    withAccess([this, guard, then](const QString &error) {
+        if (guard)
+            then(error.isEmpty() ? m_accessToken : QString(), error);
     });
 }
 

@@ -55,7 +55,7 @@ QJsonObject clipToJson(const Clip &c, const QString &baseDir) {
 Clip clipFromJson(const QJsonObject &o, const QString &baseDir) {
     Clip c;
     c.path = loadPath(o.value("path").toString(), baseDir);
-    c.in = o.value("in").toDouble();
+    c.in = qMax(0.0, o.value("in").toDouble());  // as setClipValue
     c.out = o.value("out").toDouble();
     c.speed = qBound(0.25, o.value("speed").toDouble(1.0), 4.0);
     c.zoom = qBound(1.0, o.value("zoom").toDouble(1.0), 3.0);
@@ -80,6 +80,10 @@ Clip clipFromJson(const QJsonObject &o, const QString &baseDir) {
         c.speed = 1.0;
         c.sourceDuration = Clip::MaxPhotoSeconds;
     }
+    // Never past the source, as setClipValue: a damaged file with an
+    // enormous out would make the timeline build a tick per second of it.
+    if (c.sourceDuration > c.in)
+        c.out = qMin(c.out, c.sourceDuration);
     return c;
 }
 

@@ -70,6 +70,8 @@ Rectangle {
         if (local >= 0) other.show(n, nc.in + local * nc.speed, playing)
         else other.show(n, nc.in, false)
     }
+    function automationPostEditorVisible() { return postEditor.visible }
+    function automationPostEditor(open) { if (open) postEditor.begin(); else postEditor.close() }
     function refresh() { seek(time) }
     function toggle() { playing ? pause() : play() }
     function play() {
@@ -163,6 +165,7 @@ Rectangle {
             // The 9:16 frame, as large as fits.
             Rectangle {
                 id: frame
+                objectName: "previewFrame"
                 readonly property real scaleFactor: height / 1920
                 // Where dragged text and captions snap, in frame pixels: the
                 // frame's center lines and thirds (where the eye goes first),
@@ -193,6 +196,7 @@ Rectangle {
                 // shader that blends them. The filter look applies on top.
                 Item {
                     id: picture
+                    objectName: "previewPicture"
                     anchors.fill: parent
                     layer.enabled: backend.look.filter.length > 0 && backend.look.filterAmount > 0
                     layer.effect: ShaderEffect {

@@ -137,6 +137,8 @@ QImage render(const Overlay &overlay) {
         }
     }
     const QImage lens = big.scaled(w, h, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    if (lens.isNull())
+        return frame;
 
     // A soft shadow under it: the lens's alpha, blurred, offset and tinted.
     const QColor shadowColor = QColor::fromString(overlay.colorOf("shadow"));

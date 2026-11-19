@@ -1,6 +1,7 @@
 <RCC>
     <qresource prefix="/">
         <file alias="Main.qml">Main.qml</file>
+        <file alias="Automation.qml">Automation.qml</file>
         <file alias="Preview.qml">Preview.qml</file>
         <file alias="SocialPreview.qml">SocialPreview.qml</file>
         <file alias="SocialIcon.qml">SocialIcon.qml</file>
@@ -27,7 +28,16 @@
         <file alias="GradePanel.qml">GradePanel.qml</file>
         <file alias="GradeEffect.qml">GradeEffect.qml</file>
         <file alias="PostDialog.qml">PostDialog.qml</file>
+        <file alias="SettingsPage.qml">SettingsPage.qml</file>
         <file alias="FontPicker.qml">FontPicker.qml</file>
         <file alias="CreditsMeter.qml">CreditsMeter.qml</file>
+        <file alias="StatsPage.qml">StatsPage.qml</file>
+        <file alias="ScheduleLogic.js">ScheduleLogic.js</file>
+        <file alias="SchedulePage.qml">SchedulePage.qml</file>
+        <file alias="WorkflowPage.qml">WorkflowPage.qml</file>
+        <file alias="StatsFormat.js">StatsFormat.js</file>
+        <file alias="LineChart.qml">LineChart.qml</file>
+        <file alias="BarChart.qml">BarChart.qml</file>
+        <file alias="Sparkline.qml">Sparkline.qml</file>
     </qresource>
 </RCC>

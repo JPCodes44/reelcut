@@ -23,7 +23,7 @@ HEADERS += \
     src/fisheyetext.h \
     src/colorgrade.h \
     src/posting.h \
-    src/publisher.h src/instagramapi.h src/facebookapi.h src/youtubeapi.h src/postscheduler.h src/higgsfield.h \
+    src/publisher.h src/instagramapi.h src/facebookapi.h src/youtubeapi.h src/postscheduler.h src/higgsfield.h src/stats.h \
     src/silence.h \
     src/theme.h \
     src/thumbprovider.h \
@@ -50,7 +50,7 @@ SOURCES += \
     src/fisheyetext.cpp \
     src/colorgrade.cpp \
     src/posting.cpp \
-    src/publisher.cpp src/instagramapi.cpp src/facebookapi.cpp src/youtubeapi.cpp src/postscheduler.cpp src/higgsfield.cpp \
+    src/publisher.cpp src/instagramapi.cpp src/facebookapi.cpp src/youtubeapi.cpp src/postscheduler.cpp src/higgsfield.cpp src/stats.cpp \
     src/silence.cpp \
     src/theme.cpp \
     src/thumbprovider.cpp \
@@ -63,3 +63,9 @@ INCLUDEPATH += /usr/include/opencv5
 LIBS += -lopencv_core -lopencv_dnn
 
 RESOURCES += src/resources.qrc
+
+HEADERS += src/accounts.h
+SOURCES += src/accounts.cpp
+
+HEADERS += src/automationregistry.h src/appbridge.h
+SOURCES += src/automationregistry.cpp src/appbridge.cpp

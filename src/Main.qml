@@ -23,6 +23,13 @@ ApplicationWindow {
     property bool helpVisible: false
     property bool safeZones: true
     property bool downloadsVisible: true
+    // The Stats page covers the editor while it's open.
+    property bool statsVisible: false
+    property bool scheduleVisible: false
+    property bool workflowVisible: false
+    onStatsVisibleChanged: if (statsVisible) { scheduleVisible = false; workflowVisible = false }
+    onScheduleVisibleChanged: if (scheduleVisible) { statsVisible = false; workflowVisible = false; preview.pause() }
+    onWorkflowVisibleChanged: if (workflowVisible) { statsVisible = false; scheduleVisible = false; preview.pause() }
     property int selectedClip: -1
     property int selectedOverlay: -1
     property int selectedEffect: -1
@@ -30,13 +37,26 @@ ApplicationWindow {
     // What a click last picked: clip, layer, overlay, captions, or none. Delete acts on it.
     property string selectionKind: "none"
     property real playhead: 0
-    // Single-key shortcuts must not fire while the user is typing.
-    readonly property bool typing: activeFocusItem !== null && activeFocusItem.hasOwnProperty("cursorPosition")
+    // Single-key shortcuts must not fire while the user is typing, nor edit
+    // the hidden editor while the Stats page covers it.
+    readonly property bool typing: settingsPage.visible || statsVisible || scheduleVisible || workflowVisible || (activeFocusItem !== null && activeFocusItem.hasOwnProperty("cursorPosition"))
 
     // The color picker's eyedropper: the next click on the preview picks a
     // color from the video and hands it to `callback`. Escape cancels.
     property var eyedropperCallback: null
     function startEyedropper(callback) { eyedropperCallback = callback }
+
+    Automation {
+        windowItem: win
+        previewItem: preview
+        timelineItem: timeline
+        inspectorItem: inspector
+        statsItem: statsPage
+        scheduleItem: schedulePage
+        postItem: postDialog
+        settingsItem: settingsPage
+        confirmationItem: confirm
+    }
 
     function seek(t) {
         if (!isFinite(t)) t = 0
@@ -69,6 +89,39 @@ ApplicationWindow {
         } else if (kind === "layer") {
             selectedLayer = index
             inspector.currentIndex = 0
+        }
+    }
+    // A button on the workflow page: do the step in the editor.
+    function runWorkflowAction(name) {
+        if (name === "addMedia") {
+            backend.addMedia()
+            return
+        }
+        if (name === "export") {
+            backend.exportVideo()
+            return
+        }
+        if (name === "post") {
+            postDialog.openFor("")
+            return
+        }
+        workflowVisible = false
+        if (name === "transcribe") {
+            select("captions", -1)
+            backend.transcribe()
+        } else if (name === "cutSilences") {
+            const i = selectedClip >= 0 ? selectedClip : 0
+            if (backend.clips.length > 0) {
+                select("clip", i)
+                backend.cutSilences(i)
+            } else {
+                backend.notify(qsTr("Add clips first, then cut their silences."), true)
+            }
+        } else if (name === "captions") {
+            select("captions", -1)
+        } else if (name === "hook") {
+            seek(0)
+            select("overlay", backend.addOverlay(0))
         }
     }
     function deleteSelection() {
@@ -126,7 +179,30 @@ ApplicationWindow {
 
     Shortcut { sequence: "Escape"; enabled: win.eyedropperCallback !== null; context: Qt.ApplicationShortcut; onActivated: win.eyedropperCallback = null }
     Shortcut { sequence: "?"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: win.helpVisible = !win.helpVisible }
-    Shortcut { sequence: "Esc"; context: Qt.ApplicationShortcut; onActivated: { win.helpVisible = false; win.selectionKind = "none"; win.contentItem.forceActiveFocus() } }
+    Shortcut {
+        sequence: "Esc"
+        enabled: !postDialog.visible
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (win.scheduleVisible) {
+                if (!schedulePage.closeDetail()) win.scheduleVisible = false
+                return
+            }
+            if (win.workflowVisible) {
+                win.workflowVisible = false
+                return
+            }
+            // On the Stats page, Esc closes a reel's details, then the page.
+            if (win.statsVisible) {
+                if (!statsPage.closeDetail())
+                    win.statsVisible = false
+                return
+            }
+            win.helpVisible = false
+            win.selectionKind = "none"
+            win.contentItem.forceActiveFocus()
+        }
+    }
     Shortcut { sequence: "Q"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: confirm.ask(backend.dirty ? qsTr("Quit without saving your changes?") : qsTr("Quit Reelcut?"), function() { win.closeConfirmed = true; win.close() }) }
     Shortcut { sequence: "Space"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: preview.toggle() }
     Shortcut { sequence: "S"; enabled: !win.typing; context: Qt.ApplicationShortcut; onActivated: backend.split(win.playhead) }
@@ -177,6 +253,7 @@ ApplicationWindow {
 
             // Top bar
             Rectangle {
+                id: topBar
                 Layout.fillWidth: true
                 Layout.preferredHeight: 52
                 color: win.panel
@@ -216,6 +293,42 @@ ApplicationWindow {
                         ToolTip.visible: hovered
                         ToolTip.delay: 500
                         ToolTip.text: qsTr("Download reels from YouTube, Instagram, TikTok or Facebook")
+                    }
+                    ToolButton {
+                        objectName: "settingsButton"
+                        Layout.minimumWidth: implicitWidth
+                        text: qsTr("Settings")
+                        onClicked: settingsPage.openFor("")
+                    }
+                    ToolButton {
+                        objectName: "scheduleToggle"
+                        Layout.minimumWidth: implicitWidth
+                        text: qsTr("Schedule")
+                        checkable: true
+                        checked: win.scheduleVisible
+                        onToggled: win.scheduleVisible = checked
+                    }
+                    ToolButton {
+                        objectName: "workflowToggle"
+                        Layout.minimumWidth: implicitWidth
+                        text: qsTr("Workflow")
+                        checkable: true
+                        checked: win.workflowVisible
+                        onToggled: win.workflowVisible = checked
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("The reel workflow: every stage from research to posting, as a checklist")
+                    }
+                    ToolButton {
+                        objectName: "statsToggle"
+                        Layout.minimumWidth: implicitWidth
+                        text: qsTr("Stats")
+                        checkable: true
+                        checked: win.statsVisible
+                        onToggled: win.statsVisible = checked
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("How your reels are doing on Instagram, Facebook and YouTube")
                     }
                     ToolSeparator {}
                     ButtonGroup { id: platforms }
@@ -338,10 +451,46 @@ ApplicationWindow {
             }
         }
 
+        // Over the editor, under the top bar, so Stats in the top bar closes it too.
+        // Before the toasts and the busy bar, which stay on top of it.
+        StatsPage {
+            id: statsPage
+            onManageAccount: function(platform) { settingsPage.openFor(platform) }
+            anchors.fill: parent
+            anchors.topMargin: topBar.height
+            visible: win.statsVisible
+            onCloseRequested: {
+                win.statsVisible = false
+                win.contentItem.forceActiveFocus()
+            }
+        }
+
+        SchedulePage {
+            id: schedulePage
+            anchors.fill: parent
+            anchors.topMargin: topBar.height
+            visible: win.scheduleVisible
+            onCloseRequested: {
+                win.scheduleVisible = false
+                win.contentItem.forceActiveFocus()
+            }
+            onScheduleRequested: function(platform, publishAt) { postDialog.openScheduled(platform, publishAt) }
+        }
+
+        WorkflowPage {
+            id: workflowPage
+            objectName: "workflowPage"
+            anchors.fill: parent
+            anchors.topMargin: topBar.height
+            visible: win.workflowVisible
+            onActionRequested: function(name) { win.runWorkflowAction(name) }
+        }
+
         // Videos can be dropped anywhere on the window.
         // Over the timeline's video lane, they go in where they're dropped.
         DropArea {
             id: windowDrop
+            enabled: !win.statsVisible && !win.scheduleVisible && !win.workflowVisible
             anchors.fill: parent
             keys: ["text/uri-list"]
             function timelineIndex(x, y) {
@@ -456,7 +605,8 @@ ApplicationWindow {
             onAccepted: action()
         }
 
-        PostDialog { id: postDialog }
+        SettingsPage { id: settingsPage }
+        PostDialog { id: postDialog; onManageAccounts: { close(); settingsPage.openFor(platform) } }
 
         HelpOverlay {
             anchors.fill: parent

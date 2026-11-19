@@ -23,11 +23,13 @@
 #include <QUrl>
 
 #include "backend.h"
+#include "appbridge.h"
 #include "downloads.h"
 #include "higgsfield.h"
 #include "jobs.h"
 #include "mcpserver.h"
 #include "portalfilepicker.h"
+#include "stats.h"
 #include "theme.h"
 #include "thumbprovider.h"
 #include "waveformprovider.h"
@@ -111,6 +113,17 @@ int main(int argc, char *argv[]) {
     if (!qEnvironmentVariableIsSet("QT_FFMPEG_DECODING_HW_DEVICE_TYPES"))
         qputenv("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", "vaapi,cuda");
 
+#ifdef Q_OS_LINUX
+    // Without a display Qt aborts (and dumps core) creating the platform
+    // integration; say what's wrong instead.
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM") && qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")
+        && qEnvironmentVariableIsEmpty("DISPLAY")) {
+        QTextStream(stderr) << "reelcut: no display found (WAYLAND_DISPLAY and DISPLAY are unset).\n"
+                               "Run it from a desktop session, or use `reelcut export` without a window.\n";
+        return 1;
+    }
+#endif
+
     QGuiApplication app(argc, argv);
     app.setApplicationName("reelcut");
     app.setApplicationVersion("0.4.1");
@@ -133,6 +146,9 @@ int main(int argc, char *argv[]) {
     Backend backend(&picker, thumbs, &theme);
     Downloads downloads;
     HiggsfieldCredits higgsfield;
+    // Reads the accounts of Backend's publishers: made after the Backend, so
+    // it's gone before them, and before the engine that shows it.
+    Stats stats(backend.instagram(), backend.facebook(), backend.youtube());
 
     QQmlApplicationEngine engine;
     // The engine takes ownership of the image provider.
@@ -144,9 +160,16 @@ int main(int argc, char *argv[]) {
     engine.rootContext()->setContextProperty("backend", &backend);
     engine.rootContext()->setContextProperty("downloads", &downloads);
     engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
+    engine.rootContext()->setContextProperty("stats", &stats);
     engine.load(QUrl("qrc:/Main.qml"));
     if (engine.rootObjects().isEmpty())
         return 1;
+
+    AppBridge bridge;
+    bridge.attach(&backend,&downloads,&stats,&higgsfield,qobject_cast<QQuickWindow *>(engine.rootObjects().first()));
+    bridge.registry().add("theme",&theme);
+    bridge.registry().add("language",&translator);
+    if (!bridge.listen()) qWarning("reelcut: the live MCP interface could not be started");
 
     // A project opens as is; videos are added as clips.
     QList<QUrl> clips;

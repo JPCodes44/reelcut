@@ -41,9 +41,16 @@ public:
     void publish(const PostRequest &post) override;
 
     QString accountFile() const;
+    QString channelId() const { return m_channelId; }
+    QDateTime accessExpires() const { return m_accessExpires; }
+    QDateTime refreshExpires() const { return m_refreshExpires; }
     // Opens Google's sign-in in the browser; connectFinished says how it went.
     void connectClient(const QString &clientId, const QString &clientSecret);
     void disconnect();
+    // Calls `then` with a fresh access token (renewed if needed), or an
+    // error, for reading the channel's videos and analytics (src/stats.h).
+    // Not called if `context` is gone by then.
+    void freshAccess(QObject *context, const std::function<void(const QString &token, const QString &error)> &then);
 
     // How the browser is opened; tests catch it instead.
     std::function<void(const QUrl &)> openUrl;
@@ -56,6 +63,7 @@ public:
 
 signals:
     void connectFinished(bool ok, const QString &message);
+    void tokenTimesChanged();
 
 private:
     void load();
@@ -72,7 +80,8 @@ private:
     QNetworkAccessManager *m_net;
     QString m_clientId, m_clientSecret, m_refreshToken, m_channelId, m_channelTitle;
     QString m_accessToken;
-    QDateTime m_accessExpires;
+    QDateTime m_accessExpires, m_refreshExpires;
+    int m_authGeneration = 0;
     bool m_busy = false;
 
     // While signing in.

@@ -15,17 +15,21 @@
 #include <QTemporaryDir>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QLocalSocket>
 #include <QUrlQuery>
 #include <QtTest>
 
 #include <functional>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QJSEngine>
 #include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickWindow>
 
 #include "backend.h"
+#include "automationregistry.h"
+#include "appbridge.h"
 #include "downloads.h"
 #include "waveformprovider.h"
 #include "thumbprovider.h"
@@ -49,6 +53,7 @@
 #include "media.h"
 #include "project.h"
 #include "silence.h"
+#include "stats.h"
 #include "theme.h"
 #include "transcript.h"
 #include "transitions.h"
@@ -440,6 +445,69 @@ public:
         };
     }
 };
+
+// The three publishers and Stats, all reading their files from `state` and
+// talking to one stand-in server at `base`.
+struct StatsRig {
+    InstagramApi instagram;
+    FacebookApi facebook;
+    YouTubeApi youtube;
+    Stats stats{&instagram, &facebook, &youtube};
+
+    StatsRig(const QString &state, const QString &base) {
+        instagram.stateDir = facebook.stateDir = youtube.stateDir = stats.stateDir = state;
+        instagram.graphBase = facebook.graphBase = base;
+        youtube.tokenUrl = base + "/token";
+        youtube.apiBase = base + "/youtube/v3";
+        stats.youtubeAnalyticsBase = base + "/v2";
+        // The publishers and Stats read their files once the loop runs.
+        QTest::qWait(20);
+    }
+    bool refreshed() {
+        stats.refresh();
+        return QTest::qWaitFor([this] { return !stats.busy(); }, 15000);
+    }
+    QVariantMap reel(const QString &id) const {
+        for (const QVariant &r : stats.reels())
+            if (r.toMap().value("id").toString() == id)
+                return r.toMap();
+        return {};
+    }
+    QVariantMap account(const QString &platform) const {
+        for (const QVariant &a : stats.accounts())
+            if (a.toMap().value("platform").toString() == platform)
+                return a.toMap();
+        return {};
+    }
+};
+
+// Meta's insights shapes: a lifetime value in values[], or total_value.
+static QJsonObject insight(const QString &name, const QJsonValue &value, bool total = false) {
+    if (total)
+        return {{"name", name}, {"period", "lifetime"}, {"total_value", QJsonObject{{"value", value}}}};
+    return {{"name", name}, {"period", "lifetime"}, {"values", QJsonArray{QJsonObject{{"value", value}}}}};
+}
+
+static QJsonObject igMedia(const QString &id, const QString &time, int likes, int comments,
+                           const QString &product = "REELS") {
+    return {{"id", id}, {"caption", "Reel " + id}, {"media_type", "VIDEO"}, {"media_product_type", product},
+            {"permalink", "https://www.instagram.com/reel/" + id + "/"}, {"thumbnail_url", "https://cdn/" + id + ".jpg"},
+            {"timestamp", time}, {"like_count", likes}, {"comments_count", comments}};
+}
+
+static void seedOne(const QString &state, const QString &platform) {
+    if (platform == "instagram")
+        Net::savePrivate(state + "/instagram.json",
+                         {{"token", "good-token"}, {"userId", "17841400000000001"}, {"username", "reelcut_test"},
+                          {"issued", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}});
+    else if (platform == "facebook")
+        Net::savePrivate(state + "/facebook.json",
+                         {{"pageId", "1000000000000001"}, {"pageName", "Page 1"}, {"pageToken", "page-token-1"}});
+    else
+        Net::savePrivate(state + "/youtube.json",
+                         {{"clientId", "cid.apps.googleusercontent.com"}, {"clientSecret", "csecret"},
+                          {"refreshToken", "1//refresh"}, {"channelId", "UC123"}, {"channelTitle", "JP Runs"}});
+}
 
 class ReelcutTests : public QObject {
     Q_OBJECT
@@ -3631,8 +3699,9 @@ private slots:
         auto *later = findItem(window->contentItem(), "postScheduleLater");
         QVERIFY(later);
         QTRY_VERIFY(later->isVisible() && later->isEnabled());
-        later->setProperty("checked", true);
-        QMetaObject::invokeMethod(later, "toggled");
+        // Queueing into open slots is the default; pick a set time instead.
+        QVERIFY(dialog->property("queueing").toBool());
+        QMetaObject::invokeMethod(later, "clicked");
         QTRY_VERIFY(dialog->property("scheduling").toBool());
         auto *when = findItem(window->contentItem(), "postWhen");
         auto *next = findItem(window->contentItem(), "postNext");
@@ -3663,6 +3732,84 @@ private slots:
             QVERIFY2(!call.path.endsWith("/media") && !call.path.endsWith("/media_publish"), qPrintable(call.path));
         QTRY_COMPARE(backend.scheduledPosts().size(), 1);
         QTRY_VERIFY(findItem(window->contentItem(), "scheduledPost") != nullptr);
+    }
+
+    void postDialogQueuesIntoNextOpenSlots()
+    {
+        QTemporaryDir dir, state, themeDir, movies;
+        QVERIFY(runFfmpeg({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360",
+                           "-frames:v", "1", dir.filePath("photo.jpg")}));
+        Project p;
+        p.clips = {media::clipFor(media::probe(dir.filePath("photo.jpg")), 1.0)};
+        write(dir.filePath("q.reel"), QJsonDocument(p.toJson(dir.path())).toJson());
+
+        FakeInstagram instagram;
+        FakeConvex convex;
+        QQuickStyle::setStyle("Material");
+        Theme theme(themeDir.path());
+        Backend backend(nullptr, nullptr, &theme, nullptr, state.path());
+        backend.openUrl = [](const QUrl &) {};
+        backend.revealFile = [](const QString &) {};
+        backend.postFolder = movies.path();
+        backend.instagram()->graphBase = instagram.base();
+        QSignalSpy connected(backend.instagram(), &InstagramApi::connectFinished);
+        backend.connectInstagram("good-token");
+        QVERIFY(connected.wait(5000));
+        backend.setupScheduler(convex.base(), convex.key);
+        QVERIFY(backend.openFile(dir.filePath("q.reel")));
+        QVariantMap plan = backend.property("schedulePreferences").toMap();
+        plan["instagram"] = QVariantMap{{"startMinute", 0}, {"spacingMinutes", 60}};
+        QVERIFY(backend.setProperty("schedulePreferences", plan));
+
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir = state.path();
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("downloads", testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
+        engine.load(QUrl("qrc:/Main.qml"));
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360, 900);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        QMetaObject::invokeMethod(findItem(window->contentItem(), "postButton"), "clicked");
+        QQuickItem *caption = nullptr;
+        QTRY_VERIFY((caption = findItem(window->contentItem(), "postCaption")) != nullptr);
+        QMetaObject::invokeMethod(findItem(window->contentItem(), "postTo-instagram"), "clicked");
+        caption->setProperty("text", "Queued");
+        QObject *dialog = window->findChild<QObject *>("postDialog");
+        // Queueing is the default: no publishing now.
+        QVERIFY(dialog->property("queueing").toBool());
+        dialog->setProperty("queueCount", 3);
+        const QVariantList expected = backend.nextOpenSlots({"instagram"}, 3);
+        QCOMPARE(expected.size(), 3);
+        QTRY_COMPARE(dialog->property("queueSlots").toList(), expected);
+        auto *next = findItem(window->contentItem(), "postNext");
+        QCOMPARE(next->property("text").toString(), QString("Add to queue"));
+        QTRY_VERIFY(next->isEnabled());
+
+        QSignalSpy scheduled(&backend, &Backend::postScheduled);
+        QSignalSpy published(&backend, &Backend::postPublished);
+        convex.calls.clear();
+        QMetaObject::invokeMethod(next, "clicked");
+        QVERIFY(scheduled.wait(120000));
+        QVERIFY2(scheduled.first().at(0).toBool(), qPrintable(scheduled.first().at(1).toString()));
+        QVERIFY(published.isEmpty());
+        QList<qint64> times;
+        for (const auto &call : convex.calls)
+            if (call.function == "posts:schedule") times << qint64(call.args.value("publishAt").toDouble());
+        QCOMPARE(times.size(), 3);
+        for (int i = 0; i < 3; ++i)
+            QCOMPARE(times[i], qint64(expected[i].toMap().value("publishAt").toDouble()));
+        for (const auto &call : instagram.calls)
+            QVERIFY2(!call.path.endsWith("/media") && !call.path.endsWith("/media_publish"), qPrintable(call.path));
+        // Those slots are taken now: the next three are later ones.
+        QTRY_COMPARE(backend.scheduledPosts().size(), 3);
+        const QVariantList after = backend.nextOpenSlots({"instagram"}, 1);
+        QCOMPARE(after.size(), 1);
+        QVERIFY(after.first().toMap().value("publishAt").toDouble() > expected.last().toMap().value("publishAt").toDouble());
     }
 
     void instagramUnifiedLoginConnectsAndPublishes()
@@ -3863,7 +4010,8 @@ private slots:
         QTRY_COMPARE(dialog->property("stage").toString(), QString("write"));
         QVERIFY(dialog->property("publishing").toBool());
 
-        // Publish: export, then the API, then the post's link.
+        // Publish now (not the default): export, then the API, then the post's link.
+        QMetaObject::invokeMethod(findItem(window->contentItem(), "postNow"), "clicked");
         findItem(window->contentItem(), "postCaption")->setProperty("text", "Hello");
         QSignalSpy published(&backend, &Backend::postPublished);
         QMetaObject::invokeMethod(findItem(window->contentItem(), "postNext"), "clicked");
@@ -3887,6 +4035,364 @@ private slots:
     }
 
     // Facebook Pages through the Reels Publishing API, against a stand-in.
+    void automationInventoryCoversFunctionalApis()
+    {
+        const auto inventory=AutomationRegistry::inventory();
+        QCOMPARE(inventory.value("unsupported").toArray().size(),0);
+        QVERIFY(inventory.value("exposedMethods").toInt()>80);
+        QVERIFY(inventory.value("mappedMethods").toInt()>=8);
+        QCOMPARE(inventory.value("coveragePercent").toInt(),100);
+        if(!qEnvironmentVariableIsEmpty("REELCUT_MCP_INVENTORY"))write(qEnvironmentVariable("REELCUT_MCP_INVENTORY"),QJsonDocument(inventory).toJson());
+        const auto tools=AutomationRegistry::tools();
+        bool posting=false,accounts=false,layers=false;
+        for (const auto &tool:tools) {
+            const auto name=tool.toObject().value("name").toString();
+            posting |= name=="app_backend_post_to";
+            accounts |= name=="app_accounts_connect_token";
+            layers |= name=="app_backend_move_clip_to_layer";
+        }
+        QVERIFY(posting&&accounts&&layers);
+    }
+
+    void automationLiveCallsUseBackendAndRejectUnknownMethods()
+    {
+        QTemporaryDir state; Backend backend(nullptr,nullptr,nullptr,nullptr,state.path());
+        AutomationRegistry registry; registry.add("backend",&backend); registry.add("accounts",backend.accountSettings());
+        QTest::qWait(1);
+        auto changed=registry.invoke("backend","setPlatform",{{"platform","facebook"}});
+        QVERIFY2(!changed.value("isError").toBool(),qPrintable(QString::fromUtf8(QJsonDocument(changed).toJson())));
+        QCOMPARE(backend.platform(),QString("facebook"));
+        auto bad=registry.invoke("backend","deleteLater",{});QVERIFY(bad.value("isError").toBool());
+        bad=registry.invoke("backend","setPlatform",{{"platform",99}});QVERIFY(bad.value("isError").toBool());
+        bad=registry.invoke("accounts","token",{});QVERIFY(bad.value("isError").toBool());
+        const auto snapshot=registry.state("accounts");
+        QVERIFY(!snapshot.contains("token"));
+        QCOMPARE(snapshot.value("entries").toArray().size(),4);
+    }
+
+    void automationLocalSocketControlsRealBackend()
+    {
+        QTemporaryDir state; Backend backend(nullptr,nullptr,nullptr,nullptr,state.path());
+        AppBridge bridge(state.path()); bridge.registry().add("backend",&backend); bridge.registry().add("accounts",backend.accountSettings());
+        QVERIFY(bridge.listen());
+        auto result=AppBridgeClient::call(state.path(),{{"action","invoke"},{"component","backend"},{"method","setPlatform"},{"arguments",QJsonObject{{"platform","youtube"}}}});
+        QVERIFY2(!result.value("isError").toBool(),qPrintable(QString::fromUtf8(QJsonDocument(result).toJson())));
+        QCOMPARE(backend.platform(),QString("youtube"));
+        auto instances=AppBridgeClient::instances(state.path());QCOMPARE(instances.size(),1);
+        auto status=AppBridgeClient::call(state.path(),{{"action","state"},{"component","backend"}});
+        QCOMPARE(status.value("state").toObject().value("platform").toString(),QString("youtube"));
+        AppBridge second(state.path());second.registry().add("backend",&backend);QVERIFY(second.listen());
+        auto ambiguous=AppBridgeClient::call(state.path(),{{"action","state"},{"component","backend"}});
+        QVERIFY(ambiguous.value("isError").toBool());
+        auto explicitCall=AppBridgeClient::call(state.path(),{{"action","state"},{"component","backend"}},bridge.instanceId());
+        QVERIFY(!explicitCall.value("isError").toBool());
+    }
+
+    void automationUiControlsLiveViewsAndPostDraft()
+    {
+        QTemporaryDir state,themeDir;
+        QImage image(64,64,QImage::Format_RGB32);image.fill(Qt::blue);QVERIFY(image.save(state.filePath("photo.png")));
+        Project project;project.clips={media::clipFor(media::probe(state.filePath("photo.png")),4.0)};
+        write(state.filePath("draft.reel"),QJsonDocument(project.toJson(state.path())).toJson());
+        Theme theme(themeDir.path());Backend backend(nullptr,nullptr,&theme,nullptr,state.path());QVERIFY(backend.openFile(state.filePath("draft.reel")));
+        HiggsfieldCredits credits;credits.stateDir=state.path();
+        Stats stats(backend.instagram(),backend.facebook(),backend.youtube());stats.stateDir=state.path();
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme",&theme);engine.rootContext()->setContextProperty("backend",&backend);
+        engine.rootContext()->setContextProperty("downloads",testDownloads());engine.rootContext()->setContextProperty("higgsfield",&credits);engine.rootContext()->setContextProperty("stats",&stats);
+        engine.load(QUrl("qrc:/Main.qml"));QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window=qobject_cast<QQuickWindow *>(engine.rootObjects().first());window->resize(1360,860);window->show();QVERIFY(QTest::qWaitForWindowExposed(window));
+        AppBridge bridge(state.path());bridge.attach(&backend,testDownloads(),&stats,&credits,window);QVERIFY(bridge.listen());
+        auto action=[&](const QString &name,const QJsonObject &args){return AppBridgeClient::call(state.path(),{{"action","invoke"},{"component","ui"},{"method",name},{"arguments",args}});};
+        auto settings=action("navigate",{{"page","settings"},{"platform","facebook"}});
+        QVERIFY2(!settings.value("isError").toBool(),qPrintable(QString::fromUtf8(QJsonDocument(settings).toJson())));
+        QCOMPARE(settings.value("result").toObject().value("page").toString(),QString("settings"));
+        auto *token=findItem(window->contentItem(),"settingsToken");QVERIFY(token);token->setProperty("text","UNSUBMITTED-UI-SECRET");
+        auto snapshot=action("state",{});QVERIFY(!QJsonDocument(snapshot).toJson().contains("UNSUBMITTED-UI-SECRET"));
+        QTest::qWait(80);
+        auto privateShot=AppBridgeClient::call(state.path(),{{"action","screenshot"}});
+        QVERIFY(privateShot.value("redactedFields").toArray().contains("settingsToken"));
+        QVERIFY(!QImage::fromData(QByteArray::fromBase64(privateShot.value("data").toString().toLatin1())).isNull());
+        auto tab=action("settingsTab",{{"tab","scheduling"}});
+        QVERIFY(!tab.value("isError").toBool());
+        QCOMPARE(tab.value("result").toObject().value("settings").toObject().value("tab").toString(),QString("scheduling"));
+        auto timing=action("scheduleTiming",{{"fields",QJsonObject{{"facebook",QJsonObject{{"start","06:00"},{"spacingMinutes",90}}}}},{"apply",true}});
+        QVERIFY2(!timing.value("isError").toBool(),qPrintable(QString::fromUtf8(QJsonDocument(timing).toJson())));
+        QCOMPARE(timing.value("result").toObject().value("draft").toObject().value("facebook").toObject().value("start").toString(),QString("06:00"));
+        QVERIFY(!action("navigate",{{"page","editor"},{"platform",""}}).value("isError").toBool());
+        QVERIFY(!action("seek",{{"seconds",1.25}}).value("isError").toBool());QCOMPARE(window->property("playhead").toDouble(),1.25);
+        QVERIFY(!action("setOptions",{{"options",QJsonObject{{"safeZones",false},{"showAppUi",false},{"timelineZoom",2}}}}).value("isError").toBool());
+        QVERIFY(!window->property("safeZones").toBool());
+        QVERIFY(!action("setOptions",{{"options",QJsonObject{{"musicHeight",320}}}}).value("isError").toBool());
+        const auto selectionBefore=window->property("selectionKind");
+        QVERIFY(!action("select",{{"kind","music"},{"index",0}}).value("isError").toBool());
+        QCOMPARE(window->property("selectionKind"),selectionBefore);
+        QVERIFY(action("setOptions",{{"options",QJsonObject{{"safeZones",true},{"unknown",42}}}}).value("isError").toBool());
+        QVERIFY(!window->property("safeZones").toBool()); // invalid batches are atomic
+        QVERIFY(!action("postOpen",{{"platform","youtube"}}).value("isError").toBool());
+        auto draft=action("postDraft",{{"fields",QJsonObject{{"caption","A draft, not a post"},{"title","Test"},{"platforms",QJsonArray{"youtube"}}}}});
+        QVERIFY2(!draft.value("isError").toBool(),qPrintable(QString::fromUtf8(QJsonDocument(draft).toJson())));
+        QCOMPARE(draft.value("result").toObject().value("caption").toString(),QString("A draft, not a post"));
+        QVERIFY(!backend.busy());
+        QVERIFY(action("postDraft",{{"fields",QJsonObject{{"platforms",QJsonArray{"youtube","tiktok"}}}}}).value("isError").toBool());
+        auto ordered=action("postDraft",{{"fields",QJsonObject{{"platforms",QJsonArray{"youtube","facebook","instagram"}}}}});
+        QCOMPARE(ordered.value("result").toObject().value("platforms").toArray(),QJsonArray({"instagram","facebook","youtube"}));
+        QVERIFY(action("postDraft",{{"fields",QJsonObject{{"token","forbidden"}}}}).value("isError").toBool());
+        QVERIFY(action("postSubmit",{{"unknown","must not submit"}}).value("isError").toBool());
+        QVERIFY(!action("closeDialogs",{}).value("isError").toBool());
+        QVERIFY(!action("scheduleDay",{{"date","2027-03-14"}}).value("isError").toBool());
+        QVERIFY(!action("statsFilter",{{"options",QJsonObject{{"platform","facebook"},{"periodDays",7},{"sortKey","views"}}}}).value("isError").toBool());
+        auto invalidDate=action("scheduleDay",{{"date","2027-02-30"}});QVERIFY(invalidDate.value("isError").toBool());
+        auto calendarSlots=action("scheduleSlots",{{"platform","facebook"}});QVERIFY(calendarSlots.value("result").toObject().value("slots").isArray());
+        FakeHttp fake;fake.answer=[](const FakeHttp::Call &){return FakeHttp::json({{"data",QJsonObject{{"is_valid",false}}}});};
+        backend.facebook()->graphBase=fake.base();
+        auto connected=AppBridgeClient::call(state.path(),{{"action","invoke"},{"component","accounts"},{"method","connectToken"},{"arguments",QJsonObject{{"platform","facebook"},{"token","iVBOR"}}}});
+        QVERIFY(!connected.value("isError").toBool());
+        QTRY_VERIFY(!backend.accountSettings()->busy());
+        QTest::qWait(200);
+        const auto shot=AppBridgeClient::call(state.path(),{{"action","screenshot"},{"arguments",QJsonObject{{"width",540}}}});
+        QVERIFY(!shot.value("isError").toBool());QCOMPARE(shot.value("mimeType").toString(),QString("image/png"));
+        QVERIFY(!QImage::fromData(QByteArray::fromBase64(shot.value("data").toString().toLatin1())).isNull());
+        const auto color=AppBridgeClient::call(state.path(),{{"action","sample_color"},{"arguments",QJsonObject{{"x",0.5},{"y",0.5}}}});
+        QVERIFY2(!color.value("isError").toBool(),qPrintable(QString::fromUtf8(QJsonDocument(color).toJson())));
+        QVERIFY(QColor(color.value("color").toString()).isValid());
+        window->grabWindow().save("/tmp/reelcut-mcp-ui.png");
+    }
+
+    void automationSecretsAndAsyncEventsAreSafe()
+    {
+        QTemporaryDir state;Backend backend(nullptr,nullptr,nullptr,nullptr,state.path());
+        HiggsfieldCredits credits;credits.stateDir=state.path();Stats stats(backend.instagram(),backend.facebook(),backend.youtube());stats.stateDir=state.path();
+        Downloads downloads(nullptr,state.filePath("downloads"));
+        FakeHttp api;api.answer=[](const FakeHttp::Call &){return FakeHttp::json({{"data",QJsonObject{{"is_valid",false}}}});};
+        backend.facebook()->graphBase=api.base();
+        AppBridge bridge(state.path());bridge.attach(&backend,&downloads,&stats,&credits,nullptr);QVERIFY(bridge.listen());QTest::qWait(1);
+        auto rejected=AppBridgeClient::call(state.path(),{{"action","invoke"},{"component","backend"},{"method","notReal"},{"arguments",QJsonObject{{"token","text"}}}});
+        QVERIFY(rejected.value("isError").toBool());
+        auto ordinary=AppBridgeClient::call(state.path(),{{"action","invoke"},{"component","backend"},{"method","notify"},{"arguments",QJsonObject{{"text","ordinary text"},{"error",false}}}});
+        QVERIFY(!ordinary.value("isError").toBool());
+        auto ordinaryState=AppBridgeClient::call(state.path(),{{"action","state"},{"component","backend"}});
+        QCOMPARE(ordinaryState.value("state").toObject().value("message").toString(),QString("ordinary text"));
+        backend.addOverlay(0);
+        auto edited=AppBridgeClient::call(state.path(),{{"action","invoke"},{"component","backend"},{"method","setOverlayValue"},{"arguments",QJsonObject{{"index",0},{"key","text"},{"value","ordinary text"}}}});
+        QVERIFY(!edited.value("isError").toBool());
+        auto editorState=AppBridgeClient::call(state.path(),{{"action","state"},{"component","backend"}});
+        QCOMPARE(editorState.value("state").toObject().value("overlays").toArray().first().toObject().value("text").toString(),QString("ordinary text"));
+        const QString secret="MCP-CREDENTIAL-SECRET-123";
+        auto accepted=AppBridgeClient::call(state.path(),{{"action","invoke"},{"component","accounts"},{"method","connectToken"},{"arguments",QJsonObject{{"platform","facebook"},{"token",secret}}}});
+        QVERIFY(!accepted.value("isError").toBool());QVERIFY(!QJsonDocument(accepted).toJson().contains(secret.toUtf8()));
+        QTRY_VERIFY(!backend.accountSettings()->busy());
+        backend.notify("Reflected credential: "+secret,true);
+        auto snapshot=AppBridgeClient::call(state.path(),{{"action","state"},{"component","backend"}});
+        QVERIFY(!QJsonDocument(snapshot).toJson().contains(secret.toUtf8()));
+        QVERIFY(snapshot.value("state").toObject().value("message").toString().contains("[hidden]"));
+        auto events=AppBridgeClient::call(state.path(),{{"action","events"},{"after",0}});
+        QVERIFY(!QJsonDocument(events).toJson().contains(secret.toUtf8()));
+        bool completion=false;for(const auto &event:events.value("events").toArray())completion|=event.toObject().value("type")=="account_connection";
+        QVERIFY(completion);
+        auto readonly=AppBridgeClient::call(state.path(),{{"action","set_property"},{"component","backend"},{"property","accountSettings"},{"value",123}});
+        QVERIFY(readonly.value("isError").toBool());
+        auto tooLarge=AppBridgeClient::call(state.path(),{{"action","invoke"},{"component","backend"},{"method","notify"},{"arguments",QJsonObject{{"text",QString(1024*1024+1,'x')},{"error",true}}}});
+        QVERIFY(tooLarge.value("isError").toBool());
+        QVERIFY(!(QFileInfo(bridge.socketPath()).permissions() & QFileDevice::ReadOther));
+        QVERIFY(!(QFileInfo(bridge.socketPath()).permissions() & QFileDevice::WriteGroup));
+    }
+
+    void automationFileEquivalentsPreserveUnsavedEdits()
+    {
+        QTemporaryDir state;Backend backend(nullptr,nullptr,nullptr,nullptr,state.path());AutomationRegistry registry;registry.add("backend",&backend);
+        backend.setPostText("Unsaved caption","tags");QVERIFY(backend.dirty());
+        auto refused=registry.invoke("backend","newProject",{});QVERIFY(refused.value("isError").toBool());QVERIFY(backend.dirty());
+        auto saved=registry.invoke("backend","selectFiles",{{"purpose","save_project"},{"paths",QJsonArray{state.filePath("saved.reel")}}});
+        QVERIFY2(!saved.value("isError").toBool(),qPrintable(QString::fromUtf8(QJsonDocument(saved).toJson())));
+        QVERIFY(saved.value("result").toBool());QVERIFY(QFile::exists(state.filePath("saved.reel")));QVERIFY(!backend.dirty());
+        backend.setPostText("Another change","tags");
+        auto discarded=registry.invoke("backend","newProject",{{"discard_unsaved",true}});QVERIFY(!discarded.value("isError").toBool());QVERIFY(!backend.dirty());
+    }
+
+    void mcpAdvertisesLiveToolsWithoutRequiringAProject()
+    {
+        QTemporaryDir state; McpServer mcp(state.path());
+        auto response=mcp.handle({{"jsonrpc","2.0"},{"id",1},{"method","tools/list"}});
+        const auto tools=response.value("result").toObject().value("tools").toArray();
+        bool editor=false,publish=false,stats=false,downloads=false;
+        for (const auto &t:tools) {
+            const auto tool=t.toObject();const auto name=tool.value("name").toString();
+            editor |= name=="edit_clip";
+            if (name=="app_backend_post_to") {publish=true;QVERIFY(!tool.value("annotations").toObject().value("readOnlyHint").toBool());}
+            stats |= name=="app_stats_refresh";
+            downloads |= name=="app_downloads_download";
+        }
+        QVERIFY(editor&&publish&&stats&&downloads);
+        const auto missing=call(mcp,"get_app_state",{});
+        QVERIFY(missing.value("isError").toBool());
+    }
+
+    void statsPermissionNoticeOffersDirectRepairLinks()
+    {
+        QTemporaryDir state, themeDir; seedOne(state.path(), "facebook");
+        FakeHttp fake;
+        fake.answer = [](const FakeHttp::Call &c) {
+            if (c.path.endsWith("/insights")) return FakeHttp::json({{"error",QJsonObject{{"message","Missing permission"},{"code",200}}}},403);
+            if (c.path.endsWith("/video_reels")) return FakeHttp::json({{"data",QJsonArray{}}});
+            return FakeHttp::json({{"followers_count",3}});
+        };
+        StatsRig rig(state.path(),fake.base()); QVERIFY(rig.refreshed());
+        QCOMPARE(rig.account("facebook").value("needsPermission").toString(),QString("read_insights"));
+        Theme theme(themeDir.path()); Backend backend(nullptr,nullptr,&theme,nullptr,state.path());
+        QUrl opened; backend.openUrl=[&](const QUrl &url){opened=url;};
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty("stats",&rig.stats);
+        engine.rootContext()->setContextProperty("backend",&backend);
+        engine.rootContext()->setContextProperty("theme",&theme);
+        QQmlComponent component(&engine,QUrl("qrc:/StatsPage.qml"));
+        std::unique_ptr<QObject> object(component.create());
+        QVERIFY2(object,qPrintable(component.errorString()));
+        auto *page=qobject_cast<QQuickItem *>(object.get()); QVERIFY(page);
+        QQuickWindow window;window.resize(1100,740);page->setParentItem(window.contentItem());page->setSize(QSizeF(1100,740));window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTRY_VERIFY(findItem(page,"statsTokenTools-facebook"));
+        auto *permissions=findItem(page,"statsAppPermissions-facebook"); QVERIFY(permissions); QVERIFY(permissions->isVisible());
+        QMetaObject::invokeMethod(permissions,"clicked");
+        QCOMPARE(opened,QUrl("https://developers.facebook.com/apps/"));
+        QMetaObject::invokeMethod(findItem(page,"statsTokenTools-facebook"),"clicked");
+        QCOMPARE(opened,QUrl("https://developers.facebook.com/tools/explorer/"));
+        QMetaObject::invokeMethod(findItem(page,"statsTokenDebugger-facebook"),"clicked");
+        QCOMPARE(opened,QUrl("https://developers.facebook.com/tools/debug/accesstoken/"));
+        QSignalSpy settings(page,SIGNAL(manageAccount(QString)));
+        QMetaObject::invokeMethod(findItem(page,"statsAccountSettings-facebook"),"clicked");
+        QCOMPARE(settings.size(),1); QCOMPARE(settings.first().at(0).toString(),QString("facebook"));
+        auto *text=findItem(page,"statsNoticeText-facebook"); QVERIFY(text);
+        QVERIFY(text->property("text").toString().contains("Settings"));
+        QVERIFY(!text->property("text").toString().contains("Post dialog"));
+        window.grabWindow().save("/tmp/reelcut-token-help.png");
+        page->setParentItem(nullptr);
+    }
+
+    void accountSettingsUsesPublishersAndPersistsExpiry()
+    {
+        QTemporaryDir state;
+        FakeHttp server;
+        bool invalidPage = false;
+        server.answer = [&](const FakeHttp::Call &c) {
+            if (c.path == "/debug_token") {
+                const auto input = c.query.queryItemValue("input_token");
+                return FakeHttp::json({{"data", QJsonObject{{"is_valid", input != "bad-user" && !(invalidPage && input == "page-private")},
+                    {"expires_at", 0}, {"data_access_expires_at", 2000000000}}}});
+            }
+            if (c.path == "/me/accounts") return FakeHttp::json({{"data", QJsonArray{QJsonObject{{"id", "100"}, {"name", "My Page"}, {"access_token", "page-private"}}}}});
+            if (c.query.queryItemValue("fields").contains("user_id")) return FakeHttp::json({{"user_id", "17841400000000001"}, {"username", "my_ig"}});
+            return FakeHttp::json({{"id", "100"}, {"name", "My Page"}});
+        };
+        {
+            Backend backend(nullptr,nullptr,nullptr,nullptr,state.path());
+            backend.instagram()->graphBase = server.base(); backend.facebook()->graphBase = server.base();
+            QTest::qWait(1);
+            backend.connectInstagram("legacy-private");
+            QTRY_VERIFY(!backend.accountSettings()->busy());
+            QCOMPARE(backend.instagramUser(), QString("my_ig"));
+            backend.connectFacebook("user-private");
+            QTRY_VERIFY(!backend.accountSettings()->busy());
+            QCOMPARE(backend.facebookPage(), QString("My Page"));
+            const auto entry = backend.accountSettings()->entries()[1].toMap();
+            QCOMPARE(entry.value("expiresAt").toLongLong(), 0LL);
+            QCOMPARE(entry.value("dataAccessExpiresAt").toLongLong(), 2000000000LL);
+            QVERIFY(!QJsonDocument::fromVariant(backend.accountSettings()->entries()).toJson().contains("page-private"));
+            QVERIFY(!readAll(state.filePath("account-status.json")).contains("page-private"));
+            backend.connectFacebook("bad-user"); QTRY_VERIFY(!backend.accountSettings()->busy());
+            QCOMPARE(backend.facebook()->pageToken(), QString("page-private"));
+            QCOMPARE(backend.accountSettings()->entries()[1].toMap().value("status").toString(), QString("Connected"));
+            invalidPage = true;
+            backend.connectFacebook("user-private"); QTRY_VERIFY(!backend.accountSettings()->busy());
+            QCOMPARE(backend.facebook()->pageToken(), QString("page-private"));
+            QCOMPARE(backend.accountSettings()->entries()[1].toMap().value("status").toString(), QString("Connected"));
+        }
+        Backend reloaded(nullptr,nullptr,nullptr,nullptr,state.path());
+        QTest::qWait(10);
+        QCOMPARE(reloaded.facebookPage(), QString("My Page"));
+        QCOMPARE(reloaded.instagramUser(), QString("my_ig"));
+        QCOMPARE(reloaded.accountSettings()->entries()[1].toMap().value("expiresAt").toLongLong(), 0LL);
+    }
+
+    void facebookSettingsAcceptsPageTokenAndRejectsPagination()
+    {
+        QTemporaryDir state; FakeHttp server; bool paginated = false;
+        server.answer = [&](const FakeHttp::Call &c) {
+            if (c.path == "/me/accounts") {
+                if (!paginated) return FakeHttp::error("Not a User token");
+                return FakeHttp::json({{"data", QJsonArray{QJsonObject{{"id","101"},{"name","First only"},{"access_token","candidate"}}}},
+                    {"paging", QJsonObject{{"next","https://graph.facebook.com/next"}}}});
+            }
+            if (c.path == "/debug_token") return FakeHttp::json({{"data", QJsonObject{{"is_valid",true},{"expires_at",0}}}});
+            return FakeHttp::json({{"id","100"},{"name","Existing Page"},{"category","Creator"}});
+        };
+        FacebookApi api; api.stateDir=state.path(); api.graphBase=server.base(); QTest::qWait(1);
+        QSignalSpy done(&api,&FacebookApi::connectFinished);
+        api.connectToken("page-private"); QTRY_COMPARE(done.size(),1);
+        QVERIFY(done.first().at(0).toBool()); QCOMPARE(api.pageId(),QString("100"));
+        paginated=true; done.clear(); api.connectToken("user-private"); QTRY_COMPARE(done.size(),1);
+        QVERIFY(!done.first().at(0).toBool()); QCOMPARE(api.pageId(),QString("100"));
+    }
+
+    void accountSettingsYouTubeRefreshExpiry()
+    {
+        QTemporaryDir state;
+        write(state.filePath("youtube.json"), QJsonDocument(QJsonObject{{"clientId", "client"}, {"clientSecret", "secret"},
+            {"refreshToken", "refresh-private"}, {"channelId", "channel-1"}, {"channelTitle", "My Channel"}}).toJson());
+        FakeHttp server;
+        bool failChannels = false;
+        server.answer = [&](const FakeHttp::Call &c) {
+            if (failChannels && c.path == "/channels") return FakeHttp::error("temporarily unavailable", 503);
+            if (c.path == "/token") return FakeHttp::json({{"access_token", "yt-private"}, {"expires_in", 3600}, {"refresh_token_expires_in", 7200}});
+            return FakeHttp::json({{"items", QJsonArray{QJsonObject{{"id", "channel-1"}, {"snippet", QJsonObject{{"title", "My Channel"}}}}}}});
+        };
+        Backend backend(nullptr,nullptr,nullptr,nullptr,state.path());
+        backend.youtube()->tokenUrl = server.base() + "/token"; backend.youtube()->apiBase = server.base();
+        QTest::qWait(1);
+        backend.accountSettings()->testConnection("youtube"); QTRY_VERIFY(!backend.accountSettings()->busy());
+        const auto entry = backend.accountSettings()->entries()[2].toMap();
+        const auto now = QDateTime::currentSecsSinceEpoch();
+        QVERIFY(entry.value("expiresAt").toLongLong() > now + 3500);
+        QVERIFY(entry.value("dataAccessExpiresAt").toLongLong() > now + 7100);
+        QCOMPARE(entry.value("status").toString(), QString("Connected"));
+        QVERIFY(!QJsonDocument::fromVariant(backend.accountSettings()->entries()).toJson().contains("yt-private"));
+        failChannels = true;
+        backend.accountSettings()->testConnection("youtube"); QTRY_VERIFY(!backend.accountSettings()->busy());
+        QCOMPARE(backend.accountSettings()->entries()[2].toMap().value("status").toString(), QString("Connected"));
+        backend.disconnectYouTube();
+        QVERIFY(!backend.youtube()->connected());
+        QVERIFY(!backend.youtube()->accessExpires().isValid());
+    }
+
+    void accountSettingsPageAccessibleWithoutProject()
+    {
+        QTemporaryDir state, themeDir;
+        Theme theme(themeDir.path()); Backend backend(nullptr,nullptr,&theme,nullptr,state.path());
+        HiggsfieldCredits higgsfield; higgsfield.stateDir = state.path();
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme",&theme);
+        engine.rootContext()->setContextProperty("backend",&backend);
+        engine.rootContext()->setContextProperty("downloads",testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield",&higgsfield);
+        engine.load(QUrl("qrc:/Main.qml")); QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window=qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1100,740); window->show(); QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *toggle=findItem(window->contentItem(),"settingsButton"); QVERIFY(toggle); QVERIFY(toggle->isEnabled());
+        QMetaObject::invokeMethod(toggle,"clicked");
+        QTRY_VERIFY(findItem(window->contentItem(),"settingsPlatform"));
+        auto *picker=findItem(window->contentItem(),"settingsPlatform");
+        QCOMPARE(picker->property("count").toInt(),4);
+        picker->setProperty("currentIndex",2);
+        QTRY_VERIFY(findItem(window->contentItem(),"settingsYouTubeClient")->isVisible());
+        QVERIFY(!findItem(window->contentItem(),"settingsToken")->isVisible());
+        picker->setProperty("currentIndex",3);
+        QTRY_VERIFY(findItem(window->contentItem(),"browserAccountHint")->isVisible());
+        picker->setProperty("currentIndex",1); QTest::qWait(250);
+        window->grabWindow().save("/tmp/reelcut-social-settings.png");
+        auto *tabs=findItem(window->contentItem(),"settingsTabs"); tabs->setProperty("currentIndex",1);
+        QTRY_VERIFY(findItem(window->contentItem(),"settingsSchedulerUrl")->isVisible());
+    }
+
     void facebookConnectsAndPublishes()
     {
         QTemporaryDir dir, state;
@@ -3966,7 +4472,7 @@ private slots:
         QCOMPARE(pages[1].toMap().value("name").toString(), QString("Page 2"));
         QVERIFY(!api.connected());
         api.choosePage("1000000000000002");
-        QCOMPARE(connected.size(), 1);
+        QTRY_COMPARE(connected.size(), 1);
         QVERIFY(connected.first().at(0).toBool());
         QCOMPARE(api.account(), QString("Page 2"));
 
@@ -4021,6 +4527,7 @@ private slots:
         QCOMPARE(auth.queryItemValue("prompt", QUrl::FullyDecoded), QString("select_account consent"));
         QCOMPARE(auth.queryItemValue("code_challenge_method"), QString("S256"));
         QVERIFY(auth.queryItemValue("scope", QUrl::FullyDecoded).contains("https://www.googleapis.com/auth/youtube.upload"));
+        QVERIFY(auth.queryItemValue("scope", QUrl::FullyDecoded).contains("https://www.googleapis.com/auth/yt-analytics.readonly"));
         const QUrl redirect(auth.queryItemValue("redirect_uri", QUrl::FullyDecoded));
         QCOMPARE(redirect.host(), QString("127.0.0.1"));
         QUrl wrong = redirect;
@@ -4117,6 +4624,435 @@ private slots:
         QVERIFY(done.first().at(1).toString().contains("channel", Qt::CaseInsensitive));
         QVERIFY(fake.callsTo("/upload/youtube/v3/videos").isEmpty());
         QVERIFY(fake.uploaded.isEmpty());
+    }
+
+    // Reel stats from Instagram: reels only, insights under their metric
+    // keys, and one metric at a time when the whole call is refused.
+    void statsReadsInstagramReels()
+    {
+        QTemporaryDir state;
+        seedOne(state.path(), "instagram");
+        FakeHttp fake;
+        const QString user = "/17841400000000001";
+        fake.answer = [&](const FakeHttp::Call &c) -> FakeHttp::Reply {
+            if (c.query.queryItemValue("access_token") != "good-token")
+                return FakeHttp::error("Invalid OAuth access token.");
+            if (c.path == user)
+                return FakeHttp::json({{"followers_count", 1200}, {"media_count", 3}});
+            if (c.path == user + "/media" && c.query.queryItemValue("after") == "P2")
+                return FakeHttp::json({{"data", QJsonArray{igMedia("r2", "2026-10-01T10:00:00+0000", 4, 1)}}});
+            if (c.path == user + "/media")
+                return FakeHttp::json({{"data", QJsonArray{igMedia("r1", "2026-11-10T10:00:00+0000", 50, 5),
+                                                           igMedia("p1", "2026-11-09T10:00:00+0000", 9, 9, "FEED")}},
+                                       {"paging", QJsonObject{{"next", fake.base() + user + "/media?after=P2&access_token=good-token"}}}});
+            if (c.path == user + "/insights") {
+                auto days = [](double a, double b) {
+                    return QJsonArray{QJsonObject{{"value", a}, {"end_time", "2026-11-15T08:00:00+0000"}},
+                                      QJsonObject{{"value", b}, {"end_time", "2026-11-16T08:00:00+0000"}}};
+                };
+                return FakeHttp::json({{"data", QJsonArray{QJsonObject{{"name", "follower_count"}, {"values", days(2, 3)}},
+                                                           QJsonObject{{"name", "reach"}, {"values", days(400, 500)}}}}});
+            }
+            if (c.path == "/r1/insights")
+                return FakeHttp::json({{"data", QJsonArray{
+                    insight("views", 1000, true), insight("reach", 800), insight("likes", 50, true), insight("comments", 5),
+                    insight("shares", 7), insight("saved", 9), insight("total_interactions", 71),
+                    insight("ig_reels_avg_watch_time", 4500), insight("ig_reels_video_view_total_time", 4500000)}}});
+            if (c.path == "/p1/insights")
+                return FakeHttp::error("not a reel");
+            if (c.path == "/r2/insights") {
+                const QString metric = c.query.queryItemValue("metric");
+                if (metric.contains(',') || metric == "ig_reels_avg_watch_time")
+                    return FakeHttp::json({{"error", QJsonObject{{"message", "(#100) ig_reels_avg_watch_time is not available"},
+                                                                 {"code", 100}}}}, 400);
+                return FakeHttp::json({{"data", QJsonArray{insight(metric, 10)}}});
+            }
+            return FakeHttp::error("unexpected " + c.path, 404);
+        };
+        StatsRig rig(state.path(), fake.base());
+        QVERIFY(rig.instagram.connected());
+        QCOMPARE(rig.stats.accounts().size(), 3);
+        QVERIFY(rig.refreshed());
+        QVERIFY(rig.stats.refreshed().isValid());
+        QCOMPARE(rig.stats.status(), QString());
+
+        // Reels only, newest first.
+        const QVariantList reels = rig.stats.reels();
+        QCOMPARE(reels.size(), 2);
+        QCOMPARE(reels[0].toMap().value("id").toString(), QString("r1"));
+        QCOMPARE(reels[1].toMap().value("id").toString(), QString("r2"));
+        QVERIFY(fake.callsTo("/p1/insights").isEmpty());
+        const QString asked = fake.callsTo("/r1/insights").first().query.queryItemValue("metric");
+        QCOMPARE(asked, QString("views,reach,likes,comments,shares,saved,total_interactions,ig_reels_avg_watch_time,"
+                                "ig_reels_video_view_total_time"));
+
+        const QVariantMap r1 = reels[0].toMap();
+        QCOMPARE(r1.value("platform").toString(), QString("instagram"));
+        QCOMPARE(r1.value("caption").toString(), QString("Reel r1"));
+        QCOMPARE(r1.value("thumbnail").toString(), QString("https://cdn/r1.jpg"));
+        QCOMPARE(r1.value("permalink").toString(), QString("https://www.instagram.com/reel/r1/"));
+        QCOMPARE(r1.value("published").toLongLong(),
+                 QDateTime(QDate(2026, 11, 10), QTime(10, 0), QTimeZone::UTC).toMSecsSinceEpoch());
+        const QVariantMap m1 = r1.value("metrics").toMap();
+        QCOMPARE(m1.value("views").toDouble(), 1000.0);
+        QCOMPARE(m1.value("reach").toDouble(), 800.0);
+        QCOMPARE(m1.value("likes").toDouble(), 50.0);
+        QCOMPARE(m1.value("comments").toDouble(), 5.0);
+        QCOMPARE(m1.value("shares").toDouble(), 7.0);
+        QCOMPARE(m1.value("saves").toDouble(), 9.0);
+        QCOMPARE(m1.value("interactions").toDouble(), 71.0);
+        QCOMPARE(m1.value("avgWatch").toDouble(), 4.5);       // ms -> s
+        QCOMPARE(m1.value("totalWatch").toDouble(), 4500.0);
+        QVERIFY(qAbs(r1.value("engagementRate").toDouble() - 0.071) < 1e-9);
+
+        // r2's combined call was refused: every metric but the failing one, one at a time.
+        const QVariantMap m2 = rig.reel("r2").value("metrics").toMap();
+        QCOMPARE(m2.value("views").toDouble(), 10.0);
+        QCOMPARE(m2.value("saves").toDouble(), 10.0);
+        QCOMPARE(m2.value("totalWatch").toDouble(), 0.01);
+        QVERIFY(!m2.contains("avgWatch"));
+        QCOMPARE(fake.callsTo("/r2/insights").size(), 1 + 9);
+
+        // The account: followers, and the daily gains counted back from today.
+        const QVariantMap ig = rig.account("instagram");
+        QVERIFY(ig.value("connected").toBool());
+        QCOMPARE(ig.value("account").toString(), QString("reelcut_test"));
+        QCOMPARE(ig.value("followers").toDouble(), 1200.0);
+        QCOMPARE(ig.value("reelCount").toInt(), 2);
+        QCOMPARE(ig.value("error").toString(), QString());
+        QCOMPARE(ig.value("needsPermission").toString(), QString());
+        const QVariantList followers = ig.value("followerSeries").toList();
+        QCOMPARE(followers.size(), 2);
+        QCOMPARE(followers[0].toMap().value("v").toDouble(), 1197.0);
+        QCOMPARE(followers[1].toMap().value("v").toDouble(), 1200.0);
+        QCOMPARE(ig.value("viewSeries").toList().last().toMap().value("v").toDouble(), 500.0);
+
+        // Platforms not connected say so, without an error.
+        for (const QString &platform : {QString("facebook"), QString("youtube")}) {
+            const QVariantMap a = rig.account(platform);
+            QVERIFY(!a.value("connected").toBool());
+            QCOMPARE(a.value("error").toString(), QString());
+        }
+
+        // Kept for next time, readable only by you, and read back.
+        QCOMPARE(QFile::permissions(rig.stats.statsFile()) & 0x0077, QFileDevice::Permissions());
+        StatsRig again(state.path(), fake.base());
+        QCOMPARE(again.stats.reels().size(), 2);
+        QCOMPARE(again.reel("r1").value("metrics").toMap().value("avgWatch").toDouble(), 4.5);
+        QCOMPARE(again.account("instagram").value("followers").toDouble(), 1200.0);
+        QCOMPARE(again.stats.history("instagram", "r1").size(), 1);
+    }
+
+    // Without the insights permission: say which one, stop asking, and keep
+    // the likes and comments the reel list gave.
+    void statsKeepBasicCountsWithoutInsightsPermission()
+    {
+        QTemporaryDir state;
+        seedOne(state.path(), "instagram");
+        FakeHttp fake;
+        const QString user = "/17841400000000001";
+        fake.answer = [&](const FakeHttp::Call &c) -> FakeHttp::Reply {
+            if (c.path == user)
+                return FakeHttp::json({{"followers_count", 10}});
+            if (c.path == user + "/media") {
+                QJsonArray media;
+                for (int i = 0; i < 8; ++i)
+                    media.append(igMedia(QString("r%1").arg(i), QString("2026-11-0%1T10:00:00+0000").arg(i + 1), 10 + i, i));
+                return FakeHttp::json({{"data", media}});
+            }
+            if (c.path.endsWith("/insights"))
+                return FakeHttp::json({{"error", QJsonObject{{"message", "(#10) Application does not have permission for this action"},
+                                                             {"code", 10}}}}, 403);
+            return FakeHttp::error("unexpected " + c.path, 404);
+        };
+        StatsRig rig(state.path(), fake.base());
+        QVERIFY(rig.refreshed());
+        const QVariantMap ig = rig.account("instagram");
+        QCOMPARE(ig.value("needsPermission").toString(), QString("instagram_business_manage_insights"));
+        QCOMPARE(ig.value("error").toString(), QString());
+        QCOMPARE(rig.stats.reels().size(), 8);
+        const QVariantMap m = rig.reel("r3").value("metrics").toMap();
+        QCOMPARE(m.value("likes").toDouble(), 13.0);
+        QCOMPARE(m.value("comments").toDouble(), 3.0);
+        QVERIFY(!m.contains("views"));
+        QVERIFY(!rig.reel("r3").contains("engagementRate"));
+        // At most the four already out; none after the refusal.
+        int insightCalls = 0;
+        for (const auto &c : fake.calls)
+            if (c.path.endsWith("/insights") && c.path != user + "/insights")
+                ++insightCalls;
+        QVERIFY2(insightCalls <= 4, qPrintable(QString::number(insightCalls)));
+    }
+
+    // A Facebook Page's reels: video_insights, with the social actions map.
+    void statsReadsFacebookReels()
+    {
+        QTemporaryDir state;
+        seedOne(state.path(), "facebook");
+        FakeHttp fake;
+        const QString page = "/1000000000000001";
+        fake.answer = [&](const FakeHttp::Call &c) -> FakeHttp::Reply {
+            if (c.query.queryItemValue("access_token") != "page-token-1")
+                return FakeHttp::error("Invalid OAuth access token.");
+            if (c.path == page)
+                return FakeHttp::json({{"followers_count", 321}, {"fan_count", 300}});
+            if (c.path == page + "/insights") {
+                if (c.query.queryItemValue("metric").contains(','))  // one retired metric spoils the call
+                    return FakeHttp::json({{"error", QJsonObject{{"message", "(#100) The value must be a valid insights metric"}, {"code", 100}}}}, 400);
+                if (c.query.queryItemValue("metric") != "page_follows")
+                    return FakeHttp::json({{"error", QJsonObject{{"message", "(#100) The value must be a valid insights metric"}, {"code", 100}}}}, 400);
+                return FakeHttp::json({{"data", QJsonArray{QJsonObject{{"name", "page_follows"}, {"values", QJsonArray{
+                    QJsonObject{{"value", 320}, {"end_time", "2026-11-15T08:00:00+0000"}},
+                    QJsonObject{{"value", 321}, {"end_time", "2026-11-16T08:00:00+0000"}}}}}}}});
+            }
+            if (c.path == page + "/video_reels")
+                return FakeHttp::json({{"data", QJsonArray{QJsonObject{
+                    {"id", "R1"}, {"description", "Lake run"}, {"title", "Run"}, {"created_time", "2026-11-12T09:30:00+0000"},
+                    {"permalink_url", "/reel/R1/"}, {"length", 12.5}, {"picture", "https://cdn/R1.jpg"}}}}});
+            if (c.path == "/R1/video_insights")
+                return FakeHttp::json({{"data", QJsonArray{
+                    insight("blue_reels_play_count", 90), insight("fb_reels_total_plays", 120), insight("fb_reels_replay_count", 30),
+                    insight("post_impressions_unique", 80), insight("post_video_avg_time_watched", 6200),
+                    insight("post_video_view_time", 744000), insight("post_video_followers", 4),
+                    insight("post_video_social_actions", QJsonObject{{"LIKE", 10}, {"COMMENT", 2}, {"SHARE", 3}})}}});
+            return FakeHttp::error("unexpected " + c.path, 404);
+        };
+        StatsRig rig(state.path(), fake.base());
+        QVERIFY(rig.refreshed());
+        const QVariantMap reel = rig.reel("R1");
+        QCOMPARE(reel.value("platform").toString(), QString("facebook"));
+        QCOMPARE(reel.value("caption").toString(), QString("Lake run"));
+        QCOMPARE(reel.value("title").toString(), QString("Run"));
+        QCOMPARE(reel.value("permalink").toString(), QString("https://www.facebook.com/reel/R1/"));
+        QCOMPARE(reel.value("duration").toDouble(), 12.5);
+        const QVariantMap m = reel.value("metrics").toMap();
+        QCOMPARE(m.value("views").toDouble(), 120.0);
+        QCOMPARE(m.value("initialPlays").toDouble(), 90.0);
+        QCOMPARE(m.value("replays").toDouble(), 30.0);
+        QCOMPARE(m.value("reach").toDouble(), 80.0);
+        QCOMPARE(m.value("avgWatch").toDouble(), 6.2);
+        QCOMPARE(m.value("totalWatch").toDouble(), 744.0);
+        QCOMPARE(m.value("followsGained").toDouble(), 4.0);
+        QCOMPARE(m.value("likes").toDouble(), 10.0);
+        QCOMPARE(m.value("comments").toDouble(), 2.0);
+        QCOMPARE(m.value("shares").toDouble(), 3.0);
+        const QVariantMap fb = rig.account("facebook");
+        QCOMPARE(fb.value("followers").toDouble(), 321.0);
+        QCOMPARE(fb.value("followerSeries").toList().size(), 2);
+        QVERIFY(fb.value("viewSeries").toList().isEmpty());
+        QCOMPARE(fb.value("error").toString(), QString());
+        QVERIFY(!rig.account("instagram").value("connected").toBool());
+    }
+
+    // YouTube: Shorts picked by length, Data API counts plus Analytics'
+    // extras, and the reconnect hint when Analytics isn't allowed.
+    void statsReadsYouTubeShorts()
+    {
+        QTemporaryDir state;
+        seedOne(state.path(), "youtube");
+        FakeHttp fake;
+        bool analyticsDenied = false;
+        fake.answer = [&](const FakeHttp::Call &c) -> FakeHttp::Reply {
+            if (c.path == "/token")
+                return FakeHttp::json({{"access_token", "ya29-stats"}, {"expires_in", 3599}});
+            if (c.headers.value("authorization") != "Bearer ya29-stats")
+                return FakeHttp::error("Request had invalid authentication credentials.", 401);
+            if (c.path == "/youtube/v3/channels")
+                return FakeHttp::json({{"items", QJsonArray{QJsonObject{
+                    {"id", "UC123"}, {"contentDetails", QJsonObject{{"relatedPlaylists", QJsonObject{{"uploads", "UU123"}}}}},
+                    {"statistics", QJsonObject{{"subscriberCount", "500"}, {"hiddenSubscriberCount", false}}}}}}});
+            if (c.path == "/youtube/v3/playlistItems") {
+                auto item = [](const QString &id) { return QJsonObject{{"contentDetails", QJsonObject{{"videoId", id}}}}; };
+                if (c.query.queryItemValue("pageToken") == "P2")
+                    return FakeHttp::json({{"items", QJsonArray{item("v3")}}});
+                return FakeHttp::json({{"items", QJsonArray{item("v1"), item("v2")}}, {"nextPageToken", "P2"}});
+            }
+            if (c.path == "/youtube/v3/videos") {
+                const QHash<QString, QString> durations{{"v1", "PT45S"}, {"v2", "PT10M"}, {"v3", "PT1M30S"}};
+                QJsonArray items;
+                for (const QString &id : c.query.queryItemValue("id").split(','))
+                    items.append(QJsonObject{
+                        {"id", id},
+                        {"status", QJsonObject{{"privacyStatus", "public"}}},
+                        {"snippet", QJsonObject{{"title", "Short " + id}, {"description", "About " + id},
+                                                {"publishedAt", id == "v1" ? "2026-11-14T12:00:00Z" : "2026-11-01T12:00:00Z"},
+                                                {"thumbnails", QJsonObject{{"high", QJsonObject{{"url", "https://i.ytimg/" + id}}}}}}},
+                        {"statistics", QJsonObject{{"viewCount", "2000"}, {"likeCount", "150"}, {"commentCount", "12"}}},
+                        {"contentDetails", QJsonObject{{"duration", durations.value(id)}}}});
+                return FakeHttp::json({{"items", items}});
+            }
+            if (c.path == "/v2/reports") {
+                if (analyticsDenied)
+                    return FakeHttp::json({{"error", QJsonObject{
+                        {"code", 403}, {"message", "Request had insufficient authentication scopes."},
+                        {"errors", QJsonArray{QJsonObject{{"reason", "insufficientPermissions"}}}},
+                        {"status", "PERMISSION_DENIED"},
+                        {"details", QJsonArray{QJsonObject{{"reason", "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}}}}}}}, 403);
+                auto headers = [](const QStringList &names) {
+                    QJsonArray out;
+                    for (const QString &n : names)
+                        out.append(QJsonObject{{"name", n}});
+                    return out;
+                };
+                if (c.query.queryItemValue("dimensions") == "day") {
+                    if (c.query.hasQueryItem("filters"))
+                        return FakeHttp::json({{"columnHeaders", headers({"day", "views"})},
+                                               {"rows", QJsonArray{QJsonArray{"2026-11-14", 700}, QJsonArray{"2026-11-15", 900}}}});
+                    return FakeHttp::json({{"columnHeaders", headers({"day", "views", "subscribersGained", "subscribersLost"})},
+                                           {"rows", QJsonArray{QJsonArray{"2026-11-15", 1000, 5, 1}, QJsonArray{"2026-11-16", 1500, 10, 2}}}});
+                }
+                return FakeHttp::json({{"columnHeaders", headers({"video", "views", "estimatedMinutesWatched", "averageViewDuration",
+                                                                  "averageViewPercentage", "likes", "comments", "shares",
+                                                                  "subscribersGained", "subscribersLost"})},
+                                       {"rows", QJsonArray{QJsonArray{"v1", 1990, 50, 31, 68.9, 149, 12, 25, 6, 1},
+                                                           QJsonArray{"v3", 1980, 40, 22, 30.5, 140, 11, 9, 2, 0}}}});
+            }
+            return FakeHttp::error("unexpected " + c.path, 404);
+        };
+        StatsRig rig(state.path(), fake.base());
+        QVERIFY(rig.youtube.connected());
+        QVERIFY(rig.refreshed());
+
+        // v2 is ten minutes long: not a Short.
+        QCOMPARE(rig.stats.reels().size(), 2);
+        QCOMPARE(rig.stats.reels().first().toMap().value("privacyStatus").toString(),QString("public"));
+        QVERIFY(std::any_of(fake.calls.begin(),fake.calls.end(),[](const FakeHttp::Call &c){return c.path=="/youtube/v3/videos" && c.query.queryItemValue("part").contains("status");}));
+        QVERIFY(rig.reel("v2").isEmpty());
+        const QString filter = fake.callsTo("/v2/reports").first().query.queryItemValue("filters", QUrl::FullyDecoded);
+        QVERIFY(filter.isEmpty() || !filter.contains("v2"));
+        bool askedForBoth = false;
+        for (const auto &c : fake.callsTo("/v2/reports"))
+            askedForBoth = askedForBoth || c.query.queryItemValue("filters", QUrl::FullyDecoded) == "video==v1,v3";
+        QVERIFY(askedForBoth);
+        const QVariantMap v1 = rig.reel("v1");
+        QCOMPARE(v1.value("title").toString(), QString("Short v1"));
+        QCOMPARE(v1.value("caption").toString(), QString("About v1"));
+        QCOMPARE(v1.value("duration").toDouble(), 45.0);
+        QCOMPARE(v1.value("permalink").toString(), QString("https://youtube.com/shorts/v1"));
+        QCOMPARE(v1.value("thumbnail").toString(), QString("https://i.ytimg/v1"));
+        QCOMPARE(rig.stats.reels().first().toMap().value("id").toString(), QString("v1"));  // newest first
+        const QVariantMap m = v1.value("metrics").toMap();
+        QCOMPARE(m.value("views").toDouble(), 2000.0);   // the Data API's live count
+        QCOMPARE(m.value("likes").toDouble(), 150.0);
+        QCOMPARE(m.value("comments").toDouble(), 12.0);
+        QCOMPARE(m.value("shares").toDouble(), 25.0);
+        QCOMPARE(m.value("totalWatch").toDouble(), 3000.0);  // minutes -> seconds
+        QCOMPARE(m.value("avgWatch").toDouble(), 31.0);
+        QCOMPARE(m.value("avgViewPct").toDouble(), 68.9);
+        QCOMPARE(m.value("followsGained").toDouble(), 6.0);
+        QCOMPARE(m.value("subsLost").toDouble(), 1.0);
+        QCOMPARE(rig.reel("v3").value("duration").toDouble(), 90.0);
+        const QVariantMap yt = rig.account("youtube");
+        QCOMPARE(yt.value("followers").toDouble(), 500.0);
+        QCOMPARE(yt.value("reelCount").toInt(), 2);
+        QCOMPARE(yt.value("needsPermission").toString(), QString());
+        const QVariantList followers = yt.value("followerSeries").toList();
+        QCOMPARE(followers.size(), 2);
+        QCOMPARE(followers[0].toMap().value("v").toDouble(), 492.0);
+        QCOMPARE(followers[1].toMap().value("v").toDouble(), 500.0);
+        QCOMPARE(yt.value("viewSeries").toList().last().toMap().value("v").toDouble(), 1500.0);
+
+        // Views per day of one Short.
+        QSignalSpy daily(&rig.stats, &Stats::dailyLoaded);
+        rig.stats.loadDaily("youtube", "v1");
+        QVERIFY(daily.wait());
+        QCOMPARE(daily.first().at(1).toString(), QString("v1"));
+        const QVariantList points = daily.first().at(2).toList();
+        QCOMPARE(points.size(), 2);
+        QCOMPARE(points[1].toMap().value("v").toDouble(), 900.0);
+
+        // Connected before Reelcut asked for Analytics: the Data API's counts stay.
+        analyticsDenied = true;
+        QVERIFY(rig.refreshed());
+        QCOMPARE(rig.account("youtube").value("needsPermission").toString(), QString("yt-analytics.readonly"));
+        QCOMPARE(rig.account("youtube").value("error").toString(), QString());
+        const QVariantMap denied = rig.reel("v1").value("metrics").toMap();
+        QCOMPARE(denied.value("views").toDouble(), 2000.0);
+        QCOMPARE(denied.value("likes").toDouble(), 150.0);
+        QVERIFY(!denied.contains("shares"));
+
+        // Analytics refusing a day report: the recorded views instead.
+        daily.clear();
+        rig.stats.loadDaily("youtube", "v1");
+        QVERIFY(daily.wait());
+        QCOMPARE(daily.first().at(2).toList().size(), 2);  // two snapshots: the second refresh changed metrics
+    }
+
+    // History: a snapshot only when a number moved, at most 400 per reel.
+    void statsHistoryGrowsOnChangeAndIsCapped()
+    {
+        QTemporaryDir state;
+        seedOne(state.path(), "instagram");
+        FakeHttp fake;
+        double views = 100;
+        fake.answer = [&](const FakeHttp::Call &c) -> FakeHttp::Reply {
+            if (c.path == "/17841400000000001/media")
+                return FakeHttp::json({{"data", QJsonArray{igMedia("r1", "2026-11-10T10:00:00+0000", 5, 1)}}});
+            if (c.path == "/r1/insights")
+                return FakeHttp::json({{"data", QJsonArray{insight("views", views)}}});
+            return FakeHttp::json({});
+        };
+        {
+            StatsRig rig(state.path(), fake.base());
+            QVERIFY(rig.refreshed());
+            QVERIFY(rig.refreshed());
+            QCOMPARE(rig.stats.history("instagram", "r1").size(), 1);
+            views = 150;
+            QVERIFY(rig.refreshed());
+            const QVariantList history = rig.stats.history("instagram", "r1");
+            QCOMPARE(history.size(), 2);
+            QCOMPARE(history[0].toMap().value("metrics").toMap().value("views").toDouble(), 100.0);
+            QCOMPARE(history[1].toMap().value("metrics").toMap().value("views").toDouble(), 150.0);
+            QVERIFY(history[1].toMap().value("t").toLongLong() >= history[0].toMap().value("t").toLongLong());
+            QSignalSpy daily(&rig.stats, &Stats::dailyLoaded);
+            rig.stats.loadDaily("instagram", "r1");
+            QVERIFY(daily.wait());
+            QCOMPARE(daily.first().at(2).toList().size(), 2);
+        }
+
+        // 400 kept already: the oldest makes way.
+        QJsonArray full;
+        for (int i = 0; i < 400; ++i)
+            full.append(QJsonObject{{"t", double(1700000000000LL + i)}, {"metrics", QJsonObject{{"views", i}}}});
+        QJsonObject saved = Net::load(state.filePath("stats.json"));
+        saved["history"] = QJsonObject{{"instagram:r1", full}};
+        QVERIFY(Net::savePrivate(state.filePath("stats.json"), saved));
+        views = 999;
+        StatsRig rig(state.path(), fake.base());
+        QCOMPARE(rig.stats.history("instagram", "r1").size(), 400);
+        QVERIFY(rig.refreshed());
+        const QVariantList history = rig.stats.history("instagram", "r1");
+        QCOMPARE(history.size(), 400);
+        QCOMPARE(history.first().toMap().value("metrics").toMap().value("views").toDouble(), 1.0);
+        QCOMPARE(history.last().toMap().value("metrics").toMap().value("views").toDouble(), 999.0);
+    }
+
+    // A broken stats.json is ignored, and the next refresh writes a good one.
+    void statsIgnoreACorruptFile()
+    {
+        for (const QByteArray &contents : {QByteArray("{not json"),
+                                           QByteArray(R"({"reels":"x","accounts":[5,{"platform":"tiktok"}],)"
+                                                      R"("history":{"instagram:1":[1,"a",{"t":"x"}]},"refreshed":"y"})"),
+                                           QByteArray(R"([1,2,3])")}) {
+            QTemporaryDir state;
+            write(state.filePath("stats.json"), contents);
+            FakeHttp fake;
+            fake.answer = [](const FakeHttp::Call &) { return FakeHttp::error("nothing here", 404); };
+            StatsRig rig(state.path(), fake.base());
+            QVERIFY(rig.stats.reels().isEmpty());
+            QVERIFY(!rig.stats.refreshed().isValid());
+            QCOMPARE(rig.stats.accounts().size(), 3);
+            QVERIFY(rig.stats.history("instagram", "1").isEmpty());
+            QCOMPARE(rig.stats.metricInfo().size(), 14);
+            // Nothing connected: done at once, every platform saying so.
+            QVERIFY(rig.refreshed());
+            for (const QVariant &a : rig.stats.accounts()) {
+                QVERIFY(!a.toMap().value("connected").toBool());
+                QCOMPARE(a.toMap().value("error").toString(), QString());
+            }
+            QVERIFY(fake.calls.isEmpty());
+            QVERIFY(QJsonDocument::fromJson(readAll(rig.stats.statsFile())).isObject());
+        }
     }
 
     // Accounts as they sit on disk once connected, for tests that start there.
@@ -4322,6 +5258,8 @@ private slots:
         findItem(window->contentItem(), "postCaption")->setProperty("text", "Everywhere");
         QTRY_VERIFY(!next->isEnabled());
         title->setProperty("text", "Everywhere at once");
+        QCOMPARE(next->property("text").toString(), QString("Add to queue"));
+        QMetaObject::invokeMethod(findItem(window->contentItem(), "postNow"), "clicked");
         QTRY_VERIFY(next->isEnabled());
         QCOMPARE(next->property("text").toString(), QString("Publish"));
 
@@ -4339,6 +5277,368 @@ private slots:
         QTRY_VERIFY(dialog->property("blocked").toBool());
         QTRY_VERIFY(!next->isEnabled());
         QVERIFY(findItem(window->contentItem(), "facebookConnect"));
+    }
+
+    void scheduleLogicKeepsDatesSlotsAndStatusesHonest()
+    {
+        QFile file(":/ScheduleLogic.js");
+        QVERIFY2(file.open(QIODevice::ReadOnly), "ScheduleLogic must be available to the Schedule page");
+        QString source = QString::fromUtf8(file.readAll());
+        source.remove(".pragma library");
+        QJSEngine js;
+        QJSValue loaded = js.evaluate(source, "ScheduleLogic.js");
+        QVERIFY2(!loaded.isError(), qPrintable(loaded.toString()));
+        const QJSValue result = js.evaluate(R"JS(
+            function expect(ok, message) { if (!ok) throw new Error(message); }
+            var day = new Date(2026, 11, 31, 16).getTime();
+            var start = dayStart(day);
+            expect(new Date(start).getHours() === 0, 'local midnight');
+            expect(new Date(addDays(start, 1)).getFullYear() === 2027, 'calendar year boundary');
+            var targets = slots(day, 480, 90);
+            expect(targets.length === 10, 'ten slots');
+            expect(targets[0].minute === 480 && targets[9].minute === 1290, '08:00 to 21:30');
+            expect(new Date(targets[0].ms).getDate() === 31, 'slots stay on selected date');
+            expect(slots(day, 480, 120).length === 0, 'overflow must not silently become tomorrow');
+            expect(slots(day, -1, 90).length === 0 && slots(day, 480, 0).length === 0, 'invalid cadence');
+            var at = targets[0].ms;
+            var scheduled = [
+                {platform:'youtube',id:'local',publishAt:at,title:'Same caption',status:'scheduled',link:'https://youtube.com/shorts/VID1'},
+                {platform:'facebook',id:'past',publishAt:at,status:'scheduled',title:'Same caption'},
+                {platform:'instagram',id:'failed',publishAt:at+3600000,status:'failed',error:'Token expired'},
+                {platform:'instagram',id:'cancel',publishAt:at+7200000,status:'cancelled'},
+                {platform:'facebook',id:'tomorrow',publishAt:addDays(at,1),status:'scheduled'}
+            ];
+            var published = [
+                {platform:'youtube',id:'VID1',privacyStatus:'public',published:at+10000,title:'Same caption',permalink:'https://www.youtube.com/watch?v=VID1',thumbnail:'https://example.test/t.jpg'},
+                {platform:'facebook',id:'actual',published:at+60000,title:'Same caption',permalink:'https://facebook.com/reel/other'}
+            ];
+            var actual = dayPosts(day, scheduled, published, at+1800000);
+            expect(actual.length === 5, 'only same-day posts, merge known links, never merge captions');
+            expect(actual.filter(function(p){return p.platform==='youtube';})[0].status === 'published', 'published link confirms schedule');
+            expect(actual.filter(function(p){return p.id==='past';})[0].status === 'awaiting', 'elapsed time cannot confirm publication');
+            expect(actual.filter(function(p){return p.id==='failed';})[0].error === 'Token expired', 'failure retained');
+            var summary = platformSummary('instagram', actual, targets);
+            expect(summary.failed === 1 && summary.covered === 0, 'failed and cancelled do not fill the goal');
+            var cluster = layoutCards([{minute:480},{minute:490},{minute:600}]);
+            expect(cluster[0].columns === 2 && cluster[1].columns === 2 && cluster[2].columns === 1, 'nearby cards remain accessible');
+            var dst = slots(new Date(2027,2,14).getTime(),120,90);
+            if (new Date(2027,2,14,2).getHours() !== 2)
+                expect(dst.length === 10 && dst[0].valid === false, 'nonexistent DST time is disabled, never moved');
+            true;
+        )JS");
+        QVERIFY2(!result.isError(), qPrintable(result.toString()));
+        QVERIFY(result.toBool());
+    }
+
+    void scheduleCalendarReviewRegressions()
+    {
+        QFile file(":/ScheduleLogic.js");QVERIFY(file.open(QIODevice::ReadOnly));
+        QString source=QString::fromUtf8(file.readAll());source.remove(".pragma library");
+        QJSEngine js;QVERIFY(!js.evaluate(source).isError());
+        auto result=js.evaluate(R"JS(
+            var errors=[];
+            function check(ok,msg){if(!ok) errors.push(msg);}
+            var at=new Date(2027,8,5,8).getTime();
+            check(linkKey('facebook','https://www.facebook.com/watch/?v=111')!==linkKey('facebook','https://www.facebook.com/watch/?v=222'),'distinct Facebook watch videos');
+            check(linkKey('facebook','https://www.facebook.com/watch/?v=111')===linkKey('facebook','https://facebook.com/reel/111'),'watch/reel identities match');
+            check(linkKey('facebook','https://facebook.com/custom?id=1')!==linkKey('facebook','https://facebook.com/custom?id=2'),'unknown URL query identity preserved');
+            var scheduled=[{platform:'youtube',id:'local',publishAt:at+3600000,status:'scheduled',link:'https://youtube.com/shorts/PRIVATE'}];
+            var uploaded=[{platform:'youtube',id:'PRIVATE',published:at-86400000,permalink:'https://youtube.com/watch?v=PRIVATE',privacyStatus:'private'}];
+            check(dayPosts(at,scheduled,uploaded,at).length===1,'private upload must not erase future schedule');
+            check(dayPosts(at-86400000,scheduled,uploaded,at).length===0,'private upload is not published');
+            uploaded[0].privacyStatus='public';uploaded[0].published=at;
+            check(dayPosts(at,scheduled,uploaded,at+7200000)[0].status==='published','public evidence confirms YouTube');
+            check(dayPosts(at,[{platform:'instagram',id:'late',publishAt:at,status:'scheduled'}],[],at+3600000)[0].status==='scheduled','preserve Instagram server status');
+            check(slots(at,480,75).length===0,'unsupported cadence');
+            var date=dayStart(at),next=new Date(2027,8,6,0,30).getTime();
+            check(dayPosts(date,[],[{platform:'instagram',id:'tomorrow',published:next}],at).length===0,'next day early post excluded');
+            check(new Date(addDays(date,1)).getHours()===0,'date navigation does not carry DST gap hour');
+            errors.join('; ');
+        )JS");
+        QVERIFY2(result.toString().isEmpty(),qPrintable(result.toString()));
+    }
+
+    void schedulePreferencesPersistAndCalendarRetainsUnconfirmedPosts()
+    {
+        QTemporaryDir state;
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        auto post = [&](QString id, qint64 at) {
+            return QJsonObject{{"id",id},{"platform","youtube"},{"publishAt",double(at)},
+                               {"status","scheduled"},{"title",id}};
+        };
+        write(state.filePath("scheduled-direct.json"), QJsonDocument(QJsonObject{{"posts",QJsonArray{
+            post("future",now+3600000),post("past",now-3600000),post("old",now-100LL*86400000)}}}).toJson());
+        Backend backend(nullptr,nullptr,nullptr,nullptr,state.path());
+        QVERIFY2(backend.metaObject()->indexOfProperty("schedulePreferences") >= 0, "persist cadence preferences");
+        QVERIFY2(backend.metaObject()->indexOfProperty("calendarPosts") >= 0, "calendar history is separate from the pending list");
+        QCOMPARE(backend.scheduledPosts().size(),1);
+        QCOMPARE(backend.property("calendarPosts").toList().size(),2);
+        QVariantMap defaults=backend.property("schedulePreferences").toMap();
+        QCOMPARE(defaults.value("instagram").toMap().value("startMinute").toInt(),480);
+        QCOMPARE(defaults.value("youtube").toMap().value("spacingMinutes").toInt(),90);
+        QVariantMap changed=defaults;
+        changed["youtube"]=QVariantMap{{"startMinute",300},{"spacingMinutes",120}};
+        QVERIFY(backend.setProperty("schedulePreferences",changed));
+        QCOMPARE(backend.property("schedulePreferences").toMap(),changed);
+        Backend again(nullptr,nullptr,nullptr,nullptr,state.path());
+        QCOMPARE(again.property("schedulePreferences").toMap(),changed);
+        QVariantMap bad=changed;
+        bad["youtube"]=QVariantMap{{"startMinute",600},{"spacingMinutes",120}};
+        backend.setProperty("schedulePreferences",bad);
+        QCOMPARE(backend.property("schedulePreferences").toMap(),changed);
+        bad["youtube"]=QVariantMap{{"startMinute",300},{"spacingMinutes",75}};
+        backend.setProperty("schedulePreferences",bad);
+        QCOMPARE(backend.property("schedulePreferences").toMap(),changed);
+        write(state.filePath("schedule-plan.json"),"{broken");
+        Backend corrupt(nullptr,nullptr,nullptr,nullptr,state.path());
+        QCOMPARE(corrupt.property("schedulePreferences").toMap(),defaults);
+    }
+
+    void nextOpenSlotsFillTodayThenRollIntoNextDays()
+    {
+        QTemporaryDir state;
+        // YouTube's plan: 00:00, 01:00 ... 09:00 every day. One slot tomorrow is taken.
+        const QDate tomorrow=QDate::currentDate().addDays(1);
+        const qint64 takenAt=QDateTime(tomorrow,QTime(2,0)).toMSecsSinceEpoch();
+        write(state.filePath("scheduled-direct.json"), QJsonDocument(QJsonObject{{"posts",QJsonArray{
+            QJsonObject{{"id","taken"},{"platform","youtube"},{"publishAt",double(takenAt)},{"status","scheduled"},{"title","t"}}}}}).toJson());
+        Backend backend(nullptr,nullptr,nullptr,nullptr,state.path());
+        QVariantMap plan=backend.property("schedulePreferences").toMap();
+        plan["youtube"]=QVariantMap{{"startMinute",0},{"spacingMinutes",60}};
+        QVERIFY(backend.setProperty("schedulePreferences",plan));
+
+        const QVariantList open=backend.nextOpenSlots({"youtube"},25);
+        QCOMPARE(open.size(),25);
+        const qint64 earliest=QDateTime::currentMSecsSinceEpoch()+5*60*1000;
+        qint64 last=0;
+        QMap<QDate,int> perDay;
+        for (const QVariant &v : open) {
+            const QVariantMap slot=v.toMap();
+            QCOMPARE(slot.value("platform").toString(),QString("youtube"));
+            const qint64 at=qint64(slot.value("publishAt").toDouble());
+            QVERIFY(at>=earliest);  // never in the past, nor too soon to upload
+            QVERIFY(at>last);       // soonest first, no repeats
+            QVERIFY(at!=takenAt);   // skips what's already scheduled
+            const QDateTime t=QDateTime::fromMSecsSinceEpoch(at);
+            QCOMPARE(t.time().minute(),0);
+            QVERIFY(t.time().hour()<=9);  // only the plan's slots
+            perDay[t.date()]++;
+            last=at;
+        }
+        // Ten slots a day at most, so 25 spill over into later days.
+        for (int n : perDay) QVERIFY(n<=10);
+        QVERIFY(perDay.size()>=3);
+        QCOMPARE(perDay.value(tomorrow),9);  // tomorrow's 02:00 was taken
+        // Platforms that can't take a scheduled post give none.
+        QVERIFY(backend.nextOpenSlots({"tiktok"},3).isEmpty());
+        QVERIFY(backend.nextOpenSlots({"youtube"},0).isEmpty());
+        // Several platforms: each gets its own slots.
+        plan["facebook"]=QVariantMap{{"startMinute",30},{"spacingMinutes",60}};
+        QVERIFY(backend.setProperty("schedulePreferences",plan));
+        const QVariantList both=backend.nextOpenSlots({"facebook","youtube"},2);
+        QCOMPARE(both.size(),4);
+        int fb=0;
+        for (const QVariant &v : both) if (v.toMap().value("platform")=="facebook") {
+            ++fb;
+            QCOMPARE(QDateTime::fromMSecsSinceEpoch(qint64(v.toMap().value("publishAt").toDouble())).time().minute(),30);
+        }
+        QCOMPARE(fb,2);
+    }
+
+    void schedulePageShowsDailySlotsAndDoesNotPostFromAnEmptyProject()
+    {
+        QTemporaryDir state, themeDir;
+        Theme theme(themeDir.path());
+        Backend backend(nullptr,nullptr,&theme,nullptr,state.path());
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty("backend",&backend);
+        engine.rootContext()->setContextProperty("theme",&theme);
+        QQmlComponent component(&engine,QUrl("qrc:/SchedulePage.qml"));
+        QScopedPointer<QObject> object(component.create());
+        QVERIFY2(object, qPrintable(component.errorString()));
+        auto *page=qobject_cast<QQuickItem *>(object.data());
+        QVERIFY(page);
+        QQuickWindow window;
+        window.resize(1360,860);
+        page->setParentItem(window.contentItem());
+        page->setSize(QSizeF(1360,860));
+        const QDate tomorrow=QDate::currentDate().addDays(1);
+        const double selected=double(QDateTime(tomorrow,QTime(0,0)).toMSecsSinceEpoch());
+        page->setProperty("selectedDate",selected);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTRY_COMPARE(page->property("targetSlotCount").toInt(),40);
+        QCOMPARE(page->property("dailyCount").toInt(),0);
+        QVERIFY(findItem(page,"scheduleColumn-instagram"));
+        QVERIFY(findItem(page,"scheduleColumn-facebook"));
+        QVERIFY(findItem(page,"scheduleColumn-youtube"));
+        QVERIFY(findItem(page,"scheduleColumn-tiktok"));
+        QSignalSpy requested(page,SIGNAL(scheduleRequested(QString,double)));
+        const double at=double(QDateTime(tomorrow,QTime(8,0)).toMSecsSinceEpoch());
+        QVERIFY(QMetaObject::invokeMethod(page,"chooseSlot",Q_ARG(QVariant,"instagram"),Q_ARG(QVariant,at)));
+        QCOMPARE(requested.size(),0);
+        QVERIFY(page->property("notice").toString().contains("reel",Qt::CaseInsensitive));
+        QVERIFY(!backend.busy());
+        QVERIFY(backend.scheduledPosts().isEmpty());
+        // TikTok has no posting API: its slots are reminders and never open the Post dialog.
+        QVERIFY(QMetaObject::invokeMethod(page,"chooseSlot",Q_ARG(QVariant,"tiktok"),Q_ARG(QVariant,at)));
+        QCOMPARE(requested.size(),0);
+        QVERIFY(page->property("notice").toString().contains("TikTok"));
+
+        auto *next=findItem(page,"scheduleNextDay");
+        QVERIFY(next);
+        QMetaObject::invokeMethod(next,"clicked");
+        QTRY_COMPARE(qint64(page->property("selectedDate").toDouble()),QDateTime(tomorrow.addDays(1),QTime(0,0)).toMSecsSinceEpoch());
+        page->setProperty("selectedDate",selected);
+        const QVariantList scheduled{
+            QVariantMap{{"platform","instagram"},{"id","ig1"},{"publishAt",at},{"title","Handwriting reveal"},{"status","scheduled"}},
+            QVariantMap{{"platform","facebook"},{"id","fb1"},{"publishAt",at+35*60000},{"title","Screen recording"},{"status","failed"},{"error","Connection needs attention"}},
+            QVariantMap{{"platform","youtube"},{"id","yt1"},{"publishAt",at+60*60000},{"title","Product walkthrough"},{"status","scheduled"}}
+        };
+        const QVariantList published{
+            QVariantMap{{"platform","instagram"},{"id","ig0"},{"published",at-3600000},{"title","Your handwriting, typed"},{"permalink","https://instagram.com/reel/demo/"}}
+        };
+        page->setProperty("scheduledRecords",scheduled);
+        page->setProperty("publishedReels",published);
+        QTRY_COMPARE(page->property("dailyCount").toInt(),4);
+        QVERIFY(findItem(page,"scheduleCard-facebook-fb1"));
+        QVERIFY(findItem(page,"scheduleFallback-facebook-fb1"));
+        QVERIFY(findItem(page,"scheduleCard-instagram-ig0"));
+
+        // Invalid cadence cannot alter saved settings or silently move slots to tomorrow.
+        page->setProperty("timingOpen",true);
+        QTRY_VERIFY(findItem(page,"scheduleStart-instagram"));
+        findItem(page,"scheduleStart-instagram")->setProperty("text","23:30");
+        QTRY_VERIFY(!findItem(page,"scheduleApplyTiming")->isEnabled());
+        QCOMPARE(backend.property("schedulePreferences").toMap().value("instagram").toMap().value("startMinute").toInt(),480);
+        findItem(page,"scheduleStart-instagram")->setProperty("text","07:00");
+        QTRY_VERIFY(findItem(page,"scheduleApplyTiming")->isEnabled());
+        QMetaObject::invokeMethod(findItem(page,"scheduleApplyTiming"),"clicked");
+        QTRY_COMPARE(backend.property("schedulePreferences").toMap().value("instagram").toMap().value("startMinute").toInt(),420);
+        QVERIFY(QFile::remove(state.filePath("schedule-plan.json")));
+        QVERIFY(QDir().mkpath(state.filePath("schedule-plan.json")));
+        findItem(page,"scheduleStart-instagram")->setProperty("text","06:00");
+        QMetaObject::invokeMethod(findItem(page,"scheduleApplyTiming"),"clicked");
+        QVERIFY(!page->property("notice").toString().contains("saved",Qt::CaseInsensitive));
+        QCOMPARE(backend.schedulePreferences().value("instagram").toMap().value("startMinute").toInt(),420);
+        page->setProperty("notice",QString());
+        page->setProperty("timingOpen",false);
+        QTest::qWait(150);
+        window.grabWindow().save("/tmp/reelcut-schedule-page.png");
+        window.resize(980,700);
+        page->setSize(QSizeF(980,700));
+        QTest::qWait(150);
+        for (const QString name : {"scheduleColumn-instagram","scheduleColumn-facebook","scheduleColumn-youtube","scheduleColumn-tiktok"}) {
+            auto *column=findItem(page,name);
+            QVERIFY(column->width() > 200);
+            const QPointF topLeft=column->mapToItem(page,QPointF());
+            QVERIFY(topLeft.x()>=0 && topLeft.x()+column->width()<=page->width()+1);
+        }
+        window.grabWindow().save("/tmp/reelcut-schedule-page-narrow.png");
+        page->setProperty("timingOpen",true);
+        QTest::qWait(100);
+        for (const QString name : {"scheduleStart-instagram","scheduleGap-facebook","scheduleGap-youtube","scheduleApplyTiming"}) {
+            auto *control=findItem(page,name);QVERIFY(control);
+            const QPointF pos=control->mapToItem(page,QPointF());
+            QVERIFY2(pos.x()>=0 && pos.x()+control->width()<=page->width()+1,qPrintable(name));
+        }
+        window.grabWindow().save("/tmp/reelcut-schedule-timing-narrow.png");
+        page->setParentItem(nullptr);
+    }
+
+    void scheduleNavigationPrefillsWithoutPublishing()
+    {
+        QTemporaryDir dir, state, themeDir;
+        QImage photo(64,64,QImage::Format_RGB32);
+        photo.fill(Qt::blue);
+        QVERIFY(photo.save(dir.filePath("photo.png")));
+        Project project;
+        project.clips={media::clipFor(media::probe(dir.filePath("photo.png")),1.0)};
+        write(dir.filePath("schedule.reel"),QJsonDocument(project.toJson(dir.path())).toJson());
+        Theme theme(themeDir.path());
+        Backend backend(nullptr,nullptr,&theme,nullptr,state.path());
+        QVERIFY(backend.openFile(dir.filePath("schedule.reel")));
+        HiggsfieldCredits higgsfield;
+        higgsfield.stateDir=state.path();
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("theme",&theme);
+        engine.rootContext()->setContextProperty("backend",&backend);
+        engine.rootContext()->setContextProperty("downloads",testDownloads());
+        engine.rootContext()->setContextProperty("higgsfield",&higgsfield);
+        engine.load(QUrl("qrc:/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window=qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->resize(1360,860);window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *toggle=findItem(window->contentItem(),"scheduleToggle");
+        QVERIFY(toggle);
+        window->setProperty("statsVisible",true);
+        toggle->setProperty("checked",true);
+        QMetaObject::invokeMethod(toggle,"toggled");
+        QTRY_VERIFY(window->property("scheduleVisible").toBool());
+        QVERIFY(!window->property("statsVisible").toBool());
+        QVERIFY(window->property("typing").toBool());
+        auto *page=findItem(window->contentItem(),"schedulePage");
+        QVERIFY(page && page->isVisible());
+        const QDate tomorrow=QDate::currentDate().addDays(1);
+        const double at=double(QDateTime(tomorrow,QTime(9,0)).toMSecsSinceEpoch());
+        page->setProperty("selectedDate",double(QDateTime(tomorrow,QTime(0,0)).toMSecsSinceEpoch()));
+        const int clips=backend.clips().size();
+        QTest::keyClick(window,Qt::Key_S);
+        QCOMPARE(backend.clips().size(),clips);
+        QVERIFY(QMetaObject::invokeMethod(page,"chooseSlot",Q_ARG(QVariant,"youtube"),Q_ARG(QVariant,at)));
+        QObject *dialog=window->findChild<QObject *>("postDialog");
+        QVERIFY(dialog);
+        QTRY_VERIFY(dialog->property("visible").toBool());
+        QCOMPARE(dialog->property("platform").toString(),QString("youtube"));
+        QCOMPARE(dialog->property("stage").toString(),QString("connect"));
+        QVERIFY(dialog->property("scheduleLater").toBool());
+        QCOMPARE(findItem(window->contentItem(),"postWhen")->property("text").toString(),
+                 QDateTime(tomorrow,QTime(9,0)).toString("yyyy-MM-dd HH:mm"));
+        QCOMPARE(backend.parseWhen(findItem(window->contentItem(),"postWhen")->property("text").toString()).value("ms").toDouble(),at);
+        // Backing out of account setup must never change this request into Publish/Next.
+        dialog->setProperty("stage","write");
+        QVERIFY(!findItem(window->contentItem(),"postNext")->isEnabled());
+        QVERIFY(!backend.busy());
+        QVERIFY(backend.calendarPosts().isEmpty());
+        QMetaObject::invokeMethod(dialog,"close");
+        QVERIFY(QMetaObject::invokeMethod(dialog,"openFor",Q_ARG(QVariant,"youtube")));
+        QVERIFY(!dialog->property("scheduleFromCalendar").toBool());
+        QVERIFY(!dialog->property("scheduleLater").toBool());
+        QMetaObject::invokeMethod(dialog,"close");
+        FakeInstagram instagram;
+        backend.instagram()->graphBase=instagram.base();
+        QSignalSpy connected(backend.instagram(),&InstagramApi::connectFinished);
+        backend.connectInstagram("good-token");
+        QVERIFY(connected.wait(5000));
+        QVERIFY(QMetaObject::invokeMethod(dialog,"openScheduled",Q_ARG(QVariant,"instagram"),Q_ARG(QVariant,at)));
+        QCOMPARE(dialog->property("stage").toString(),QString("scheduler"));
+        dialog->setProperty("stage","write");
+        QVERIFY(!findItem(window->contentItem(),"postNext")->isEnabled());
+        QMetaObject::invokeMethod(dialog,"close");
+        FakeConvex convex;
+        backend.setupScheduler(convex.base(),convex.key);
+        QVERIFY(QMetaObject::invokeMethod(dialog,"openScheduled",Q_ARG(QVariant,"instagram"),Q_ARG(QVariant,at)));
+        QCOMPARE(dialog->property("stage").toString(),QString("write"));
+        QVERIFY(dialog->property("scheduling").toBool());
+        QTRY_VERIFY(findItem(window->contentItem(),"postNext")->isEnabled());
+        QCOMPARE(findItem(window->contentItem(),"postNext")->property("text").toString(),QString("Schedule"));
+        QMetaObject::invokeMethod(findItem(window->contentItem(),"postQueue"),"clicked");
+        QVERIFY(!dialog->property("scheduleFromCalendar").toBool());
+        QVERIFY(dialog->property("queueing").toBool());
+        QVERIFY(!backend.busy());
+        for (const auto &call : instagram.calls) QVERIFY(!call.path.contains("/media"));
+        QMetaObject::invokeMethod(dialog,"close");
+        QTest::qWait(200);
+        window->grabWindow().save("/tmp/reelcut-schedule-main.png");
+        window->resize(980,700);
+        QTest::qWait(200);
+        window->grabWindow().save("/tmp/reelcut-schedule-main-narrow.png");
+        QTest::keyClick(window,Qt::Key_Escape);
+        QTRY_VERIFY(!window->property("scheduleVisible").toBool());
+        window->setProperty("scheduleVisible",true);
+        window->setProperty("statsVisible",true);
+        QVERIFY(!window->property("scheduleVisible").toBool());
     }
 
     void higgsfieldCountsSpending()

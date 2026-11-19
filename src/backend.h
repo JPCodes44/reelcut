@@ -1,4 +1,5 @@
 #pragma once
+#include "accounts.h"
 
 #include <QFileSystemWatcher>
 #include <QHash>
@@ -75,12 +76,15 @@ class Backend : public QObject {
     // The Instagram account Reelcut can publish to through Instagram's API, or empty.
     Q_PROPERTY(QString instagramUser READ instagramUser NOTIFY instagramChanged)
     // The Facebook Page and YouTube channel Reelcut publishes to, or empty.
+    Q_PROPERTY(Accounts *accountSettings READ accountSettings CONSTANT)
     Q_PROPERTY(QString facebookPage READ facebookPage NOTIFY accountsChanged)
     Q_PROPERTY(QString youtubeChannel READ youtubeChannel NOTIFY accountsChanged)
     // Scheduled posts (src/postscheduler.h): whether the backend is set up, and what's on it.
     Q_PROPERTY(bool schedulerReady READ schedulerReady NOTIFY schedulerChanged)
     Q_PROPERTY(QVariantList scheduledPosts READ scheduledPosts NOTIFY schedulerChanged)
     Q_PROPERTY(QString schedulerError READ schedulerError NOTIFY schedulerChanged)
+    Q_PROPERTY(QVariantList calendarPosts READ calendarPosts NOTIFY schedulerChanged)
+    Q_PROPERTY(QVariantMap schedulePreferences READ schedulePreferences WRITE setSchedulePreferences NOTIFY schedulePreferencesChanged)
     Q_PROPERTY(QString whisperState READ whisperState NOTIFY jobChanged)
 
 public:
@@ -225,6 +229,9 @@ public:
     Q_INVOKABLE void newProject();
     Q_INVOKABLE void open();
     Q_INVOKABLE bool openFile(const QString &path);
+    // Deterministic equivalents of the native file picker, shared with MCP.
+    // purpose: media, music, lut, open_project, save_project or export.
+    Q_INVOKABLE bool selectFiles(const QString &purpose, const QStringList &paths);
     Q_INVOKABLE void save();
     Q_INVOKABLE void saveAs();
     Q_INVOKABLE void exportVideo();
@@ -251,6 +258,15 @@ public:
     // postScheduled for all. One failing doesn't stop the others.
     Q_INVOKABLE void postTo(const QStringList &platforms, const QString &caption, const QString &hashtags,
                             const QString &title, double publishAtMs = 0);
+    // The next `count` open slots on each platform, from the Timing plan
+    // (schedulePreferences): today's slots still ahead, then tomorrow's, and so
+    // on. Skips slots already scheduled and times a platform won't take.
+    // Each: platform, publishAt (ms), label. Fewer when not enough fit.
+    Q_INVOKABLE QVariantList nextOpenSlots(const QStringList &platforms, int count) const;
+    // Exports once, then schedules the reel into the next `count` open slots
+    // on each platform. Never publishes straight away.
+    Q_INVOKABLE void queuePost(const QStringList &platforms, const QString &caption, const QString &hashtags,
+                               const QString &title, int count);
     // A typed time to post at: "2026-11-05 18:30", "tomorrow 9am", "today 6:30pm", "fri 9:00".
     // Gives ok, ms, label ("Thursday, Nov 5 at 6:30 PM · in 13 hours") and problem.
     Q_INVOKABLE QVariantMap parseWhen(const QString &text) const;
@@ -264,6 +280,11 @@ public:
     Q_INVOKABLE void removeScheduled(const QString &id);
     bool schedulerReady() const;
     QVariantList scheduledPosts() const;
+    QVariantList calendarPosts() const;
+    // A frame of a local video for QML, e.g. a scheduled post's preview tile.
+    Q_INVOKABLE QString videoFrame(const QString &path, int ms = 1000);
+    QVariantMap schedulePreferences() const { return m_schedulePreferences; }
+    void setSchedulePreferences(const QVariantMap &preferences);
     QString schedulerError() const;
     class PostScheduler *scheduler() const { return m_scheduler; }
     Q_INVOKABLE void connectInstagram(const QString &token);
@@ -276,6 +297,7 @@ public:
     Q_INVOKABLE void chooseFacebookPage(const QString &id);
     Q_INVOKABLE void disconnectFacebook();
     QString facebookPage() const;
+    Accounts *accountSettings() const { return m_accountSettings; }
     // YouTube: opens Google's sign-in for the OAuth client given.
     Q_INVOKABLE void connectYouTube(const QString &clientId, const QString &clientSecret);
     Q_INVOKABLE void disconnectYouTube();
@@ -320,6 +342,7 @@ signals:
     void postPublished(bool ok, const QString &message, const QUrl &link);
     void postScheduled(bool ok, const QString &message);
     void schedulerChanged();
+    void schedulePreferencesChanged();
     void projectChanged();
     void jobChanged();
     void messageChanged();
@@ -364,6 +387,7 @@ private:
     QString m_postFile;
     class InstagramApi *m_instagram = nullptr;
     class PostScheduler *m_scheduler = nullptr;
+    Accounts *m_accountSettings = nullptr;
     FacebookApi *m_facebook = nullptr;
     YouTubeApi *m_youtube = nullptr;
 
@@ -372,13 +396,24 @@ private:
     void postNext();
     void platformDone(const QString &platform, bool ok, const QString &message, const QUrl &link);
     bool readyToExport();
+    // Checks a post can go out: the platforms in order, caption, connections.
+    bool preparePost(const QStringList &requested, const QString &caption, const QString &hashtags,
+                     const QString &postTitle, QStringList *platforms);
+    // Exports once, then posts each (platform, time) in turn; an invalid time publishes now.
+    void exportAndPost(const QStringList &platforms, const QString &caption, const QString &hashtags,
+                       const QString &postTitle, const QList<QPair<QString, QDateTime>> &items);
     QStringList m_postQueue;
+    QList<QDateTime> m_postTimes;  // when each of m_postQueue goes out
+    bool m_postScheduledRun = false;
     QString m_posting;  // the platform being posted to now
     PostRequest m_postRequest;
     QVariantList m_postResults;
     // Facebook and YouTube posts scheduled from here, held by the platforms
-    // themselves: remembered to list until their time.
+    // themselves: retained for 90 days for calendar confirmation/history.
     QVariantList m_directScheduled;
+    QVariantMap m_scheduleVideos;   // "platform:publishAtMs" -> the exported file
+    QVariantMap m_schedulePreferences;
+    void loadSchedulePreferences();
     QString directScheduledFile() const;
     void loadDirectScheduled();
 

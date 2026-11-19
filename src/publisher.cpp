@@ -8,6 +8,7 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QUrl>
+#include <QUrlQuery>
 
 namespace Net {
 
@@ -30,7 +31,16 @@ void whenDone(QNetworkReply *reply, QObject *context, const std::function<void(c
         else if (error.isString())
             r.error = r.json.value("error_description").toString(error.toString());
         if (r.error.isEmpty() && reply->error() != QNetworkReply::NoError)
-            r.error = reply->errorString();
+            r.error = QObject::tr("The service could not be reached. Check your connection and try again.");
+        for (const auto &item : QUrlQuery(reply->request().url()).queryItems(QUrl::FullyDecoded)) {
+            if ((item.first.contains("token") || item.first.contains("secret")) && !item.second.isEmpty()) {
+                r.error.replace(item.second, "[hidden]");
+                r.error.replace(QString::fromLatin1(QUrl::toPercentEncoding(item.second)), "[hidden]");
+            }
+        }
+        const auto authorization = QString::fromUtf8(reply->request().rawHeader("Authorization"));
+        const int split = authorization.indexOf(' ');
+        if (split >= 0) r.error.replace(authorization.mid(split + 1), "[hidden]");
         reply->deleteLater();
         then(r);
     });

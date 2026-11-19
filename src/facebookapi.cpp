@@ -32,13 +32,26 @@ void FacebookApi::load() {
 }
 
 void FacebookApi::keep(const Page &page) {
-    m_pageId = page.id;
-    m_pageName = page.name;
-    m_pageToken = page.token;
-    m_candidates.clear();
-    Net::savePrivate(accountFile(), {{"pageId", page.id}, {"pageName", page.name}, {"pageToken", page.token}});
-    emit accountChanged();
-    emit connectFinished(true, tr("Connected to the Facebook Page %1.").arg(page.name));
+    const Page selected = page;
+    const int generation = m_connectGeneration;
+    Net::whenDone(get("/debug_token", {{"input_token", selected.token}}, m_inspectionToken), this,
+        [this, selected, generation](const Net::Response &r) {
+        if (generation != m_connectGeneration) return;
+        const auto metadata = r.json.value("data").toObject();
+        if (r.error.isEmpty() && metadata.contains("is_valid") && !metadata.value("is_valid").toBool()) {
+            m_candidates.clear(); m_inspectionToken.clear();
+            emit connectFinished(false, tr("The Page token is invalid. Your previous connection has been kept.")); return;
+        }
+        if (!Net::savePrivate(accountFile(), {{"pageId", selected.id}, {"pageName", selected.name}, {"pageToken", selected.token}})) {
+            m_candidates.clear(); m_inspectionToken.clear();
+            emit connectFinished(false, tr("The Page connection could not be saved. Your previous connection has been kept.")); return;
+        }
+        m_pageId = selected.id; m_pageName = selected.name; m_pageToken = selected.token;
+        m_tokenMetadata = r.error.isEmpty() ? metadata : QJsonObject{};
+        m_candidates.clear(); m_inspectionToken.clear();
+        emit accountChanged();
+        emit connectFinished(true, tr("Connected to the Facebook Page %1.").arg(selected.name));
+    });
 }
 
 QNetworkReply *FacebookApi::get(const QString &path, const QList<QPair<QString, QString>> &query, const QString &token) {
@@ -58,8 +71,16 @@ QNetworkReply *FacebookApi::postForm(const QString &path, const QList<QPair<QStr
 }
 
 void FacebookApi::connectToken(const QString &userToken) {
+    const int generation = ++m_connectGeneration;
+    m_candidates.clear();
+    m_inspectionToken = userToken.trimmed();
     Net::whenDone(get("/me/accounts", {{"fields", "id,name,access_token"}, {"limit", "100"}}, userToken.trimmed()), this,
-                  [this](const Net::Response &r) {
+                  [this, generation](const Net::Response &r) {
+        if (generation != m_connectGeneration) return;
+        if (!r.json.value("paging").toObject().value("next").toString().isEmpty()) {
+            m_inspectionToken.clear();
+            emit connectFinished(false, tr("This token has more Pages than can be shown. Paste the Page's own access token to choose it safely.")); return;
+        }
         static const QRegularExpression pageId("^[0-9]+$");
         QVector<Page> pages;
         for (const QJsonValue &v : r.json.value("data").toArray()) {
@@ -68,12 +89,19 @@ void FacebookApi::connectToken(const QString &userToken) {
             if (pageId.match(page.id).hasMatch() && !page.token.isEmpty())
                 pages << page;
         }
-        QString reason = r.error;
-        if (reason.isEmpty() && pages.isEmpty())
-            reason = tr("no Page came back. In your Meta app, add the pages_show_list, pages_read_engagement and "
-                        "pages_manage_posts permissions, and pick your Page when you generate the token.");
-        if (!reason.isEmpty()) {
-            emit connectFinished(false, tr("Facebook didn't accept that token: %1").arg(reason));
+        if (!r.error.isEmpty() || pages.isEmpty()) {
+            const QString candidate = m_inspectionToken;
+            Net::whenDone(get("/me", {{"fields", "id,name,category"}}, candidate), this,
+                [this, candidate, generation](const Net::Response &p) {
+                if (generation != m_connectGeneration) return;
+                const auto id = p.json.value("id").toString();
+                if (p.error.isEmpty() && QRegularExpression("^[0-9]+$").match(id).hasMatch()
+                    && !p.json.value("category").toString().isEmpty()) {
+                    keep({id, p.json.value("name").toString(), candidate}); return;
+                }
+                m_inspectionToken.clear();
+                emit connectFinished(false, tr("Facebook didn't accept that token. Use a Page token, or a user token with pages_show_list, pages_read_engagement and pages_manage_posts, sharing the Page you want."));
+            });
             return;
         }
         if (pages.size() == 1)
@@ -93,7 +121,13 @@ void FacebookApi::choosePage(const QString &id) {
     emit connectFinished(false, tr("That Page isn't one the token manages."));
 }
 
+void FacebookApi::cancelConnect() {
+    ++m_connectGeneration; m_candidates.clear(); m_inspectionToken.clear();
+}
+
 void FacebookApi::disconnect() {
+    cancelConnect();
+    m_tokenMetadata = {};
     QFile::remove(accountFile());
     m_pageId.clear();
     m_pageName.clear();

@@ -44,6 +44,10 @@ QStringList frameArgs(const Project &project, const ExportOptions &options, doub
 // mask job reads exactly these frames so its mask lines up.
 QString clipVideoChain(const Clip &clip, const QString &input);
 
+// The input options (before -i) that loop a still clip for as long as it
+// shows; empty for a video clip.
+QStringList stillInputArgs(const Clip &clip);
+
 // scale+crop that fills the 9:16 frame with a clip, honoring zoom and pan.
 QString framingFilter(const Clip &clip);
 

@@ -16,6 +16,8 @@ Rectangle {
     property int selectedOverlay: -1
     property int selectedEffect: -1
     property int selectedLayer: -1
+    property alias automationScroll: flick.contentX
+    readonly property real automationMaxScroll: Math.max(0, flick.contentWidth - flick.width)
     property real zoom: 1
     readonly property real gutter: 74
     // Finite duration only: a NaN here would make every x and width NaN.
@@ -266,7 +268,8 @@ Rectangle {
 
         // Ruler
         Repeater {
-            model: Math.ceil(root.safeDuration) + 1
+            // Capped: an absurd duration would mean millions of tick items.
+            model: Math.min(Math.ceil(root.safeDuration) + 1, 10000)
             delegate: Item {
                 required property int index
                 readonly property int every: root.pps < 18 ? 5 : root.pps < 40 ? 2 : 1
@@ -314,7 +317,8 @@ Rectangle {
                     x: 2
                     y: 2
                     Repeater {
-                        model: Math.max(1, Math.ceil((clipItem.width - 4) / 44))
+                        // Capped: a long clip zoomed in would otherwise be tens of thousands of items.
+                        model: Math.min(2000, Math.max(1, Math.ceil((clipItem.width - 4) / 44)))
                         delegate: Image {
                             required property int index
                             readonly property real tileSeconds: 44 / root.pps * (clipItem.modelData.speed || 1)

@@ -14,6 +14,7 @@ import QtQuick.Layouts
 Popup {
     id: root
     objectName: "postDialog"
+    signal manageAccounts(string platform)
     // Where to post. Instagram, Facebook and YouTube combine; TikTok goes alone.
     property var selected: ["instagram"]
     readonly property string platform: selected.length > 0 ? selected[0] : "instagram"
@@ -49,8 +50,23 @@ Popup {
     // Post later instead of now. Facebook and YouTube hold the post
     // themselves; Instagram needs Reelcut's scheduler (src/postscheduler.h).
     property bool scheduleLater: false
+    property bool scheduleFromCalendar: false
+    // Publish straight away: only when picked. By default a post goes into
+    // the next open slots of the schedule instead (Timing on the Schedule page).
+    property bool publishNow: false
+    property int queueCount: 1
     readonly property bool canSchedule: publishing && (!hasInstagram || backend.schedulerReady)
     readonly property bool scheduling: canSchedule && scheduleLater
+    readonly property bool queueing: publishing && !scheduleLater && !publishNow
+    // Ticks each minute while open, so the slot preview drops slots that pass.
+    property int clock: 0
+    Timer { interval: 60000; repeat: true; running: root.visible; onTriggered: root.clock++ }
+    // The slots the reel would go into: platform, publishAt, label.
+    readonly property var queueSlots: {
+        root.clock; backend.calendarPosts; backend.schedulePreferences
+        return queueing && canSchedule ? backend.nextOpenSlots(selected, queueCount) : []
+    }
+    readonly property bool queueReady: queueing && canSchedule && queueSlots.length === selected.length * queueCount
     readonly property var when: backend.parseWhen(whenField.text)
     readonly property var whenCheck: when.ok ? backend.checkWhen(selected, when.ms) : ({ ok: false, problem: when.problem })
     // Posts still to go out, or that didn't: the scheduler's and those Facebook and YouTube hold.
@@ -63,18 +79,32 @@ Popup {
     property var facebookPages: []
 
     function openFor(p) {
+        scheduleFromCalendar = false
+        scheduleLater = false
+        publishNow = false
+        queueCount = 1
         selected = [p || (backend.platform === "tiktok" ? "tiktok" : backend.platform)]
         stage = "write"
         captionField.text = backend.postCaption
         tagsField.text = backend.postHashtags
         titleField.text = backend.title
-        if (!root.when.ok)
-            whenField.text = backend.suggestWhen()
+        whenField.text = backend.suggestWhen()
         if (backend.schedulerReady)
             backend.refreshScheduled()
         open()
         if (hasYouTube) titleField.forceActiveFocus()
         else captionField.forceActiveFocus()
+    }
+    function openScheduled(p, publishAt) {
+        if (["instagram", "facebook", "youtube"].indexOf(p) < 0 || !isFinite(publishAt) || publishAt <= Date.now())
+            return
+        openFor(p)
+        useApi = true
+        scheduleFromCalendar = true
+        scheduleLater = true
+        whenField.text = Qt.formatDateTime(new Date(publishAt), "yyyy-MM-dd HH:mm")
+        if (!connected(p)) startConnect(p)
+        else if (hasInstagram && !backend.schedulerReady) stage = "scheduler"
     }
     // TikTok can't be combined: picking it clears the rest, and the reverse.
     // The last one picked can't be cleared.
@@ -90,7 +120,44 @@ Popup {
         }
         selected = ["instagram", "facebook", "youtube", "tiktok"].filter(function(p) { return now.indexOf(p) >= 0 })
     }
+    onClosed: backend.accountSettings.cancelSelection()
+
+    function automationDraft() {
+        return {visible:visible,stage:stage,platforms:selected,title:titleField.text,caption:captionField.text,hashtags:tagsField.text,
+            useApi:useApi,scheduleLater:scheduleLater,publishNow:publishNow,queueCount:queueCount,
+            queueSlots:queueSlots,when:whenField.text,check:check,whenCheck:whenCheck,progressText:progressText,
+            progressValue:progressValue,results:results,file:file,steps:steps,submitEnabled:next.enabled,submitLabel:next.text,
+            scheduleFromCalendar:scheduleFromCalendar,publishedOk:publishedOk,postLink:postLink.toString()}
+    }
+    function automationSetDraft(fields) {
+        if (!visible || stage !== "write") return {isError:true,error:"Open the Post draft before editing it."}
+        const allowed=["title","caption","hashtags","platforms","useApi","scheduleLater","publishNow","queueCount","when"]
+        if (!fields || typeof fields !== "object" || Array.isArray(fields) || !Object.keys(fields).every(function(k){return allowed.indexOf(k)>=0})) return {isError:true,error:"Unknown Post draft field."}
+        for (const key of Object.keys(fields)) {
+            if (["title","caption","hashtags","when"].indexOf(key)>=0 && typeof fields[key] !== "string") return {isError:true,error:key+" must be a string."}
+            if (["useApi","scheduleLater","publishNow"].indexOf(key)>=0 && typeof fields[key] !== "boolean") return {isError:true,error:key+" must be boolean."}
+            if (key==="queueCount" && (typeof fields[key] !== "number" || fields[key]<1 || fields[key]>30 || Math.floor(fields[key])!==fields[key])) return {isError:true,error:"queueCount must be a whole number from 1 to 30."}
+        }
+        if (fields.platforms !== undefined && (!Array.isArray(fields.platforms) || fields.platforms.length===0 || !fields.platforms.every(function(p){return ["instagram","facebook","youtube","tiktok"].indexOf(p)>=0}))) return {isError:true,error:"Choose valid posting platforms."}
+        if (fields.platforms !== undefined && fields.platforms.indexOf("tiktok")>=0 && fields.platforms.length>1) return {isError:true,error:"TikTok must be posted on its own, as in the UI."}
+        if (fields.title !== undefined) titleField.text=fields.title
+        if (fields.caption !== undefined) captionField.text=fields.caption
+        if (fields.hashtags !== undefined) tagsField.text=fields.hashtags
+        if (fields.platforms !== undefined) selected=["instagram","facebook","youtube","tiktok"].filter(function(p){return fields.platforms.indexOf(p)>=0})
+        if (fields.useApi !== undefined) useApi=fields.useApi
+        if (fields.scheduleLater !== undefined) { scheduleFromCalendar=false; scheduleLater=fields.scheduleLater; if (scheduleLater) publishNow=false }
+        if (fields.publishNow !== undefined) { publishNow=fields.publishNow; if (publishNow) { scheduleFromCalendar=false; scheduleLater=false } }
+        if (fields.queueCount !== undefined) queueCount=fields.queueCount
+        if (fields.when !== undefined) whenField.text=fields.when
+        return automationDraft()
+    }
+    function automationSubmit() {
+        if (!visible || stage !== "write" || !next.enabled) return {isError:true,error:"The Post draft is not ready. Inspect its validation messages first."}
+        next.clicked();return automationDraft()
+    }
+
     function startConnect(id) {
+        backend.accountSettings.cancelSelection()
         connectFor = id
         connectError.text = ""
         facebookPages = []
@@ -154,7 +221,7 @@ Popup {
             tokenField.text = ""
             secretField.text = ""
             facebookPages = []
-            stage = "write"
+            stage = scheduleFromCalendar && hasInstagram && !backend.schedulerReady ? "scheduler" : "write"
         }
     }
 
@@ -372,22 +439,72 @@ Popup {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    CheckBox {
+                    RadioButton {
+                        objectName: "postQueue"
+                        text: qsTr("Next open slots")
+                        checked: root.queueing
+                        onClicked: { root.scheduleFromCalendar = false; root.scheduleLater = false; root.publishNow = false }
+                    }
+                    RadioButton {
                         objectName: "postScheduleLater"
-                        Layout.fillWidth: true
-                        text: qsTr("Schedule for later")
+                        text: qsTr("At a set time")
                         enabled: root.canSchedule
                         checked: root.scheduleLater && root.canSchedule
-                        onToggled: {
-                            root.scheduleLater = checked
-                            if (checked) whenField.forceActiveFocus()
+                        onClicked: {
+                            root.scheduleFromCalendar = false
+                            root.publishNow = false
+                            root.scheduleLater = true
+                            whenField.forceActiveFocus()
                         }
                     }
+                    RadioButton {
+                        objectName: "postNow"
+                        text: qsTr("Publish now")
+                        checked: root.publishNow && !root.scheduleLater
+                        onClicked: { root.scheduleFromCalendar = false; root.scheduleLater = false; root.publishNow = true }
+                    }
+                    Item { Layout.fillWidth: true }
                     Button {
                         visible: !root.canSchedule
                         flat: true
                         text: qsTr("Set up…")
                         onClicked: root.stage = "scheduler"
+                    }
+                }
+                // How many slots, and which ones it'll take.
+                ColumnLayout {
+                    visible: root.queueing
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 32
+                    spacing: 6
+                    RowLayout {
+                        spacing: 8
+                        Label { text: qsTr("Slots on each platform"); font.pixelSize: 12 }
+                        SpinBox {
+                            objectName: "postQueueCount"
+                            from: 1; to: 30
+                            value: root.queueCount
+                            editable: true
+                            onValueModified: root.queueCount = value
+                        }
+                    }
+                    Label {
+                        objectName: "postQueueSlots"
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        font.pixelSize: 12
+                        color: root.queueReady ? theme.accent : "#ff8a80"
+                        text: !root.canSchedule
+                              ? (root.hasInstagram ? qsTr("Set up the scheduler to queue posts on Instagram.")
+                                                   : qsTr("Connect these platforms to queue posts."))
+                              : root.queueSlots.length === 0
+                              ? qsTr("No open slots fit. Check Timing on the Schedule page.")
+                              : root.selected.map(function(id) {
+                                    const times = root.queueSlots.filter(function(s) { return s.platform === id })
+                                                                 .map(function(s) { return s.label })
+                                    return root.label(id) + ": " + (times.length ? times.join(" · ") : qsTr("no open slot"))
+                                }).join("\n")
+                                + (root.queueReady ? "" : "\n" + qsTr("Not enough open slots for that many. Try fewer."))
                     }
                 }
                 ColumnLayout {
@@ -429,7 +546,10 @@ Popup {
             Label {
                 visible: root.stage === "write" && !root.blocked
                 Layout.fillWidth: true
-                text: root.scheduling
+                text: root.queueing
+                      ? qsTr("Add to queue exports the reel once and schedules it into the next open slots of your daily "
+                             + "schedule; when today's slots are used up it rolls on to the next day. Nothing is posted now.")
+                      : root.scheduling
                       ? (root.hasInstagram
                          ? qsTr("Schedule exports the reel and hands it over: your scheduler publishes it on Instagram "
                                 + "at that time, even with Reelcut closed and the computer off.")
@@ -446,6 +566,14 @@ Popup {
                 color: "#9a9aa2"
                 wrapMode: Text.Wrap
                 font.pixelSize: 12
+            }
+
+            Label {
+                visible: root.stage === "write" && root.scheduleFromCalendar && !root.canSchedule
+                Layout.fillWidth: true
+                text: qsTr("Connect the selected account and set up scheduling before confirming this slot.")
+                color: "#ffbd69"
+                wrapMode: Text.Wrap
             }
 
             // Upcoming scheduled posts.
@@ -542,6 +670,7 @@ Popup {
             }
             TextField {
                 id: schedulerKey
+                objectName: "postSchedulerKey"
                 visible: root.stage === "scheduler"
                 Layout.fillWidth: true
                 placeholderText: qsTr("Key (REELCUT_SECRET)")
@@ -549,6 +678,12 @@ Popup {
             }
 
             // ---- Connect ----
+            Button {
+                visible: root.stage === "write" || root.stage === "connect"
+                text: qsTr("Manage accounts in Settings")
+                flat: true
+                onClicked: root.manageAccounts(root.stage === "connect" ? root.connectFor : root.selected[0] || "instagram")
+            }
             Label {
                 visible: root.stage === "connect"
                 Layout.fillWidth: true
@@ -803,15 +938,21 @@ Popup {
                     id: next
                     objectName: "postNext"
                     visible: root.stage === "write"
-                    text: root.scheduling ? qsTr("Schedule") : root.publishing ? qsTr("Publish") : qsTr("Next")
+                    text: root.queueing ? qsTr("Add to queue")
+                          : root.scheduleFromCalendar || root.scheduling ? qsTr("Schedule") : root.publishing ? qsTr("Publish") : qsTr("Next")
                     highlighted: true
                     Material.foreground: theme.accentForeground
                     enabled: root.check.ok && !root.blocked && backend.clips.length > 0 && !backend.busy
+                             && (!root.scheduleFromCalendar || root.scheduling)
                              && (!root.scheduling || root.whenCheck.ok)
+                             && (!root.queueing || root.queueReady)
                     onClicked: {
+                        if (root.scheduleFromCalendar && !root.scheduling) return
                         root.stage = "exporting"
                         root.results = []
-                        if (root.publishing)
+                        if (root.queueing)
+                            backend.queuePost(root.selected, captionField.text, tagsField.text, titleField.text, root.queueCount)
+                        else if (root.publishing)
                             backend.postTo(root.selected, captionField.text, tagsField.text, titleField.text,
                                            root.scheduling ? root.when.ms : 0)
                         else

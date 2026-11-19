@@ -96,9 +96,7 @@ bool makeMask(const Clip &clip, const MaskFn &fn, const QString &output,
 
     // Decode: the clip's own export chain, shrunk to the model's input.
     QStringList decodeArgs{"-hide_banner", "-nostdin", "-loglevel", "error"};
-    if (clip.still)
-        decodeArgs << "-loop" << "1" << "-framerate" << QString::number(Project::Fps) << "-t" << num(clip.duration() + 0.1);
-    decodeArgs << "-i" << clip.path << "-filter_complex"
+    decodeArgs << stillInputArgs(clip) << "-i" << clip.path << "-filter_complex"
                << clipVideoChain(clip, "[0:v]") + QString(",scale=%1:%1:flags=area,format=rgb24[out]").arg(ModelSize)
                << "-map" << "[out]" << "-f" << "rawvideo" << "-";
     // Encode: grey frames, scaled up to a 9:16 mask video.

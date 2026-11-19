@@ -44,6 +44,7 @@ private:
     void addTool(const QString &name, const QString &description, const QJsonObject &properties,
                  const QStringList &required, bool edits, Handler handler, bool needsProject = true);
     void defineTools();
+    void defineLiveTools();
     QJsonObject callTool(const QString &name, const QJsonObject &args);
     QString resolvePath(const QJsonObject &args, QString *error) const;
     bool load(const QString &path, Project *project, QString *error) const;
