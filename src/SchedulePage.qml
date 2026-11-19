@@ -145,17 +145,35 @@ Rectangle {
         RowLayout {
             Layout.fillWidth:true
             spacing:10
+            // Takes the spare width, and gives it back first on narrow windows.
             ColumnLayout {
                 spacing:3
-                Label { text:qsTr("Daily schedule"); color:page.ink; font.pixelSize:24; font.bold:true }
-                Label { text:qsTr("10 videos per platform, in order through the day · your local time"); color:page.dim; font.pixelSize:12 }
+                Layout.fillWidth:true
+                Layout.minimumWidth:0
+                Label { text:qsTr("Daily schedule"); color:page.ink; font.pixelSize:24; font.bold:true; Layout.fillWidth:true; elide:Text.ElideRight }
+                Label { text:qsTr("10 videos per platform, in order through the day · your local time"); color:page.dim; font.pixelSize:12; Layout.fillWidth:true; elide:Text.ElideRight }
             }
-            Item { Layout.fillWidth:true }
             ToolButton { objectName:"schedulePreviousDay"; text:"‹"; font.pixelSize:26; Accessible.name:qsTr("Previous day"); onClicked:page.selectedDate=Plan.addDays(page.selectedDate,-1) }
-            ColumnLayout {
-                spacing:2
-                Label { text:Qt.formatDateTime(new Date(page.selectedDate),"dddd, MMM d"); color:page.ink; font.bold:true; font.pixelSize:16; Layout.alignment:Qt.AlignHCenter }
-                Label { text:Qt.formatDateTime(new Date(page.selectedDate),"yyyy · t"); color:page.dim; font.pixelSize:11; Layout.alignment:Qt.AlignHCenter }
+            // The date opens a month calendar to jump straight to any day.
+            AbstractButton {
+                id: dateButton
+                objectName:"scheduleDateButton"
+                Accessible.name:qsTr("Choose a date")
+                hoverEnabled:true
+                padding:4; leftPadding:2; rightPadding:2
+                implicitWidth:dateLabels.implicitWidth+2*padding
+                implicitHeight:dateLabels.implicitHeight+2*padding
+                onClicked:datePicker.openAt(page.selectedDate)
+                background: Rectangle {
+                    radius:8
+                    color:dateButton.hovered || datePicker.visible ? (page.dark ? "#ffffff14" : "#0000000d") : "transparent"
+                }
+                contentItem: ColumnLayout {
+                    id: dateLabels
+                    spacing:2
+                    Label { text:Qt.formatDateTime(new Date(page.selectedDate),"dddd, MMM d"); color:page.ink; font.bold:true; font.pixelSize:16; Layout.alignment:Qt.AlignHCenter }
+                    Label { text:Qt.formatDateTime(new Date(page.selectedDate),"yyyy · t"); color:page.dim; font.pixelSize:11; Layout.alignment:Qt.AlignHCenter }
+                }
             }
             ToolButton { objectName:"scheduleNextDay"; text:"›"; font.pixelSize:26; Accessible.name:qsTr("Next day"); onClicked:page.selectedDate=Plan.addDays(page.selectedDate,1) }
             Button { text:qsTr("Today"); flat:true; onClicked:page.selectedDate=Plan.dayStart(Date.now()) }
@@ -443,6 +461,104 @@ Rectangle {
             text:qsTr("Scheduled posts come from Reelcut. Published reels come from Stats. Past platform schedules remain unconfirmed until a matching published reel is seen.")
         }
     }
+    // Month calendar behind the header date: pick any day to jump to it.
+    Popup {
+        id: datePicker
+        objectName:"scheduleDatePicker"
+        property int year:new Date().getFullYear()
+        property int month:new Date().getMonth()
+        readonly property var postDays:Plan.postDays(page.scheduledRecords, page.publishedReels)
+        function openAt(ms) {
+            var d=new Date(ms); year=d.getFullYear(); month=d.getMonth(); open()
+        }
+        function shiftMonth(by) {
+            var d=new Date(year, month+by, 1); year=d.getFullYear(); month=d.getMonth()
+        }
+        // For automation and tests: jump to a local calendar date (month 0-based).
+        function choose(y, m, d) {
+            page.selectedDate=Plan.calendarStart(y, m, d)
+            close()
+        }
+        parent:dateButton
+        x:Math.round((dateButton.width-width)/2)
+        y:dateButton.height+6
+        width:300
+        padding:14
+        modal:false
+        focus:true
+        closePolicy:Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background:Rectangle { color:page.panel; radius:12; border.color:page.line }
+        contentItem:ColumnLayout {
+            spacing:8
+            RowLayout {
+                Layout.fillWidth:true
+                ToolButton { text:"‹"; font.pixelSize:20; Accessible.name:qsTr("Previous month"); onClicked:datePicker.shiftMonth(-1) }
+                Label {
+                    Layout.fillWidth:true
+                    horizontalAlignment:Text.AlignHCenter
+                    text:Qt.formatDate(new Date(datePicker.year, datePicker.month, 1), "MMMM yyyy")
+                    color:page.ink; font.bold:true; font.pixelSize:15
+                }
+                ToolButton { text:"›"; font.pixelSize:20; Accessible.name:qsTr("Next month"); onClicked:datePicker.shiftMonth(1) }
+            }
+            DayOfWeekRow {
+                Layout.fillWidth:true
+                locale:grid.locale
+                delegate:Label {
+                    required property string shortName
+                    text:shortName; color:page.dim; font.pixelSize:11
+                    horizontalAlignment:Text.AlignHCenter
+                }
+            }
+            MonthGrid {
+                id: grid
+                objectName:"scheduleMonthGrid"
+                Layout.fillWidth:true
+                // MonthGrid doesn't size itself from its cells: six rows of 34px.
+                Layout.preferredHeight:6*34+5*spacing
+                year:datePicker.year
+                month:datePicker.month
+                onClicked:function(date) { datePicker.choose(date.getFullYear(), date.getMonth(), date.getDate()) }
+                delegate:Rectangle {
+                    id: dayCell
+                    required property var model
+                    readonly property var d:model.date
+                    readonly property bool selected:{
+                        var s=new Date(page.selectedDate)
+                        return d.getFullYear()===s.getFullYear() && d.getMonth()===s.getMonth() && d.getDate()===s.getDate()
+                    }
+                    readonly property bool hasPosts:datePicker.postDays[d.getFullYear()+"-"+d.getMonth()+"-"+d.getDate()]===true
+                    implicitHeight:34
+                    radius:8
+                    color:selected ? Material.accent : (cellMouse.containsMouse ? (page.dark ? "#ffffff14" : "#0000000d") : "transparent")
+                    border.width:model.today && !selected ? 1 : 0
+                    border.color:Material.accent
+                    Label {
+                        anchors.centerIn:parent
+                        text:dayCell.model.day
+                        color:dayCell.selected ? "white" : page.ink
+                        opacity:dayCell.model.month===datePicker.month ? 1 : 0.35
+                        font.bold:dayCell.model.today || dayCell.selected
+                    }
+                    Rectangle {
+                        visible:dayCell.hasPosts
+                        width:4; height:4; radius:2
+                        anchors.horizontalCenter:parent.horizontalCenter
+                        anchors.bottom:parent.bottom; anchors.bottomMargin:4
+                        color:dayCell.selected ? "white" : Material.accent
+                    }
+                    // Hover only; MonthGrid itself turns the press into clicked(date).
+                    MouseArea { id: cellMouse; anchors.fill:parent; hoverEnabled:true; acceptedButtons:Qt.NoButton; cursorShape:Qt.PointingHandCursor }
+                }
+            }
+            Button {
+                Layout.alignment:Qt.AlignHCenter
+                text:qsTr("Today"); flat:true
+                onClicked:{ var t=new Date(); datePicker.choose(t.getFullYear(), t.getMonth(), t.getDate()) }
+            }
+        }
+    }
+
     Popup {
         id:postDetail
         parent:Overlay.overlay

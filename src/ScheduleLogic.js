@@ -111,6 +111,23 @@ function dayPosts(day, scheduled, published, now) {
         return p;
     }).sort(function(a,b) { return a.ms - b.ms; });
 }
+// "y-m-d" keys (local, month 0-based) of every day with a scheduled or published post.
+function postDays(scheduled, published) {
+    var days = {};
+    function mark(ms) {
+        ms = Number(ms);
+        if (!isFinite(ms) || ms <= 0) return;
+        var d = new Date(ms);
+        days[d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate()] = true;
+    }
+    (scheduled || []).forEach(function(p) { if (p && platforms.indexOf(p.platform) >= 0) mark(p.publishAt); });
+    (published || []).forEach(function(p) {
+        if (!p || platforms.indexOf(p.platform) < 0) return;
+        if (p.platform === "youtube" && p.privacyStatus !== "public") return;
+        mark(p.published);
+    });
+    return days;
+}
 function platformSummary(platform, cards, targetSlots) {
     var summary = {covered:0, scheduled:0, published:0, failed:0, awaiting:0, target:targetCount};
     (cards || []).forEach(function(p) {

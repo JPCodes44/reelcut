@@ -5489,6 +5489,32 @@ private slots:
         QVERIFY(next);
         QMetaObject::invokeMethod(next,"clicked");
         QTRY_COMPARE(qint64(page->property("selectedDate").toDouble()),QDateTime(tomorrow.addDays(1),QTime(0,0)).toMSecsSinceEpoch());
+        // Clicking the header date opens a month calendar; choosing a day jumps straight to it.
+        auto *dateButton=findItem(page,"scheduleDateButton");
+        QVERIFY(dateButton);
+        QMetaObject::invokeMethod(dateButton,"clicked");
+        QObject *picker=page->findChild<QObject*>("scheduleDatePicker");
+        QVERIFY(picker);
+        QTRY_VERIFY(picker->property("visible").toBool());
+        QTRY_VERIFY(findItem(window.contentItem(),"scheduleMonthGrid"));
+        const QDate far=QDate::currentDate().addMonths(5);
+        QVERIFY(QMetaObject::invokeMethod(picker,"choose",Q_ARG(QVariant,far.year()),Q_ARG(QVariant,far.month()-1),Q_ARG(QVariant,far.day())));
+        QTRY_COMPARE(qint64(page->property("selectedDate").toDouble()),QDateTime(far,QTime(0,0)).toMSecsSinceEpoch());
+        QTRY_VERIFY(!picker->property("visible").toBool());
+        // A real click on a day cell jumps there too.
+        QMetaObject::invokeMethod(dateButton,"clicked");
+        QTRY_VERIFY(picker->property("visible").toBool());
+        auto *grid=findItem(window.contentItem(),"scheduleMonthGrid");
+        QTRY_VERIFY(grid->height()>100);
+        QQuickItem *cell=nullptr;
+        const QDate target(far.year(),far.month(),15);
+        for (auto *c: grid->property("contentItem").value<QQuickItem*>()->childItems())
+            if (c->property("d").toDateTime().date()==target) cell=c;
+        QVERIFY(cell);
+        QTest::qWait(400); // let the popup's enter transition finish
+        QTest::mouseClick(&window,Qt::LeftButton,{},cell->mapToScene(QPointF(cell->width()/2,cell->height()/2)).toPoint());
+        QTRY_COMPARE(qint64(page->property("selectedDate").toDouble()),QDateTime(target,QTime(0,0)).toMSecsSinceEpoch());
+        QTRY_VERIFY(!picker->property("visible").toBool());
         page->setProperty("selectedDate",selected);
         const QVariantList scheduled{
             QVariantMap{{"platform","instagram"},{"id","ig1"},{"publishAt",at},{"title","Handwriting reveal"},{"status","scheduled"}},
