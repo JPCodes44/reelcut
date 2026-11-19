@@ -23,6 +23,8 @@ ApplicationWindow {
     property bool helpVisible: false
     property bool safeZones: true
     property bool downloadsVisible: true
+    // Which page fills the window: the editor, or the reel workflow checklist.
+    property string page: "editor"
     property int selectedClip: -1
     property int selectedOverlay: -1
     property int selectedEffect: -1
@@ -75,6 +77,40 @@ ApplicationWindow {
             selectionKind = "none"
         } else if (selectedClip >= 0) {
             backend.removeClip(selectedClip)
+        }
+    }
+
+    // A button on the workflow page: do the step in the editor.
+    function runWorkflowAction(name) {
+        if (name === "addMedia") {
+            backend.addMedia()
+            return
+        }
+        if (name === "export") {
+            backend.exportVideo()
+            return
+        }
+        if (name === "post") {
+            postDialog.openFor("")
+            return
+        }
+        page = "editor"
+        if (name === "transcribe") {
+            select("captions", -1)
+            backend.transcribe()
+        } else if (name === "cutSilences") {
+            const i = selectedClip >= 0 ? selectedClip : 0
+            if (backend.clips.length > 0) {
+                select("clip", i)
+                backend.cutSilences(i)
+            } else {
+                backend.notify(qsTr("Add clips first, then cut their silences."), true)
+            }
+        } else if (name === "captions") {
+            select("captions", -1)
+        } else if (name === "hook") {
+            seek(0)
+            select("overlay", backend.addOverlay(0))
         }
     }
 
@@ -176,7 +212,19 @@ ApplicationWindow {
                     }
                     Item { Layout.fillWidth: true }
                     ToolButton {
+                        objectName: "workflowToggle"
+                        Layout.minimumWidth: implicitWidth
+                        text: qsTr("Workflow")
+                        checkable: true
+                        checked: win.page === "workflow"
+                        onToggled: win.page = checked ? "workflow" : "editor"
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("The reel workflow: every stage from research to posting, as a checklist")
+                    }
+                    ToolButton {
                         objectName: "downloadsToggle"
+                        visible: win.page === "editor"
                         Layout.minimumWidth: implicitWidth
                         text: qsTr("Downloads")
                         checkable: true
@@ -238,7 +286,17 @@ ApplicationWindow {
                 }
             }
 
+            WorkflowPage {
+                id: workflowPage
+                objectName: "workflowPage"
+                visible: win.page === "workflow"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                onActionRequested: function(name) { win.runWorkflowAction(name) }
+            }
+
             RowLayout {
+                visible: win.page === "editor"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 spacing: 0
@@ -282,10 +340,11 @@ ApplicationWindow {
                 }
             }
 
-            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: win.line }
+            Rectangle { visible: win.page === "editor"; Layout.fillWidth: true; Layout.preferredHeight: 1; color: win.line }
 
             ReelTimeline {
                 id: timeline
+                visible: win.page === "editor"
                 Layout.fillWidth: true
                 Layout.preferredHeight: implicitHeight
                 Layout.minimumHeight: implicitHeight  // follows the resized music lane

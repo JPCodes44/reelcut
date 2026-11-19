@@ -27,5 +27,6 @@
         <file alias="GradeEffect.qml">GradeEffect.qml</file>
         <file alias="PostDialog.qml">PostDialog.qml</file>
         <file alias="FontPicker.qml">FontPicker.qml</file>
+        <file alias="WorkflowPage.qml">WorkflowPage.qml</file>
     </qresource>
 </RCC>
