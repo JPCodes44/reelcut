@@ -205,8 +205,11 @@ function remixPrompt(source, brand, language, mode) {
 // The prompt that turns a placeholder's raw clips into the finished reel: built
 // from that placeholder's own guide, reference reel, link, folder and caption,
 // so pasting it into Claude Code recreates the original's edit on the new clips.
-function editPrompt(post) {
+// language: the audience to cater to; empty keeps the original's language.
+function editPrompt(post, language) {
     post = post || {};
+    language = String(language || "").trim();
+    var audience = language ? language + "-speaking viewers" : "the original's audience, in the original's language";
     var title = String(post.title || "Untitled remix");
     var folder = String(post.folder || "").trim() || "<clip folder>";
     var reference = String(post.reference || "").trim();
@@ -228,7 +231,8 @@ function editPrompt(post) {
         "Slot: " + slot,
     ];
     if (post.note) lines.push("What this slot posts: " + String(post.note));
-    if (post.caption) lines.push("Caption: " + String(post.caption));
+    lines.push("Audience: " + audience + ". All on-screen text, the hook and the caption are " + (language ? "in " + language + (language === "Hinglish" ? " (Hindi-English mix in Latin script, as Indian creators write it)" : "") + ", written the way a native creator would, not word-for-word translated" : "in the original's language") + ". This overrides any language the plan below names.");
+    if (post.caption) lines.push("Draft caption (fallback only): " + String(post.caption));
     lines.push("", "The filming plan the clips were shot to:");
     if (guide.length)
         guide.forEach(function(s, i) { lines.push("   " + (i + 1) + ". " + s); });
@@ -240,7 +244,8 @@ function editPrompt(post) {
         "3. Pick the takes: for each shot, scrub its raw clip (preview frames every 0.5 s) and choose the stretch that best matches the original's action, the moment of a tap or a reveal landing on the same beat. Cut away fumbles, dead starts and the old brand.",
         "4. Build it: create_project in " + folder + " for " + String(post.platform || "instagram") + ", add the clips in shot order, then per shot set the in/out and speed so it lasts exactly the original's length, and set zoom/pan and motion so framing and camera moves match. Match transitions. Recreate every text overlay and sticker at the same time and place (hook in the language the plan says; the brand in place of the old one). Use the original's audio as the music track, aligned at 0, unless the plan says otherwise. Colour match with set_look against the reference frames. Add the brand end card if the plan asks for one.",
         "5. Compare: for every cut time, preview_frame the edit and pull the reference frame at the same time, stack them side by side in one contact sheet and read it. Fix any shot whose timing, framing, text or sticker is off. Done when total length matches the reference within 0.1 s and every pair lines up.",
-        "6. Export the reel and show me the contact sheet and the file path.",
+        "6. Caption: get the original's caption and hashtags with `yt-dlp --print description " + (link || "<original URL>") + "` (or read them off the post). Repurpose it for TextInk (textink.ca) changing as little as possible: keep the wording, line breaks, emojis, tone and hashtag order. Change only what has to change: the old brand's name, @handles, links and brand hashtags become TextInk, @textink / textink.ca and #textink, and any claim that isn't true of TextInk gets the nearest true version. " + (language ? "If the original isn't in " + language + ", carry it into " + language + " with the same length and feel; keep hashtags that work in any language and swap the others for their common " + language + " equivalents. " : "") + "Show me the original and the new caption side by side with each change listed, then use the new caption for this reel.",
+        "7. Export the reel and show me the contact sheet, the caption and the file path.",
         "",
         "Do not post or schedule anything. When it's done, ask me before replacing the placeholder in the " + slot + " slot.");
     return lines.join("\n");

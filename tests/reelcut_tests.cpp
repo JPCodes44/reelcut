@@ -5453,6 +5453,11 @@ private slots:
             check(edit.indexOf('instagram 2026-11-20 08:00')>=0,'edit prompt names the slot');
             check(edit.indexOf('Do not post or schedule')>=0,'edit prompt never posts');
             check(editPrompt({}).indexOf('(none written')>=0,'edit prompt without a guide');
+            check(edit.indexOf('in the original\'s language')>=0 && edit.indexOf('carry it into')<0,'no language keeps the original');
+            var hing=editPrompt({referenceUrl:'https://x/1'},'Hinglish');
+            check(hing.indexOf('Audience: Hinglish-speaking viewers')>=0 && hing.indexOf('Latin script')>=0,'language sets the audience');
+            check(hing.indexOf('carry it into Hinglish')>=0,'caption follows the chosen language');
+            check(hing.indexOf('yt-dlp --print description https://x/1')>=0 && hing.indexOf('changing as little as possible')>=0,'caption repurposed from the original');
             check(remixPrompt('https://tiktok.com/@a/video/1','','','reels').indexOf('Remake this reel')>=0,'single reel wording');
             errors.join('; ');
         )JS");

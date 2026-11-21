@@ -898,10 +898,21 @@ Rectangle {
                 visible:postDetail.placeholder
                 Layout.fillWidth:true; spacing:8
                 TextEdit { id:detailClipboard; visible:false }
+                ComboBox {
+                    id:editLanguage
+                    objectName:"scheduleEditLanguage"
+                    editable:true
+                    Layout.preferredWidth:150
+                    // First entry keeps the original's language; type any other.
+                    model:[qsTr("Original language"),"English","Hinglish","Hindi","Spanish","Portuguese","German","French","Arabic","Indonesian","Tagalog"]
+                    Accessible.name:qsTr("Audience language")
+                    ToolTip.visible:hovered; ToolTip.text:qsTr("Audience: the language for on-screen text and caption")
+                    readonly property string language:editText===model[0] ? "" : editText.trim()
+                }
                 Button {
                     objectName:"scheduleCopyEditPrompt"
                     text:qsTr("Copy Claude edit prompt"); highlighted:true
-                    onClicked:{ detailClipboard.text=Plan.editPrompt(page.selectedPost); detailClipboard.selectAll(); detailClipboard.copy(); postDetail.copied=qsTr("Prompt copied. Paste it into Claude Code.") }
+                    onClicked:{ detailClipboard.text=Plan.editPrompt(page.selectedPost,editLanguage.language); detailClipboard.selectAll(); detailClipboard.copy(); postDetail.copied=qsTr("Prompt copied. Paste it into Claude Code.") }
                 }
                 Button {
                     objectName:"scheduleCopyOriginalLink"
