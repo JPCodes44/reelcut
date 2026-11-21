@@ -5443,6 +5443,16 @@ private slots:
             var picked=remixPrompt('https://tiktok.com/@a/video/1\n https://instagram.com/reel/B ','','','reels');
             check(picked.indexOf('Remake these 2 reels')>=0 && picked.indexOf('   - https://tiktok.com/@a/video/1')>=0 && picked.indexOf('   - https://instagram.com/reel/B')>=0,'remix prompt lists picked reels');
             check(picked.indexOf('--flat-playlist')<0,'reel mode skips profile listing');
+            var edit=editPrompt({title:'TextInk remix · cortisol',platform:'instagram',ms:new Date(2026,10,20,8,0).getTime(),
+                referenceUrl:'https://instagram.com/reel/ABC',reference:'/v/ref.mp4',folder:'/v/cortisol',caption:'Try textink.ca',
+                guide:['Shot 1 (1 s): notebook','','Shot 2 (2 s): iPad','Folder: /v/cortisol']});
+            check(edit.indexOf('Original reel: https://instagram.com/reel/ABC')>=0,'edit prompt carries the original link');
+            check(edit.indexOf('Raw clips: /v/cortisol')>=0 && edit.indexOf('Reference copy: /v/ref.mp4')>=0,'edit prompt names folder and reference');
+            check(edit.indexOf('   1. Shot 1 (1 s): notebook')>=0 && edit.indexOf('   2. Shot 2 (2 s): iPad')>=0,'edit prompt lists the guide steps');
+            check(edit.indexOf('   3. ')<0,'blank and folder steps left out of the plan');
+            check(edit.indexOf('instagram 2026-11-20 08:00')>=0,'edit prompt names the slot');
+            check(edit.indexOf('Do not post or schedule')>=0,'edit prompt never posts');
+            check(editPrompt({}).indexOf('(none written')>=0,'edit prompt without a guide');
             check(remixPrompt('https://tiktok.com/@a/video/1','','','reels').indexOf('Remake this reel')>=0,'single reel wording');
             errors.join('; ');
         )JS");

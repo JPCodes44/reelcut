@@ -712,7 +712,8 @@ Rectangle {
         readonly property string videoFile:!page.selectedPost ? ""
             : page.selectedPost.video ? String(page.selectedPost.video)
             : placeholder && page.selectedPost.reference ? String(page.selectedPost.reference) : ""
-        onOpened: if (videoFile.length>0) { reelPlayer.source="file://"+videoFile; reelPlayer.play() }
+        property string copied:""
+        onOpened: { copied=""; if (videoFile.length>0) { reelPlayer.source="file://"+videoFile; reelPlayer.play() } }
         onClosed: { reelPlayer.stop(); reelPlayer.source="" }
         MediaDevices { id:reelDevices }
         MediaPlayer {
@@ -891,6 +892,24 @@ Rectangle {
                     HoverHandler { id:folderHover; cursorShape:Qt.PointingHandCursor }
                     TapHandler { onTapped:backend.openPlaceholderFolder(page.selectedPost.id) }
                 }
+            }
+            // Hand-off to Claude: the edit prompt built from this slot's plan, and the original's link.
+            RowLayout {
+                visible:postDetail.placeholder
+                Layout.fillWidth:true; spacing:8
+                TextEdit { id:detailClipboard; visible:false }
+                Button {
+                    objectName:"scheduleCopyEditPrompt"
+                    text:qsTr("Copy Claude edit prompt"); highlighted:true
+                    onClicked:{ detailClipboard.text=Plan.editPrompt(page.selectedPost); detailClipboard.selectAll(); detailClipboard.copy(); postDetail.copied=qsTr("Prompt copied. Paste it into Claude Code.") }
+                }
+                Button {
+                    objectName:"scheduleCopyOriginalLink"
+                    visible:postDetail.placeholder && (page.selectedPost.referenceUrl||"").length>0
+                    text:qsTr("Copy original link")
+                    onClicked:{ detailClipboard.text=page.selectedPost.referenceUrl; detailClipboard.selectAll(); detailClipboard.copy(); postDetail.copied=qsTr("Link copied.") }
+                }
+                Label { Layout.fillWidth:true; text:postDetail.copied; color:page.dim; font.pixelSize:11; elide:Text.ElideRight }
             }
             RowLayout {
                 Layout.fillWidth:true

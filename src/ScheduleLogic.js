@@ -201,3 +201,47 @@ function remixPrompt(source, brand, language, mode) {
         "Placeholders never publish; keep this to placeholders and post nothing. Finish with a table: slot, original reel, views, what I need to film."
     ].join("\n");
 }
+
+// The prompt that turns a placeholder's raw clips into the finished reel: built
+// from that placeholder's own guide, reference reel, link, folder and caption,
+// so pasting it into Claude Code recreates the original's edit on the new clips.
+function editPrompt(post) {
+    post = post || {};
+    var title = String(post.title || "Untitled remix");
+    var folder = String(post.folder || "").trim() || "<clip folder>";
+    var reference = String(post.reference || "").trim();
+    var link = String(post.referenceUrl || "").trim();
+    var guide = (post.guide || []).map(function(s) { return String(s).trim(); })
+        .filter(function(s) { return s.length > 0 && !/^folder:/i.test(s); });
+    var when = post.ms ? new Date(post.ms) : null;
+    var slot = when ? (String(post.platform || "instagram") + " " + when.getFullYear() + "-" + String(when.getMonth() + 1).padStart(2, "0")
+        + "-" + String(when.getDate()).padStart(2, "0") + " " + String(when.getHours()).padStart(2, "0") + ":" + String(when.getMinutes()).padStart(2, "0"))
+        : String(post.platform || "instagram");
+    var lines = [
+        "Edit the remix: " + title,
+        "",
+        "Make this reel a shot-for-shot copy of the original: same length, cut points, framing, motion, speed, text, stickers, music and look. Only the footage changes: use my raw clips. They are NOT edited: they run long, start and end early or late, may be shot wider or tighter, at another speed or angle. Do every edit needed (trim, reorder within a shot, speed change, crop/zoom/pan to match framing, push-ins, colour match, stabilise feel) so each shot reads like the original's. Use the Reelcut MCP tools.",
+        "",
+        "Original reel: " + (link || "(no link)"),
+        "Reference copy: " + (reference || "(none; download the original with app_downloads_download)"),
+        "Raw clips: " + folder + " (clip01.mp4, clip02.mp4 ... in shot order)",
+        "Slot: " + slot,
+    ];
+    if (post.note) lines.push("What this slot posts: " + String(post.note));
+    if (post.caption) lines.push("Caption: " + String(post.caption));
+    lines.push("", "The filming plan the clips were shot to:");
+    if (guide.length)
+        guide.forEach(function(s, i) { lines.push("   " + (i + 1) + ". " + s); });
+    else
+        lines.push("   (none written; work from the reference alone)");
+    lines.push("",
+        "1. Check the clips: list " + folder + " and probe_media each clip (length, fps, size, rotation). If a shot from the plan has no clip, or a clip is unusable (blurry, old brand in frame, too short for its shot), stop and tell me which one to refilm. Done when every shot maps to a clip.",
+        "2. Break down the original: probe the reference, find every cut with ffmpeg scene detection (select='gt(scene,0.25)',showinfo) and write a shot table: start, end, length to 0.05 s, framing (wide/close/top-down), camera move (static, push-in, pan, shake), speed, transition, on-screen text (words, position, size, colour, font look, when it appears and leaves), stickers (what, where, when), and the colour look. Pull a frame at the middle of each shot and read it. Done when the shot lengths add up to the reference length.",
+        "3. Pick the takes: for each shot, scrub its raw clip (preview frames every 0.5 s) and choose the stretch that best matches the original's action, the moment of a tap or a reveal landing on the same beat. Cut away fumbles, dead starts and the old brand.",
+        "4. Build it: create_project in " + folder + " for " + String(post.platform || "instagram") + ", add the clips in shot order, then per shot set the in/out and speed so it lasts exactly the original's length, and set zoom/pan and motion so framing and camera moves match. Match transitions. Recreate every text overlay and sticker at the same time and place (hook in the language the plan says; the brand in place of the old one). Use the original's audio as the music track, aligned at 0, unless the plan says otherwise. Colour match with set_look against the reference frames. Add the brand end card if the plan asks for one.",
+        "5. Compare: for every cut time, preview_frame the edit and pull the reference frame at the same time, stack them side by side in one contact sheet and read it. Fix any shot whose timing, framing, text or sticker is off. Done when total length matches the reference within 0.1 s and every pair lines up.",
+        "6. Export the reel and show me the contact sheet and the file path.",
+        "",
+        "Do not post or schedule anything. When it's done, ask me before replacing the placeholder in the " + slot + " slot.");
+    return lines.join("\n");
+}
