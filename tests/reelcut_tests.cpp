@@ -5581,6 +5581,9 @@ private slots:
                 QCOMPARE(p.value("guide").toStringList(),QStringList({"Film A","Film B"}));  // blank steps dropped
             }
             QVERIFY(found);
+            // No folder given and none in the guide: nothing to open.
+            QVERIFY(!backend.openPlaceholderFolder(id));
+            QVERIFY(!backend.openPlaceholderFolder("nope"));
             for (const QVariant &v : backend.nextOpenSlots({"instagram"},30))
                 QVERIFY(qint64(v.toMap().value("publishAt").toDouble())!=at);
         }
@@ -5595,6 +5598,20 @@ private slots:
         for (const QVariant &v : reloaded.calendarPosts())
             if (v.toMap().value("id")==id) { ++count; QCOMPARE(v.toMap().value("status").toString(),QString("placeholder")); }
         QCOMPARE(count,1);
+        // The clip folder: taken from a "Folder:" guide step, made and opened on click.
+        {
+            Backend backend(nullptr,nullptr,nullptr,nullptr,state.path());
+            QUrl opened; backend.openUrl=[&](const QUrl &url){opened=url;};
+            const QString folder=state.filePath("remixes/clip folder");
+            const QString fid=backend.addPlaceholder({{"platform","instagram"},{"publishAt",double(at+86400000)},
+                {"title","Remix F"},{"guide",QStringList{"Film A","Folder: "+folder}}});
+            QVERIFY(!fid.isEmpty());
+            QVERIFY(!QDir(folder).exists());
+            QVERIFY(backend.openPlaceholderFolder(fid));
+            QVERIFY(QDir(folder).exists());
+            QCOMPARE(opened,QUrl::fromLocalFile(folder));
+            QVERIFY(backend.removePlaceholder(fid));
+        }
         QVERIFY(!reloaded.removePlaceholder("nope"));
         QVERIFY(reloaded.removePlaceholder(id));
         for (const QVariant &v : reloaded.calendarPosts()) QVERIFY(v.toMap().value("id")!=id);

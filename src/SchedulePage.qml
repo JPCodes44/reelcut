@@ -872,6 +872,26 @@ Rectangle {
                     }
                 }
             }
+            // Where the filmed clips go: one click opens it (made if missing).
+            RowLayout {
+                visible:postDetail.placeholder && (page.selectedPost.folder||"").length>0
+                Layout.fillWidth:true; spacing:10
+                Button {
+                    objectName:"scheduleOpenClipFolder"
+                    text:qsTr("📂 Open clips folder")
+                    highlighted:true
+                    onClicked:backend.openPlaceholderFolder(page.selectedPost.id)
+                }
+                Label {
+                    Layout.fillWidth:true
+                    text:postDetail.placeholder ? (page.selectedPost.folder||"") : ""
+                    color:page.dim; font.pixelSize:11; font.underline:folderHover.hovered
+                    elide:Text.ElideMiddle
+                    ToolTip.visible:folderHover.hovered; ToolTip.text:text
+                    HoverHandler { id:folderHover; cursorShape:Qt.PointingHandCursor }
+                    TapHandler { onTapped:backend.openPlaceholderFolder(page.selectedPost.id) }
+                }
+            }
             RowLayout {
                 Layout.fillWidth:true
                 Button {
