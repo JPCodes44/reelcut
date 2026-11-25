@@ -173,6 +173,7 @@ int main(int argc, char *argv[]) {
 
     AppBridge bridge;
     bridge.attach(&backend,&downloads,&stats,&higgsfield,qobject_cast<QQuickWindow *>(engine.rootObjects().first()));
+    bridge.registry().add("songs", &songs);
     bridge.registry().add("theme",&theme);
     bridge.registry().add("language",&translator);
     if (!bridge.listen()) qWarning("reelcut: the live MCP interface could not be started");
