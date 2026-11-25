@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="ModalMeter.qml">ModalMeter.qml</file>
+        <file alias="SongsPage.qml">SongsPage.qml</file>
+    </qresource>
+</RCC>
