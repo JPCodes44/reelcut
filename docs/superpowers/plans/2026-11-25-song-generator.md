@@ -849,6 +849,7 @@ Slots:
 #include <QPointer>
 #include <QTimer>
 #include <QVariantMap>
+#include <functional>
 
 class ModalUsage;
 class QNetworkAccessManager;
@@ -905,6 +906,7 @@ private:
     QNetworkRequest request(const QString &path) const;
     static QString explain(QNetworkReply *reply);
     void setStage(const QString &stage);
+    void later(const std::function<void()> &f);
     void poll();
     void download(const QStringList &files, int index);
     void finish();
@@ -951,6 +953,10 @@ private:
 #include <QUrlQuery>
 
 static QJsonObject parse(const QByteArray &body) { return QJsonDocument::fromJson(body).object(); }
+
+// Answers that are known at once still arrive after the caller returns, like
+// the network ones, so a caller can connect first and wait.
+void SongGenerator::later(const std::function<void()> &f) { QTimer::singleShot(0, this, f); }
 
 SongGenerator::SongGenerator(ModalUsage *usage, const QString &stateDir, const QString &songsDir, QObject *parent)
     : QObject(parent), m_usage(usage), m_net(new QNetworkAccessManager(this)), m_stateDir(stateDir),
@@ -999,7 +1005,7 @@ QString SongGenerator::explain(QNetworkReply *reply) {
 void SongGenerator::setStage(const QString &stage) { m_stage = stage; emit stateChanged(); }
 
 void SongGenerator::testConnection() {
-    if (!configured()) { emit connectionTested(false, tr("Fill in the endpoint, token ID and secret.")); return; }
+    if (!configured()) { later([this] { emit connectionTested(false, tr("Fill in the endpoint, token ID and secret.")); }); return; }
     QNetworkReply *reply = m_net->get(request("/health"));
     connect(reply, &QNetworkReply::finished, this, [this, reply] {
         reply->deleteLater();
@@ -1195,7 +1201,7 @@ QString SongGenerator::readTextFile(const QString &path) const {
 }
 
 void SongGenerator::writeLyrics(const QVariantMap &input) {
-    if (!configured()) { emit lyricsWritten({}, tr("Connect Modal first (click the Modal meter).")); return; }
+    if (!configured()) { later([this] { emit lyricsWritten({}, tr("Connect Modal first (click the Modal meter).")); }); return; }
     const SongRequest::Form form = SongRequest::build(input);
     QNetworkRequest r = request("/format_input");
     r.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
@@ -1217,7 +1223,7 @@ void SongGenerator::describeImages(const QStringList &paths) {
     if (program.isEmpty()) program = QStandardPaths::findExecutable("claude");
     for (const QString &c : {QDir::homePath() + "/.local/share/mise/shims/claude", QDir::homePath() + "/.local/bin/claude", QString("/usr/bin/claude")})
         if (program.isEmpty() && QFileInfo(c).isExecutable()) program = c;
-    if (program.isEmpty() || !QFileInfo(program).isExecutable()) { emit imagesDescribed({}, tr("Claude Code isn't installed, so images were skipped.")); return; }
+    if (program.isEmpty() || !QFileInfo(program).isExecutable()) { later([this] { emit imagesDescribed({}, tr("Claude Code isn't installed, so images were skipped.")); }); return; }
     const QString prompt = tr("Look at these images and describe the song they suggest in one short line for a music "
                               "generator: genre, mood, tempo in bpm, and main instruments. Reply with that line only.\n")
                            + paths.join('\n');
