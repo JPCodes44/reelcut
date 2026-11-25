@@ -36,9 +36,8 @@ image = (
 @app.function(image=image, volumes={CKPT: checkpoints}, timeout=3600)
 def download():
     bin_ = "/opt/acestep/.venv/bin/acestep-download"
+    # The main download already includes the turbo DiT, the 1.7B LM, the VAE and the embedder.
     subprocess.run([bin_, "--dir", CKPT], check=True, cwd="/opt/acestep")
-    subprocess.run([bin_, "--model", "acestep-5Hz-lm-1.7B", "--skip-main", "--dir", CKPT],
-                   check=True, cwd="/opt/acestep")
     checkpoints.commit()
 
 
