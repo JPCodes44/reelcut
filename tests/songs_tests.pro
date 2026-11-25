@@ -5,3 +5,5 @@ TEMPLATE = app
 INCLUDEPATH += ../src
 HEADERS += ../src/songrequest.h
 SOURCES += songs_tests.cpp ../src/songrequest.cpp
+HEADERS += ../src/modalusage.h ../src/publisher.h
+SOURCES += ../src/modalusage.cpp ../src/publisher.cpp

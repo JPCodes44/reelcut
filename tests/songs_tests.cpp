@@ -1,4 +1,6 @@
 #include "songrequest.h"
+#include "modalusage.h"
+#include <QTemporaryDir>
 #include <QtTest>
 
 static QString field(const SongRequest::Form &f, const QString &key) {
@@ -66,6 +68,61 @@ private slots:
         QCOMPARE(SongRequest::slug({{"prompt", "A Song about my CAT, Milo!!"}}), QString("a-song-about-my"));
         QCOMPARE(SongRequest::slug({{"style", "lo-fi"}}), QString("lo-fi"));
         QCOMPARE(SongRequest::slug({}), QString("random"));
+    }
+    void usageCostAndLevels() {
+        QTemporaryDir dir;
+        ModalUsage u(dir.path());
+        QCOMPARE(u.limit(), 30.0);
+        QCOMPARE(u.level(), QString("ok"));
+        u.requestStarted();
+        u.requestFinished(1000, 2);
+        QVERIFY(qAbs(u.spent() - 1000 * ModalUsage::kRatePerSecond) < 1e-9);
+        QCOMPARE(u.songCount(), 2);
+        u.setLimit(u.spent() / 0.85);  QCOMPARE(u.level(), QString("warn"));
+        u.setLimit(u.spent() / 1.0);   QCOMPARE(u.level(), QString("over"));
+        u.setLimit(u.spent() / 0.5);   QCOMPARE(u.level(), QString("ok"));
+    }
+
+    void usageIdleTail() {
+        QTemporaryDir dir;
+        ModalUsage u(dir.path());
+        QDateTime t = QDateTime::fromString("2026-11-25T10:00:00Z", Qt::ISODate);
+        u.now = [&] { return t; };
+        u.requestStarted();
+        u.requestFinished(10, 1);           // tail opens at 10:00:00
+        t = t.addSecs(30);
+        u.requestStarted();                 // new request 30 s in: 30 s idle recorded
+        QCOMPARE(u.idleSeconds(), 30.0);
+        u.requestFinished(10, 1);
+        u.endTail();                        // the timer ran out: full 120 s
+        QCOMPARE(u.idleSeconds(), 150.0);
+        u.requestStarted(); u.requestFinished(5, 0);
+        t = t.addSecs(45);
+        u.flushTail();                      // quitting 45 s into the tail
+        QCOMPARE(u.idleSeconds(), 195.0);
+        QCOMPARE(u.busySeconds(), 25.0);
+    }
+    void usageMonthRolloverAndPersistence() {
+        QTemporaryDir dir;
+        QDateTime t = QDateTime::fromString("2026-11-30T23:00:00Z", Qt::ISODate);
+        {
+            ModalUsage u(dir.path());
+            u.now = [&] { return t; };
+            u.setLimit(12);
+            u.requestStarted(); u.requestFinished(100, 1); u.flushTail();
+        }
+        {
+            ModalUsage u(dir.path());
+            u.now = [&] { return t; };
+            u.reload();
+            QCOMPARE(u.songCount(), 1);
+            QCOMPARE(u.limit(), 12.0);
+            QVERIFY(QFile::exists(dir.filePath("modal-status.json")));
+            t = QDateTime::fromString("2026-12-01T09:00:00Z", Qt::ISODate);
+            u.requestStarted(); u.requestFinished(10, 1); u.flushTail();
+            QCOMPARE(u.songCount(), 1);     // November's song is gone
+            QCOMPARE(u.limit(), 12.0);      // the limit survives
+        }
     }
 };
 

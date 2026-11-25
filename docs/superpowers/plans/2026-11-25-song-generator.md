@@ -405,6 +405,7 @@ SOURCES += ../src/modalusage.cpp ../src/publisher.cpp
         u.setLimit(u.spent() / 1.0);   QCOMPARE(u.level(), QString("over"));
         u.setLimit(u.spent() / 0.5);   QCOMPARE(u.level(), QString("ok"));
     }
+```
 
 ```cpp
     void usageIdleTail() {
@@ -604,7 +605,7 @@ void ModalUsage::endTail() {
 
 void ModalUsage::flushTail() {
     if (!m_tailStart.isValid()) return;
-    const double s = qBound<qint64>(0, m_tailStart.secsTo(now()), kIdleTailSeconds);
+    const double s = qBound<qint64>(0, m_tailStart.secsTo(now()), qint64(kIdleTailSeconds));
     m_tailStart = {};
     m_tail.stop();
     record("idle", s);
