@@ -165,3 +165,10 @@ changes on `main` are never touched or committed.
 
 Training or LoRAs, stems/`extract`, `lego`, more than one container, reading Modal's real
 billing API, a local-GPU mode, editing songs on the timeline beyond setting them as music.
+
+## Changes made while planning
+
+1. **Modal connection settings live in the meter's popup**, not a new Settings section. `SettingsPage.qml` has tabs tied to account automation; the meter popup already owns sign-in for Higgsfield, so Modal does the same.
+2. **Empty lyrics without Instrumental uses ACE-Step `sample_mode`** with `sample_query` = prompt + style. That one call covers both "random song" (everything empty) and "write the words for me", replacing the separate `/create_random_sample` call.
+3. **New QML goes in `src/songs.qrc`** and new tests in **`tests/songs_tests.{pro,cpp}`**, so `resources.qrc` and `tests/reelcut_tests.cpp` (both carrying other sessions' edits) stay untouched.
+4. **`Main.qml` loads the new pieces through `Loader`s that are active only when the `songs` context property exists**, so the 20 existing QML tests that build Main without it keep passing.
