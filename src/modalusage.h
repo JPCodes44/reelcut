@@ -16,8 +16,11 @@ class ModalUsage : public QObject {
     Q_PROPERTY(int songCount READ songCount NOTIFY changed)
     Q_PROPERTY(double busySeconds READ busySeconds NOTIFY changed)
     Q_PROPERTY(double idleSeconds READ idleSeconds NOTIFY changed)
+    Q_PROPERTY(QString gpu READ gpu NOTIFY changed)
 public:
-    static constexpr double kRatePerSecond = 0.000222 + 4 * 0.0000131 + 16 * 0.00000222;
+    // Dollars per second for the container: the GPU plus 4 CPU cores and 16 GiB,
+    // at Modal's list prices. A GPU it doesn't know is priced as the dearest one.
+    static double rateFor(const QString &gpu);
     static constexpr int kIdleTailSeconds = 120;
 
     explicit ModalUsage(const QString &stateDir = {}, QObject *parent = nullptr);
@@ -31,6 +34,9 @@ public:
     int songCount() const;
     double busySeconds() const { return total("busy"); }
     double idleSeconds() const { return total("idle"); }
+    QString gpu() const { return m_gpu; }
+    void setGpu(const QString &name);
+    double ratePerSecond() const { return rateFor(m_gpu); }
 
     void requestStarted();                             // closes an open idle tail
     void requestFinished(double billedSeconds, int songs);
@@ -50,6 +56,7 @@ private:
     double total(const QString &kind) const;
     QString m_stateDir;
     QString m_month;
+    QString m_gpu;
     double m_limit = 30;
     QJsonArray m_entries;
     QDateTime m_tailStart;

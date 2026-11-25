@@ -2,6 +2,21 @@
 #include "publisher.h"
 #include <QJsonObject>
 
+double ModalUsage::rateFor(const QString &gpu) {
+    const double host = 4 * 0.0000131 + 16 * 0.00000222;
+    const QString g = gpu.toUpper();
+    if (g.contains("L40S")) return 0.000542 + host;
+    if (g.contains("L4")) return 0.000222 + host;
+    if (g.contains("A10")) return 0.000306 + host;
+    return 0.000542 + host;
+}
+
+void ModalUsage::setGpu(const QString &name) {
+    if (name == m_gpu) return;
+    m_gpu = name;
+    emit changed();
+}
+
 ModalUsage::ModalUsage(const QString &stateDir, QObject *parent) : QObject(parent), m_stateDir(stateDir) {
     m_tail.setSingleShot(true);
     m_tail.setInterval(kIdleTailSeconds * 1000);
@@ -61,7 +76,7 @@ void ModalUsage::record(const QString &kind, double seconds, int songs) {
     if (seconds <= 0 && songs == 0) return;
     m_entries.append(QJsonObject{{"at", now().toUTC().toString(Qt::ISODate)}, {"kind", kind},
                                  {"seconds", seconds}, {"songs", songs},
-                                 {"dollars", seconds * kRatePerSecond}});
+                                 {"gpu", m_gpu}, {"dollars", seconds * ratePerSecond()}});
     save();
     emit changed();
 }

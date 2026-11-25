@@ -11,6 +11,7 @@ class ModalUsage;
 class QNetworkAccessManager;
 class QNetworkReply;
 class QNetworkRequest;
+class QHttpMultiPart;
 
 // Makes songs with ACE-Step on Modal: sends the Songs page's request, waits
 // for the takes, saves them with the request in their own folder.
@@ -64,6 +65,7 @@ private:
     void setStage(const QString &stage);
     void later(const std::function<void()> &f);
     void poll();
+    void send(QHttpMultiPart *multi);
     void download(const QStringList &files, int index);
     void finish();
     void fail(const QString &message);

@@ -30,6 +30,8 @@ public:
     int status = 200;          // for every reply
     int pollsBeforeDone = 1;   // /query_result answers "running" this many times
     int taskStatus = 1;        // then this
+    QString gpu = R"({"gpu":"NVIDIA L4"})";
+    QByteArray bodyFor(const QString &path) const { const int i = paths.indexOf(path); return i < 0 ? QByteArray() : bodies[i]; }
     FakeAce() {
         server.listen(QHostAddress::LocalHost);
         connect(&server, &QTcpServer::newConnection, this, [this] {
@@ -59,6 +61,7 @@ public:
     QByteArray answer(const QString &path) {
         if (path.startsWith("/v1/audio")) return QByteArray("ID3fake-mp3-") + path.toUtf8();
         if (path == "/health") return R"({"data":{"status":"ok"},"code":200})";
+        if (path == "/reelcut/gpu") return gpu.toUtf8();
         if (path == "/release_task") return R"({"data":{"task_id":"t1","status":"queued"},"code":200})";
         if (path == "/format_input") return R"({"data":{"caption":"c","lyrics":"[Verse]\nla la"},"code":200})";
         if (path == "/query_result") {
@@ -142,13 +145,37 @@ private slots:
         QCOMPARE(u.level(), QString("ok"));
         u.requestStarted();
         u.requestFinished(1000, 2);
-        QVERIFY(qAbs(u.spent() - 1000 * ModalUsage::kRatePerSecond) < 1e-9);
+        QCOMPARE(u.gpu(), QString(""));                        // unknown: priced as the dearest GPU
+        QVERIFY(qAbs(u.spent() - 1000 * ModalUsage::rateFor("L40S")) < 1e-9);
         QCOMPARE(u.songCount(), 2);
         u.setLimit(u.spent() / 0.85);  QCOMPARE(u.level(), QString("warn"));
         u.setLimit(u.spent() / 1.0);   QCOMPARE(u.level(), QString("over"));
         u.setLimit(u.spent() / 0.5);   QCOMPARE(u.level(), QString("ok"));
     }
 
+    void usageRatesFollowTheGpu() {
+        QVERIFY(qAbs(ModalUsage::rateFor("NVIDIA L4") - (0.000222 + 4 * 0.0000131 + 16 * 0.00000222)) < 1e-12);
+        QVERIFY(qAbs(ModalUsage::rateFor("NVIDIA A10") - (0.000306 + 4 * 0.0000131 + 16 * 0.00000222)) < 1e-12);
+        QVERIFY(qAbs(ModalUsage::rateFor("NVIDIA L40S") - (0.000542 + 4 * 0.0000131 + 16 * 0.00000222)) < 1e-12);
+        QCOMPARE(ModalUsage::rateFor("mystery"), ModalUsage::rateFor("L40S"));
+        QTemporaryDir dir;
+        ModalUsage u(dir.path());
+        u.setGpu("NVIDIA L4");
+        u.requestStarted(); u.requestFinished(100, 1);
+        QVERIFY(qAbs(u.spent() - 100 * ModalUsage::rateFor("L4")) < 1e-12);
+    }
+    void generatorCarriesOnWithoutGpuEndpoint() {
+        QTemporaryDir state, songs;
+        FakeAce ace; ace.gpu = "";
+        ModalUsage usage(state.path());
+        SongGenerator g(&usage, state.path(), songs.path());
+        g.pollMs = 10;
+        g.configure(ace.base(), "k", "s");
+        QSignalSpy done(&g, &SongGenerator::finished);
+        QVERIFY(g.generate({}));
+        QVERIFY(done.wait(5000));
+        QCOMPARE(usage.gpu(), QString(""));
+    }
     void usageIdleTail() {
         QTemporaryDir dir;
         ModalUsage u(dir.path());
@@ -220,7 +247,9 @@ private slots:
         QVERIFY(req.value("estimatedCost").toDouble() >= 0);
         QVERIFY(ace.heads.first().contains("Modal-Key: wk-id"));
         QVERIFY(ace.heads.first().contains("Modal-Secret: ws-secret"));
-        QVERIFY(ace.bodies.first().contains("name=\"sample_query\""));
+        QVERIFY(ace.bodyFor("/release_task").contains("name=\"sample_query\""));
+        QCOMPARE(ace.paths.first(), QString("/reelcut/gpu"));   // wakes the GPU with a GET first
+        QCOMPARE(usage.gpu(), QString("NVIDIA L4"));
         QCOMPARE(g.songs().size(), 1);
         QCOMPARE(usage.songCount(), 2);
         QVERIFY(!g.busy());
@@ -236,8 +265,8 @@ private slots:
         QSignalSpy done(&g, &SongGenerator::finished);
         QVERIFY(g.generate({{"reference", ref.fileName()}}));
         QVERIFY(done.wait(5000));
-        QVERIFY(ace.bodies.first().contains("name=\"reference_audio\"; filename=\"ref.mp3\""));
-        QVERIFY(ace.bodies.first().contains("REFDATA"));
+        QVERIFY(ace.bodyFor("/release_task").contains("name=\"reference_audio\"; filename=\"ref.mp3\""));
+        QVERIFY(ace.bodyFor("/release_task").contains("REFDATA"));
     }
     void generatorReportsTaskFailure() {
         QTemporaryDir state, songs;

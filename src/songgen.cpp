@@ -145,7 +145,24 @@ bool SongGenerator::generate(const QVariantMap &input) {
 
     if (m_usage) m_usage->requestStarted();
     m_clock.start();
-    setStage(tr("Starting GPU (first time ~30–60 s)"));
+    setStage(tr("Starting GPU (first time ~1–2 min)"));
+    // A GET first: it wakes the GPU (Modal answers a long wait with a redirect,
+    // which only a GET can follow) and says which GPU the cost is counted at.
+    QNetworkReply *wake = m_net->get(request("/reelcut/gpu"));
+    multi->setParent(this);
+    connect(wake, &QNetworkReply::finished, this, [this, wake, multi] {
+        wake->deleteLater();
+        const int status = wake->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (wake->error() != QNetworkReply::NoError && status != 404) { delete multi; fail(explain(wake)); return; }
+        const QString gpu = parse(wake->readAll()).value("gpu").toString();
+        if (m_usage && !gpu.isEmpty()) m_usage->setGpu(gpu);
+        send(multi);
+    });
+    return true;
+}
+
+void SongGenerator::send(QHttpMultiPart *multi) {
+    setStage(tr("Sending"));
     QNetworkReply *reply = m_net->post(request("/release_task"), multi);
     multi->setParent(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply] {
@@ -156,7 +173,6 @@ bool SongGenerator::generate(const QVariantMap &input) {
         setStage(tr("Generating"));
         m_poll.start(pollMs);
     });
-    return true;
 }
 
 void SongGenerator::poll() {
@@ -216,7 +232,8 @@ void SongGenerator::finish() {
     for (const QString &f : m_saved) files << QFileInfo(f).fileName();
     const QJsonObject record{{"request", QJsonObject::fromVariantMap(m_request)}, {"sent", m_sent},
                              {"taskId", m_taskId}, {"createdAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
-                             {"billedSeconds", seconds}, {"estimatedCost", seconds * ModalUsage::kRatePerSecond},
+                             {"billedSeconds", seconds}, {"estimatedCost", seconds * (m_usage ? m_usage->ratePerSecond() : ModalUsage::rateFor({}))},
+                             {"gpu", m_usage ? m_usage->gpu() : QString()},
                              {"files", files}};
     QFile out(m_folder + "/request.json");
     if (out.open(QIODevice::WriteOnly)) out.write(QJsonDocument(record).toJson());

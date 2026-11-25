@@ -41,9 +41,27 @@ def download():
     checkpoints.commit()
 
 
-@app.function(image=image, gpu="L4", volumes={CKPT: checkpoints},
+# L4 first; A10 or L40S when no L4 is free, so a request never waits on one GPU type.
+@app.function(image=image, gpu=["L4", "A10", "L40S"], volumes={CKPT: checkpoints},
               max_containers=1, scaledown_window=120, timeout=600)
 @modal.concurrent(max_inputs=20)
 @modal.web_server(port=8001, startup_timeout=600, requires_proxy_auth=True)
 def api():
-    subprocess.Popen(["/opt/acestep/.venv/bin/acestep-api"], cwd="/opt/acestep")
+    subprocess.Popen(["/opt/acestep/.venv/bin/python", "-c", SERVE], cwd="/opt/acestep")
+
+
+# ACE-Step's own server plus one route, /reelcut/gpu, so Reelcut can price the
+# job at the GPU Modal actually picked. uvicorn imports "acestep.api_server:app",
+# which is the module object this script has already extended.
+SERVE = """
+import subprocess
+import acestep.api_server as server
+
+@server.app.get("/reelcut/gpu")
+def reelcut_gpu():
+    out = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                         capture_output=True, text=True).stdout.strip()
+    return {"gpu": out.splitlines()[0] if out else ""}
+
+server.main()
+"""
