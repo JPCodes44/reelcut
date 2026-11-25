@@ -47,6 +47,15 @@ def download():
 @modal.concurrent(max_inputs=20)
 @modal.web_server(port=8001, startup_timeout=600, requires_proxy_auth=True)
 def api():
+    # ACE-Step's DiT loader looks in <repo>/checkpoints whatever
+    # ACESTEP_CHECKPOINTS_DIR says, and re-downloads 4.5 GB when it's empty.
+    # Point that folder at the volume.
+    import os
+    import shutil
+    repo_ckpt = "/opt/acestep/checkpoints"
+    if not os.path.islink(repo_ckpt):
+        shutil.rmtree(repo_ckpt, ignore_errors=True)
+        os.symlink(CKPT, repo_ckpt)
     subprocess.Popen(["/opt/acestep/.venv/bin/python", "-c", SERVE], cwd="/opt/acestep")
 
 
@@ -62,6 +71,21 @@ def reelcut_gpu():
     out = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
                          capture_output=True, text=True).stdout.strip()
     return {"gpu": out.splitlines()[0] if out else ""}
+
+# In sample mode ACE-Step replaces the requested length with the one its LM
+# picked; a length the user asked for wins.
+import dataclasses
+import acestep.api.job_blocking_generation as blocking
+_prepare = blocking.prepare_llm_generation_inputs
+
+def _keep_requested_duration(**kwargs):
+    out = _prepare(**kwargs)
+    wanted = getattr(kwargs.get("req"), "audio_duration", None)
+    if wanted and float(wanted) > 0:
+        out = dataclasses.replace(out, audio_duration=float(wanted))
+    return out
+
+blocking.prepare_llm_generation_inputs = _keep_requested_duration
 
 server.main()
 """

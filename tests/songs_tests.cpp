@@ -112,6 +112,7 @@ private slots:
         auto f = SongRequest::build({{"duration", 5.0}, {"versions", 9}});
         QCOMPARE(field(f, "audio_duration"), QString("10"));
         QCOMPARE(field(f, "batch_size"), QString("4"));
+        QCOMPARE(field(f, "sample_query"), QString("About 10 seconds long"));   // so the written words fit
         f = SongRequest::build({{"duration", 999.0}, {"versions", 0}});
         QCOMPARE(field(f, "audio_duration"), QString("240"));
         QCOMPARE(field(f, "batch_size"), QString("1"));

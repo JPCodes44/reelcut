@@ -20,8 +20,9 @@ Form build(const QVariantMap &r) {
              << qMakePair(QStringLiteral("batch_size"), QString::number(versions))
              << qMakePair(QStringLiteral("thinking"), QStringLiteral("true"));
     const double duration = r.value("duration").toDouble();
+    const double seconds = qBound(10.0, duration, 240.0);
     if (duration > 0)
-        f.fields << qMakePair(QStringLiteral("audio_duration"), number(qBound(10.0, duration, 240.0)));
+        f.fields << qMakePair(QStringLiteral("audio_duration"), number(seconds));
 
     const bool instrumental = r.value("instrumental").toBool();
     const QString lyrics = r.value("lyrics").toString().trimmed();
@@ -44,8 +45,13 @@ Form build(const QVariantMap &r) {
         f.fields << qMakePair(QStringLiteral("prompt"), f.caption);
         if (!lyrics.isEmpty()) f.fields << qMakePair(QStringLiteral("lyrics"), lyrics);
     } else {
+        // ACE-Step writes the words here; telling it the length keeps them from
+        // running past the end of a short song.
+        QStringList query;
+        if (!f.caption.isEmpty()) query << f.caption;
+        if (duration > 0) query << QStringLiteral("About %1 seconds long").arg(number(seconds));
         f.fields << qMakePair(QStringLiteral("sample_mode"), QStringLiteral("true"))
-                 << qMakePair(QStringLiteral("sample_query"), f.caption);
+                 << qMakePair(QStringLiteral("sample_query"), query.join(". "));
     }
     const QString reference = text(r, "reference");
     if (!reference.isEmpty()) f.referencePath = reference;
