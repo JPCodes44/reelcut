@@ -9,3 +9,5 @@ HEADERS += ../src/modalusage.h ../src/publisher.h
 SOURCES += ../src/modalusage.cpp ../src/publisher.cpp
 HEADERS += ../src/songgen.h
 SOURCES += ../src/songgen.cpp
+QT += qml quick quickcontrols2 multimedia
+RESOURCES += ../src/songs.qrc

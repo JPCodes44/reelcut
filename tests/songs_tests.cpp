@@ -8,6 +8,11 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 
+#include <QQmlApplicationEngine>
+#include <QQmlContext>
+#include <QQuickItem>
+#include <QQuickWindow>
+#include <QQuickStyle>
 #include <QtTest>
 
 static QString field(const SongRequest::Form &f, const QString &key) {
@@ -296,6 +301,38 @@ private slots:
         g.describeImages({"/tmp/a.png"});
         QVERIFY(described.wait(5000));
         QVERIFY(!described.last().at(1).toString().isEmpty());
+    }
+    void songsQmlLoads() {
+        QTemporaryDir state, songs;
+        ModalUsage usage(state.path());
+        SongGenerator g(&usage, state.path(), songs.path());
+        QQuickStyle::setStyle("Material");
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("modalUsage", &usage);
+        engine.rootContext()->setContextProperty("songs", &g);
+        engine.rootContext()->setContextProperty("backend", nullptr);
+        QStringList warnings;
+        connect(&engine, &QQmlApplicationEngine::warnings, this, [&](const QList<QQmlError> &w) {
+            for (const auto &e : w) warnings << e.toString();
+        });
+        engine.loadData(R"(import QtQuick
+import QtQuick.Controls
+import QtQuick.Controls.Material
+ApplicationWindow { width: 1200; height: 900; visible: true; Material.theme: Material.Dark
+  header: ToolBar { ModalMeter {} }
+  SongsPage { anchors.fill: parent } })", QUrl("qrc:/SongsTestWindow.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join('\n')));
+        auto *generate = engine.rootObjects().first()->findChild<QObject *>("songGenerate");
+        QVERIFY(generate);
+        QCOMPARE(generate->property("enabled").toBool(), false);   // not configured yet
+        // REELCUT_SONGS_GRAB=page.png saves a picture of the page, to look at it.
+        if (const QByteArray grab = qgetenv("REELCUT_SONGS_GRAB"); !grab.isEmpty()) {
+            auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+            QVERIFY(QTest::qWaitForWindowExposed(window));
+            QTest::qWait(500);
+            QVERIFY(window->grabWindow().save(QString::fromLocal8Bit(grab)));
+        }
     }
 };
 
