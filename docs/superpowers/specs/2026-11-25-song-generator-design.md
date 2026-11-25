@@ -172,3 +172,10 @@ billing API, a local-GPU mode, editing songs on the timeline beyond setting them
 2. **Empty lyrics without Instrumental uses ACE-Step `sample_mode`** with `sample_query` = prompt + style. That one call covers both "random song" (everything empty) and "write the words for me", replacing the separate `/create_random_sample` call.
 3. **New QML goes in `src/songs.qrc`** and new tests in **`tests/songs_tests.{pro,cpp}`**, so `resources.qrc` and `tests/reelcut_tests.cpp` (both carrying other sessions' edits) stay untouched.
 4. **`Main.qml` loads the new pieces through `Loader`s that are active only when the `songs` context property exists**, so the 20 existing QML tests that build Main without it keep passing.
+
+## Changes made during deployment
+
+5. **GPU falls back to A10, then L40S** when no L4 is free (a deployed L4-only endpoint sat queued for minutes with no container). The server reports its GPU at `/reelcut/gpu` and each job is priced at that GPU's rate; an unknown GPU is priced as an L40S.
+6. **Reelcut wakes the GPU with a GET before posting the job**, because Modal turns any request waiting over 150 s into a redirect that a POST can't follow.
+7. **The Modal app wraps ACE-Step's server**: it links ACE-Step's checkpoint folder to the volume (its loader ignored `ACESTEP_CHECKPOINTS_DIR` and re-downloaded 4.5 GB per cold start), and keeps the requested length in sample mode. The written-words request also says "About N seconds long".
+8. Measured: cold start ~115 s (~$0.045), warm song ~11 s (~$0.004). See `docs/songs.md`.
