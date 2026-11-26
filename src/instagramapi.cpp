@@ -34,9 +34,17 @@ QString safeError(QNetworkReply *reply, QString error) {
 QJsonObject readJson(QNetworkReply *reply, QString *error) {
     const QByteArray body = reply->readAll();
     const QJsonObject json = QJsonDocument::fromJson(body).object();
-    const QString apiError = json.value("error").toObject().value("message").toString();
+    QString apiError = json.value("error").toObject().value("message").toString();
+    // The video upload host (rupload) reports failures under debug_info, not error.
+    if (apiError.isEmpty())
+        apiError = json.value("debug_info").toObject().value("message").toString();
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     if (!apiError.isEmpty())
         *error = safeError(reply, apiError);
+    else if (status >= 400)
+        *error = QObject::tr("Instagram answered HTTP %1: %2")
+                     .arg(status)
+                     .arg(safeError(reply, QString::fromUtf8(body.left(300)).simplified()));
     else if (reply->error() != QNetworkReply::NoError)
         *error = QObject::tr("Could not reach Instagram. Check your connection and try again.");
     return json;
