@@ -288,9 +288,14 @@ public:
     // They never upload or publish. Each carries a reference reel (the original
     // to copy), a step-by-step filming guide and a note on what will be posted.
     // spec: platform, publishAt (ms), title, and optionally reference (local
-    // video path), referenceUrl, note, caption and guide (list of strings).
+    // video path), referenceUrl, note, caption, folder (where the filmed clips
+    // go) and guide (list of strings). Without a folder, a "Folder: <path>"
+    // guide step supplies it.
     // Gives the new id, or empty when the spec is invalid or the slot is taken.
     Q_INVOKABLE QString addPlaceholder(const QVariantMap &spec);
+    // Opens a placeholder's clip folder in the file manager, making it first
+    // if it isn't there yet. False when the placeholder has no folder.
+    Q_INVOKABLE bool openPlaceholderFolder(const QString &id);
     Q_INVOKABLE bool removePlaceholder(const QString &id);
     Q_INVOKABLE bool undoSchedule();
     Q_INVOKABLE bool redoSchedule();

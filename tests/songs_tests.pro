@@ -1,0 +1,13 @@
+QT += core network testlib
+CONFIG += c++17 testcase
+TARGET = songs_tests
+TEMPLATE = app
+INCLUDEPATH += ../src
+HEADERS += ../src/songrequest.h
+SOURCES += songs_tests.cpp ../src/songrequest.cpp
+HEADERS += ../src/modalusage.h ../src/publisher.h
+SOURCES += ../src/modalusage.cpp ../src/publisher.cpp
+HEADERS += ../src/songgen.h
+SOURCES += ../src/songgen.cpp
+QT += qml quick quickcontrols2 multimedia
+RESOURCES += ../src/songs.qrc

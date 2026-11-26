@@ -26,6 +26,8 @@
 #include "appbridge.h"
 #include "downloads.h"
 #include "higgsfield.h"
+#include "modalusage.h"
+#include "songgen.h"
 #include "jobs.h"
 #include "mcpserver.h"
 #include "portalfilepicker.h"
@@ -146,6 +148,8 @@ int main(int argc, char *argv[]) {
     Backend backend(&picker, thumbs, &theme);
     Downloads downloads;
     HiggsfieldCredits higgsfield;
+    ModalUsage modalUsage;
+    SongGenerator songs(&modalUsage);
     // Reads the accounts of Backend's publishers: made after the Backend, so
     // it's gone before them, and before the engine that shows it.
     Stats stats(backend.instagram(), backend.facebook(), backend.youtube());
@@ -160,6 +164,8 @@ int main(int argc, char *argv[]) {
     engine.rootContext()->setContextProperty("backend", &backend);
     engine.rootContext()->setContextProperty("downloads", &downloads);
     engine.rootContext()->setContextProperty("higgsfield", &higgsfield);
+    engine.rootContext()->setContextProperty("modalUsage", &modalUsage);
+    engine.rootContext()->setContextProperty("songs", &songs);
     engine.rootContext()->setContextProperty("stats", &stats);
     engine.load(QUrl("qrc:/Main.qml"));
     if (engine.rootObjects().isEmpty())
@@ -167,6 +173,7 @@ int main(int argc, char *argv[]) {
 
     AppBridge bridge;
     bridge.attach(&backend,&downloads,&stats,&higgsfield,qobject_cast<QQuickWindow *>(engine.rootObjects().first()));
+    bridge.registry().add("songs", &songs);
     bridge.registry().add("theme",&theme);
     bridge.registry().add("language",&translator);
     if (!bridge.listen()) qWarning("reelcut: the live MCP interface could not be started");

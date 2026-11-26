@@ -1872,6 +1872,24 @@ QVariantList Backend::calendarPosts() const {
     return out;
 }
 
+// The clip folder named in a filming guide: a step like "Folder: ~/Videos/x".
+static QString placeholderFolderFrom(const QStringList &guide) {
+    static const QRegularExpression step(QStringLiteral("^\\s*Folder:\\s*(.+?)\\s*$"), QRegularExpression::CaseInsensitiveOption);
+    for (const QString &line : guide) {
+        const QRegularExpressionMatch m = step.match(line);
+        if (m.hasMatch())
+            return m.captured(1);
+    }
+    return {};
+}
+
+static QString expandHome(QString path) {
+    path = path.trimmed();
+    if (path == "~" || path.startsWith("~/"))
+        path.replace(0, 1, QDir::homePath());
+    return path;
+}
+
 QString Backend::placeholdersFile() const { return Net::stateFile(m_stateDir, "schedule-placeholders.json"); }
 
 void Backend::loadPlaceholders() {
@@ -1882,6 +1900,8 @@ void Backend::loadPlaceholders() {
             || !(p.value("publishAt").toDouble() > 0))
             continue;
         p.insert("status", "placeholder");  // whatever the file says, it never posts
+        if (p.value("folder").toString().isEmpty())
+            p.insert("folder", placeholderFolderFrom(p.value("guide").toStringList()));
         m_placeholders << p;
     }
 }
@@ -1891,6 +1911,26 @@ bool Backend::savePlaceholders() const {
     for (const QVariant &v : m_placeholders)
         list << QJsonObject::fromVariantMap(v.toMap());
     return Net::savePrivate(placeholdersFile(), {{"placeholders", list}});
+}
+
+bool Backend::openPlaceholderFolder(const QString &id) {
+    for (const QVariant &v : m_placeholders) {
+        const QVariantMap p = v.toMap();
+        if (p.value("id").toString() != id)
+            continue;
+        const QString folder = expandHome(p.value("folder").toString());
+        if (folder.isEmpty() || !QDir::isAbsolutePath(folder)) {
+            setMessage(tr("This placeholder has no clip folder."), true);
+            return false;
+        }
+        if (!QDir().mkpath(folder)) {
+            setMessage(tr("Couldn't make %1.").arg(folder), true);
+            return false;
+        }
+        openLink(QUrl::fromLocalFile(folder));
+        return true;
+    }
+    return false;
 }
 
 QString Backend::addPlaceholder(const QVariantMap &spec) {
@@ -1909,7 +1949,9 @@ QString Backend::addPlaceholder(const QVariantMap &spec) {
         {"id", id}, {"platform", platform}, {"publishAt", double(qint64(at))}, {"title", name},
         {"status", "placeholder"}, {"caption", spec.value("caption").toString()},
         {"note", spec.value("note").toString()}, {"reference", spec.value("reference").toString()},
-        {"referenceUrl", spec.value("referenceUrl").toString()}, {"guide", guide}};
+        {"referenceUrl", spec.value("referenceUrl").toString()}, {"guide", guide},
+        {"folder", spec.value("folder").toString().trimmed().isEmpty() ? placeholderFolderFrom(guide)
+                                                                       : spec.value("folder").toString().trimmed()}};
     if (!insertPlaceholder(placeholder, m_placeholders.size()))
         return {};
     recordSchedule({{"kind", "placeholderAdded"}, {"label", tr("add placeholder")}, {"placeholder", placeholder},

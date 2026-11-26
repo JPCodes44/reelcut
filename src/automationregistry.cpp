@@ -3,6 +3,7 @@
 #include "backend.h"
 #include "downloads.h"
 #include "higgsfield.h"
+#include "songgen.h"
 #include "stats.h"
 #include "theme.h"
 #include "translator.h"
@@ -22,7 +23,7 @@ const QList<Surface> surfaces{
     {"backend", &Backend::staticMetaObject}, {"accounts", &Accounts::staticMetaObject},
     {"stats", &Stats::staticMetaObject}, {"downloads", &Downloads::staticMetaObject},
     {"credits", &HiggsfieldCredits::staticMetaObject}, {"theme", &Theme::staticMetaObject},
-    {"language", &Translator::staticMetaObject}
+    {"language", &Translator::staticMetaObject}, {"songs", &SongGenerator::staticMetaObject}
 };
 QHash<QString, QString> equivalents() {
     return {{"backend.addMedia", "app_backend_select_files: purpose=media, paths=[local files]"},
@@ -36,7 +37,8 @@ QHash<QString, QString> equivalents() {
 }
 bool isReadOnly(const QString &component, const QString &method) {
     return (component == "backend" && QStringList{"checkPost","checkPosts","checkWhen","parseWhen","suggestWhen","locate","dropTarget","canConnectFacebookWithInstagram"}.contains(method))
-        || (component == "stats" && method == "history");
+        || (component == "stats" && method == "history")
+        || (component == "songs" && QStringList{"readTextFile","reload"}.contains(method));
 }
 bool isSensitive(const QString &component,const QString &method,const QString &name) {
     return name.contains("token",Qt::CaseInsensitive)||name.contains("secret",Qt::CaseInsensitive)||name.contains("password",Qt::CaseInsensitive)
@@ -91,6 +93,7 @@ QJsonObject descriptor(const QString &component, const QMetaMethod &method) {
     const bool external=(component=="accounts" && name!="cancelSelection" && name!="disconnectAccount")
         || (component=="stats" && name!="history") || (component=="downloads" && name=="download")
         || (component=="credits" && QStringList{"signIn","refresh","signOut"}.contains(name))
+        || (component=="songs" && QStringList{"generate","testConnection","writeLyrics","describeImages"}.contains(name))
         || (component=="backend" && (name.contains("Scheduled") || name.startsWith("connect") || QStringList{"post","postTo","setupScheduler","openLink"}.contains(name)));
     return {{"name",AutomationRegistry::toolName(component,name)}, {"component",component},{"method",name},{"supported",supported},
         {"description",QString("%1.%2 in the running Reelcut window. Uses the same application action as the UI. Async work returns acceptance; inspect get_app_state and get_app_events for progress/completion.").arg(component,name)},
@@ -249,7 +252,7 @@ QJsonArray AutomationRegistry::uiTools() {
             {"annotations",QJsonObject{{"readOnlyHint",readOnly},{"destructiveHint",destructive},{"openWorldHint",name=="postSubmit" || name=="statsSelect" || name=="scheduleChoose"}}}});
     };
     add("state","Read non-secret live UI state: navigation, playback, selection, stats/calendar detail and the current post draft.",{}, {},true);
-    add("navigate","Open editor, stats, schedule, settings, downloads or help. Settings may select a platform.",{{"page",string},{"platform",string}}, {"page","platform"});
+    add("navigate","Open editor, stats, schedule, settings, downloads, help or songs. Settings may select a platform.",{{"page",string},{"platform",string}}, {"page","platform"});
     add("seek","Seek the live editor, synchronizing all players and the timeline.",{{"seconds",number}}, {"seconds"});
     add("playback","Play, pause, toggle, refresh, step_forward or step_backward (one frame).",{{"action",string}}, {"action"});
     add("select","Select a clip, layer, text overlay, effect, captions, music or none, and show its inspector.",{{"kind",string},{"index",integer}}, {"kind","index"});

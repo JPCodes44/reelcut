@@ -5443,6 +5443,21 @@ private slots:
             var picked=remixPrompt('https://tiktok.com/@a/video/1\n https://instagram.com/reel/B ','','','reels');
             check(picked.indexOf('Remake these 2 reels')>=0 && picked.indexOf('   - https://tiktok.com/@a/video/1')>=0 && picked.indexOf('   - https://instagram.com/reel/B')>=0,'remix prompt lists picked reels');
             check(picked.indexOf('--flat-playlist')<0,'reel mode skips profile listing');
+            var edit=editPrompt({title:'TextInk remix · cortisol',platform:'instagram',ms:new Date(2026,10,20,8,0).getTime(),
+                referenceUrl:'https://instagram.com/reel/ABC',reference:'/v/ref.mp4',folder:'/v/cortisol',caption:'Try textink.ca',
+                guide:['Shot 1 (1 s): notebook','','Shot 2 (2 s): iPad','Folder: /v/cortisol']});
+            check(edit.indexOf('Original reel: https://instagram.com/reel/ABC')>=0,'edit prompt carries the original link');
+            check(edit.indexOf('Raw clips: /v/cortisol')>=0 && edit.indexOf('Reference copy: /v/ref.mp4')>=0,'edit prompt names folder and reference');
+            check(edit.indexOf('   1. Shot 1 (1 s): notebook')>=0 && edit.indexOf('   2. Shot 2 (2 s): iPad')>=0,'edit prompt lists the guide steps');
+            check(edit.indexOf('   3. ')<0,'blank and folder steps left out of the plan');
+            check(edit.indexOf('instagram 2026-11-20 08:00')>=0,'edit prompt names the slot');
+            check(edit.indexOf('Do not post or schedule')>=0,'edit prompt never posts');
+            check(editPrompt({}).indexOf('(none written')>=0,'edit prompt without a guide');
+            check(edit.indexOf('in the original\'s language')>=0 && edit.indexOf('carry it into')<0,'no language keeps the original');
+            var hing=editPrompt({referenceUrl:'https://x/1'},'Hinglish');
+            check(hing.indexOf('Audience: Hinglish-speaking viewers')>=0 && hing.indexOf('Latin script')>=0,'language sets the audience');
+            check(hing.indexOf('carry it into Hinglish')>=0,'caption follows the chosen language');
+            check(hing.indexOf('yt-dlp --print description https://x/1')>=0 && hing.indexOf('changing as little as possible')>=0,'caption repurposed from the original');
             check(remixPrompt('https://tiktok.com/@a/video/1','','','reels').indexOf('Remake this reel')>=0,'single reel wording');
             errors.join('; ');
         )JS");
@@ -5581,6 +5596,9 @@ private slots:
                 QCOMPARE(p.value("guide").toStringList(),QStringList({"Film A","Film B"}));  // blank steps dropped
             }
             QVERIFY(found);
+            // No folder given and none in the guide: nothing to open.
+            QVERIFY(!backend.openPlaceholderFolder(id));
+            QVERIFY(!backend.openPlaceholderFolder("nope"));
             for (const QVariant &v : backend.nextOpenSlots({"instagram"},30))
                 QVERIFY(qint64(v.toMap().value("publishAt").toDouble())!=at);
         }
@@ -5595,6 +5613,20 @@ private slots:
         for (const QVariant &v : reloaded.calendarPosts())
             if (v.toMap().value("id")==id) { ++count; QCOMPARE(v.toMap().value("status").toString(),QString("placeholder")); }
         QCOMPARE(count,1);
+        // The clip folder: taken from a "Folder:" guide step, made and opened on click.
+        {
+            Backend backend(nullptr,nullptr,nullptr,nullptr,state.path());
+            QUrl opened; backend.openUrl=[&](const QUrl &url){opened=url;};
+            const QString folder=state.filePath("remixes/clip folder");
+            const QString fid=backend.addPlaceholder({{"platform","instagram"},{"publishAt",double(at+86400000)},
+                {"title","Remix F"},{"guide",QStringList{"Film A","Folder: "+folder}}});
+            QVERIFY(!fid.isEmpty());
+            QVERIFY(!QDir(folder).exists());
+            QVERIFY(backend.openPlaceholderFolder(fid));
+            QVERIFY(QDir(folder).exists());
+            QCOMPARE(opened,QUrl::fromLocalFile(folder));
+            QVERIFY(backend.removePlaceholder(fid));
+        }
         QVERIFY(!reloaded.removePlaceholder("nope"));
         QVERIFY(reloaded.removePlaceholder(id));
         for (const QVariant &v : reloaded.calendarPosts()) QVERIFY(v.toMap().value("id")!=id);

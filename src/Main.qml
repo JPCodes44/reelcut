@@ -27,9 +27,11 @@ ApplicationWindow {
     property bool statsVisible: false
     property bool scheduleVisible: false
     property bool workflowVisible: false
-    onStatsVisibleChanged: if (statsVisible) { scheduleVisible = false; workflowVisible = false }
-    onScheduleVisibleChanged: if (scheduleVisible) { statsVisible = false; workflowVisible = false; preview.pause() }
-    onWorkflowVisibleChanged: if (workflowVisible) { statsVisible = false; scheduleVisible = false; preview.pause() }
+    property bool songsVisible: false
+    onStatsVisibleChanged: if (statsVisible) { scheduleVisible = false; workflowVisible = false; songsVisible = false }
+    onScheduleVisibleChanged: if (scheduleVisible) { statsVisible = false; workflowVisible = false; songsVisible = false; preview.pause() }
+    onWorkflowVisibleChanged: if (workflowVisible) { statsVisible = false; scheduleVisible = false; songsVisible = false; preview.pause() }
+    onSongsVisibleChanged: if (songsVisible) { statsVisible = false; scheduleVisible = false; workflowVisible = false; preview.pause() }
     property int selectedClip: -1
     property int selectedOverlay: -1
     property int selectedEffect: -1
@@ -39,7 +41,7 @@ ApplicationWindow {
     property real playhead: 0
     // Single-key shortcuts must not fire while the user is typing, nor edit
     // the hidden editor while the Stats page covers it.
-    readonly property bool typing: settingsPage.visible || statsVisible || scheduleVisible || workflowVisible || (activeFocusItem !== null && activeFocusItem.hasOwnProperty("cursorPosition"))
+    readonly property bool typing: settingsPage.visible || statsVisible || scheduleVisible || workflowVisible || songsVisible || (activeFocusItem !== null && activeFocusItem.hasOwnProperty("cursorPosition"))
     readonly property bool textFocused: activeFocusItem !== null && activeFocusItem.hasOwnProperty("cursorPosition")
     // Schedule undo: the page is open and no text field has the keys.
     readonly property bool scheduleKeys: scheduleVisible && !textFocused && !postDialog.visible
@@ -195,6 +197,10 @@ ApplicationWindow {
                 win.workflowVisible = false
                 return
             }
+            if (win.songsVisible) {
+                win.songsVisible = false
+                return
+            }
             // On the Stats page, Esc closes a reel's details, then the page.
             if (win.statsVisible) {
                 if (!statsPage.closeDetail())
@@ -286,6 +292,8 @@ ApplicationWindow {
                     }
                     Item { Layout.fillWidth: true }
                     CreditsMeter {}
+                    // The Songs page's pieces exist only when the app provides them (not in older tests).
+                    Loader { active: typeof songs !== "undefined"; visible: active; sourceComponent: Component { ModalMeter {} } }
                     ToolSeparator {}
                     ToolButton {
                         objectName: "downloadsToggle"
@@ -322,6 +330,18 @@ ApplicationWindow {
                         ToolTip.visible: hovered
                         ToolTip.delay: 500
                         ToolTip.text: qsTr("The reel workflow: every stage from research to posting, as a checklist")
+                    }
+                    ToolButton {
+                        objectName: "songsToggle"
+                        visible: typeof songs !== "undefined"
+                        Layout.minimumWidth: implicitWidth
+                        text: qsTr("Songs")
+                        checkable: true
+                        checked: win.songsVisible
+                        onToggled: win.songsVisible = checked
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("Make a song with ACE-Step on Modal")
                     }
                     ToolButton {
                         objectName: "statsToggle"
@@ -490,11 +510,20 @@ ApplicationWindow {
             onActionRequested: function(name) { win.runWorkflowAction(name) }
         }
 
+        Loader {
+            objectName: "songsPageLoader"
+            anchors.fill: parent
+            anchors.topMargin: topBar.height
+            active: typeof songs !== "undefined" && win.songsVisible
+            visible: win.songsVisible
+            sourceComponent: Component { SongsPage {} }
+        }
+
         // Videos can be dropped anywhere on the window.
         // Over the timeline's video lane, they go in where they're dropped.
         DropArea {
             id: windowDrop
-            enabled: !win.statsVisible && !win.scheduleVisible && !win.workflowVisible
+            enabled: !win.statsVisible && !win.scheduleVisible && !win.workflowVisible && !win.songsVisible
             anchors.fill: parent
             keys: ["text/uri-list"]
             function timelineIndex(x, y) {

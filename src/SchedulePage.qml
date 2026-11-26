@@ -697,23 +697,49 @@ Rectangle {
             }
         }
     }
-
+    // One post or placeholder, opened from the calendar. Layout: a header that
+    // names the slot, a body (the reel on the left; for a placeholder, the plan
+    // on the right) and one footer row of actions with a single primary button.
+    // Widths are fixed or zero-based so wrapped text never pushes past the card.
     Popup {
         id:postDetail
         parent:Overlay.overlay
         anchors.centerIn:parent
-        width:Math.min(placeholder ? 860 : 460,parent ? parent.width-40 : 460)
-        height:placeholder && parent ? Math.min(implicitHeight, parent.height-40) : implicitHeight
-        padding:20; modal:true
+        width:Math.min(placeholder ? 900 : 460, parent ? parent.width-48 : 460)
+        height:placeholder && parent ? Math.min(720, parent.height-48) : implicitHeight
+        padding:24; modal:true
         background:Rectangle { color:page.panel; radius:14; border.color:page.line }
-        // The reel's exported file, when it's still on disk: play it right here.
+        enter:Transition {
+            ParallelAnimation {
+                NumberAnimation { property:"opacity"; from:0; to:1; duration:180; easing.type:Easing.OutCubic }
+                NumberAnimation { property:"scale"; from:0.97; to:1; duration:200; easing.type:Easing.OutQuint }
+            }
+        }
+        exit:Transition { NumberAnimation { property:"opacity"; to:0; duration:120; easing.type:Easing.OutCubic } }
         readonly property bool placeholder:page.selectedPost !== null && page.selectedPost.status==="placeholder"
-        // A placeholder plays its reference reel: the original to copy, not what gets posted.
+        // A placeholder plays its reference reel (the original to copy); a post plays its exported file.
+        readonly property bool isReference:placeholder && !page.selectedPost.video
         readonly property string videoFile:!page.selectedPost ? ""
             : page.selectedPost.video ? String(page.selectedPost.video)
             : placeholder && page.selectedPost.reference ? String(page.selectedPost.reference) : ""
-        onOpened: if (videoFile.length>0) { reelPlayer.source="file://"+videoFile; reelPlayer.play() }
-        onClosed: { reelPlayer.stop(); reelPlayer.source="" }
+        readonly property string folder:placeholder ? String(page.selectedPost.folder||"") : ""
+        readonly property string link:placeholder ? String(page.selectedPost.referenceUrl||"") : ""
+        // The filming steps without the "Folder:" line: the folder has its own card.
+        readonly property var steps:placeholder ? (page.selectedPost.guide||[]).filter(function(s) { return !/^\s*folder:/i.test(String(s)) }) : []
+        // True once the first frame shows, so the still doesn't flash back on every loop.
+        property bool started:false
+        // Which copy button shows "Copied": "prompt", "link" or "".
+        property string copied:""
+        Timer { id:copiedReset; interval:1600; onTriggered:postDetail.copied="" }
+        function copy(text, which) {
+            clipboard.text=text; clipboard.selectAll(); clipboard.copy()
+            copied=which; copiedReset.restart()
+        }
+        onAboutToShow:{
+            started=false; copied=""
+            if (videoFile.length>0) { reelPlayer.source="file://"+videoFile; reelPlayer.play() }
+        }
+        onClosed:{ reelPlayer.stop(); reelPlayer.source="" }
         MediaDevices { id:reelDevices }
         MediaPlayer {
             id:reelPlayer
@@ -721,173 +747,338 @@ Rectangle {
             videoOutput:reelVideo
             loops:MediaPlayer.Infinite
             audioOutput:AudioOutput { device:reelDevices.defaultAudioOutput; muted:reelMute.checked }
+            onPositionChanged: if (position>0) postDetail.started=true
         }
-        contentItem:GridLayout {
-            columns:postDetail.placeholder ? 2 : 1
-            columnSpacing:20; rowSpacing:12
-          ColumnLayout {
-            Layout.alignment:Qt.AlignTop
-            spacing:12
-            Rectangle {
-                visible:postDetail.videoFile.length>0
-                Layout.alignment:Qt.AlignHCenter
-                Layout.preferredHeight:Math.min(480, (page.Window.height||800)-(postDetail.placeholder ? 200 : 300))
-                Layout.preferredWidth:Layout.preferredHeight*9/16
-                radius:10; color:"black"; clip:true
-                // The still covers the gap until the first frame decodes.
-                Image {
-                    anchors.fill:parent
-                    visible:reelPlayer.position===0
-                    source:postDetail.videoFile.length>0 ? page.previewFor(page.selectedPost) : ""
-                    sourceSize.width:540
-                    fillMode:Image.PreserveAspectFit; asynchronous:true
-                }
-                VideoOutput {
-                    id:reelVideo
-                    objectName:"scheduleReelVideo"
-                    anchors.fill:parent
-                    fillMode:VideoOutput.PreserveAspectFit
-                }
-                MouseArea {
-                    anchors.fill:parent
-                    cursorShape:Qt.PointingHandCursor
-                    onClicked:reelPlayer.playbackState===MediaPlayer.PlayingState ? reelPlayer.pause() : reelPlayer.play()
-                }
-                Label {
-                    anchors.centerIn:parent
-                    visible:reelPlayer.playbackState!==MediaPlayer.PlayingState
-                    text:"▶"; color:"white"; font.pixelSize:44; opacity:0.85
-                }
-                Rectangle {
-                    objectName:"scheduleReferenceFlag"
-                    visible:postDetail.placeholder && !page.selectedPost.video
-                    anchors.top:parent.top; anchors.left:parent.left; anchors.right:parent.right
-                    height:flagText.implicitHeight+12
-                    color:page.warning
+        contentItem:ColumnLayout {
+            spacing:16
+            // QML has no clipboard API; a hidden text field copies for us.
+            TextEdit { id:clipboard; visible:false }
+
+            // Header: what this slot is.
+            RowLayout {
+                id:detailHeader
+                Layout.fillWidth:true; spacing:12
+                ColumnLayout {
+                    Layout.fillWidth:true; Layout.preferredWidth:0; spacing:4
                     Label {
-                        id:flagText
-                        anchors.centerIn:parent; width:parent.width-12
-                        horizontalAlignment:Text.AlignHCenter; wrapMode:Text.Wrap
-                        text:qsTr("REFERENCE · original reel to copy. Not what gets posted.")
-                        color:"#1b1b20"; font.bold:true; font.pixelSize:11
+                        Layout.fillWidth:true; Layout.preferredWidth:0; elide:Text.ElideRight
+                        text:!page.selectedPost ? "" : (page.statusText(page.selectedPost.status)+" · "+page.labels[page.selectedPost.platform]
+                              +" · "+Qt.formatDateTime(new Date(page.selectedPost.ms),"ddd, MMM d · HH:mm t")).toUpperCase()
+                        color:page.dim; font.pixelSize:11; font.bold:true; font.letterSpacing:0.4
+                    }
+                    Label {
+                        Layout.fillWidth:true; Layout.preferredWidth:0; wrapMode:Text.Wrap; maximumLineCount:2; elide:Text.ElideRight
+                        text:page.selectedPost ? (page.selectedPost.title||page.selectedPost.caption||qsTr("Untitled reel")) : ""
+                        color:page.ink; font.bold:true; font.pixelSize:18
+                    }
+                    Label {
+                        visible:postDetail.placeholder
+                        Layout.fillWidth:true; Layout.preferredWidth:0; wrapMode:Text.Wrap
+                        text:qsTr("Holds this slot. Nothing posts until you replace it with the finished reel.")
+                        color:page.dim; font.pixelSize:12
                     }
                 }
-            }
-            RowLayout {
-                visible:postDetail.videoFile.length>0
-                Layout.fillWidth:true; spacing:6
                 ToolButton {
-                    objectName:"scheduleReelPlay"
-                    text:reelPlayer.playbackState===MediaPlayer.PlayingState ? "❚❚" : "▶"
-                    Accessible.name:reelPlayer.playbackState===MediaPlayer.PlayingState ? qsTr("Pause") : qsTr("Play")
-                    onClicked:reelPlayer.playbackState===MediaPlayer.PlayingState ? reelPlayer.pause() : reelPlayer.play()
-                }
-                Slider {
-                    id:reelSeek
-                    objectName:"scheduleReelSeek"
-                    Layout.fillWidth:true
-                    from:0; to:Math.max(1, reelPlayer.duration)
-                    value:pressed ? value : reelPlayer.position
-                    enabled:reelPlayer.seekable
-                    onMoved:reelPlayer.position=value
-                    Accessible.name:qsTr("Position")
-                }
-                Label {
-                    function clock(ms) { var s=Math.floor(ms/1000); return Math.floor(s/60)+":"+String(s%60).padStart(2,"0") }
-                    text:clock(reelPlayer.position)+" / "+clock(reelPlayer.duration)
-                    color:page.dim; font.pixelSize:11
-                }
-                ToolButton {
-                    id:reelMute
-                    objectName:"scheduleReelMute"
-                    checkable:true
-                    text:checked ? "🔇" : "🔊"
-                    Accessible.name:checked ? qsTr("Unmute") : qsTr("Mute")
+                    objectName:"schedulePostDetailClose"
+                    Layout.alignment:Qt.AlignTop
+                    text:"✕"; font.pixelSize:16
+                    Accessible.name:qsTr("Close")
+                    ToolTip.visible:hovered; ToolTip.text:qsTr("Close (Esc)")
+                    onClicked:postDetail.close()
                 }
             }
-            Image {
-                visible:postDetail.videoFile.length===0 && status===Image.Ready
-                source:postDetail.videoFile.length===0 ? page.previewFor(page.selectedPost) : ""
-                Layout.alignment:Qt.AlignHCenter
-                Layout.preferredWidth:160; Layout.preferredHeight:284
-                sourceSize.width:320
-                fillMode:Image.PreserveAspectCrop; asynchronous:true
-            }
-            Label { text:page.selectedPost ? page.labels[page.selectedPost.platform]+" · "+page.statusText(page.selectedPost.status) : ""; color:page.ink; font.bold:true; font.pixelSize:18; Layout.fillWidth:true; wrapMode:Text.Wrap }
-            Label { text:page.selectedPost ? Qt.formatDateTime(new Date(page.selectedPost.ms),"ddd, MMM d · HH:mm t") : ""; color:page.dim }
-            Label { text:page.selectedPost ? (page.selectedPost.title||page.selectedPost.caption||qsTr("Untitled reel")) : ""; color:page.ink; Layout.fillWidth:true; wrapMode:Text.Wrap }
-            Label { visible:text.length>0; text:page.selectedPost ? (page.selectedPost.error||"") : ""; color:page.danger; Layout.fillWidth:true; wrapMode:Text.Wrap }
-            Label { visible:page.selectedPost && page.selectedPost.status==="awaiting"; text:qsTr("The scheduled time has passed, but Reelcut has not confirmed publication. Refresh Stats or check the platform."); color:page.warning; Layout.fillWidth:true; wrapMode:Text.Wrap }
+
+            // Body: the reel, and for a placeholder the plan beside it.
             RowLayout {
-                Item { Layout.fillWidth:true }
-                Button { visible:page.selectedPost && (page.selectedPost.link||"").length>0; text:qsTr("Open on platform"); onClicked:backend.openLink(page.selectedPost.link) }
-                Button { visible:!postDetail.placeholder; text:qsTr("Close"); onClicked:postDetail.close() }
-            }
-          }
-          // The plan for a placeholder: what gets posted, and the clips to film for it.
-          ColumnLayout {
-            visible:postDetail.placeholder
-            Layout.alignment:Qt.AlignTop
-            Layout.fillWidth:true; Layout.fillHeight:true
-            Layout.preferredWidth:380
-            spacing:10
-            Label { text:qsTr("This slot will post"); color:page.dim; font.pixelSize:11; font.bold:true }
-            Label {
-                objectName:"schedulePlaceholderNote"
-                Layout.fillWidth:true; wrapMode:Text.Wrap; color:page.ink
-                text:postDetail.placeholder ? (page.selectedPost.note||qsTr("The finished reel, once it's made.")) : ""
-            }
-            Label {
-                visible:postDetail.placeholder && (page.selectedPost.caption||"").length>0
-                Layout.fillWidth:true; wrapMode:Text.Wrap; color:page.dim; font.pixelSize:12
-                text:postDetail.placeholder ? qsTr("Caption: %1").arg(page.selectedPost.caption||"") : ""
-            }
-            Label {
-                Layout.fillWidth:true; wrapMode:Text.Wrap; color:page.warning; font.pixelSize:12
-                text:qsTr("Nothing posts from a placeholder. Make the reel, then schedule it into this slot after removing the placeholder.")
-            }
-            Rectangle { Layout.fillWidth:true; height:1; color:page.line }
-            Label { text:qsTr("Step by step: clips to film"); color:page.dim; font.pixelSize:11; font.bold:true }
-            ScrollView {
-                id:guideScroll
-                Layout.fillWidth:true; Layout.fillHeight:true
-                contentWidth:availableWidth
-                Layout.preferredHeight:Math.min(guideColumn.implicitHeight, 420)
-                clip:true
+                id:body
+                Layout.fillWidth:true; Layout.fillHeight:postDetail.placeholder
+                spacing:28
                 ColumnLayout {
-                    id:guideColumn
-                    width:guideScroll.availableWidth
+                    id:reelColumn
+                    Layout.alignment:Qt.AlignTop
+                    // Sized from the card, never from the body, so the layout can't feed back into itself.
+                    // 92 = the player controls and the link row under the video; 49 = the footer's rule and spacing.
+                    readonly property real videoHeight:postDetail.placeholder
+                        ? Math.max(200, Math.min(480, postDetail.availableHeight-detailHeader.height-detailFooter.height-16*2-49-92))
+                        : Math.min(480, (page.Window.height||800)-320)
+                    Layout.preferredWidth:postDetail.placeholder ? videoHeight*9/16 : -1
+                    Layout.fillWidth:!postDetail.placeholder
                     spacing:8
-                    Repeater {
-                        objectName:"schedulePlaceholderGuide"
-                        model:postDetail.placeholder ? (page.selectedPost.guide||[]) : []
+                    Rectangle {
+                        visible:postDetail.videoFile.length>0
+                        Layout.alignment:Qt.AlignHCenter
+                        Layout.preferredHeight:reelColumn.videoHeight
+                        Layout.preferredWidth:reelColumn.videoHeight*9/16
+                        radius:10; color:"black"; clip:true
+                        // The still covers the gap until the first frame decodes, then fades out for good.
+                        Image {
+                            anchors.fill:parent
+                            opacity:postDetail.started ? 0 : 1
+                            Behavior on opacity { NumberAnimation { duration:150; easing.type:Easing.OutCubic } }
+                            source:postDetail.videoFile.length>0 ? page.previewFor(page.selectedPost) : ""
+                            sourceSize.width:540
+                            fillMode:Image.PreserveAspectFit; asynchronous:true
+                        }
+                        VideoOutput {
+                            id:reelVideo
+                            objectName:"scheduleReelVideo"
+                            anchors.fill:parent
+                            fillMode:VideoOutput.PreserveAspectFit
+                        }
+                        MouseArea {
+                            anchors.fill:parent
+                            cursorShape:Qt.PointingHandCursor
+                            onClicked:reelPlayer.playbackState===MediaPlayer.PlayingState ? reelPlayer.pause() : reelPlayer.play()
+                        }
+                        Label {
+                            anchors.centerIn:parent
+                            opacity:reelPlayer.playbackState===MediaPlayer.PausedState ? 0.85 : 0
+                            Behavior on opacity { NumberAnimation { duration:120 } }
+                            text:"▶"; color:"white"; font.pixelSize:44
+                        }
+                        // A small tag, not a banner: the reference is the original to copy, not what posts.
+                        Rectangle {
+                            objectName:"scheduleReferenceFlag"
+                            visible:postDetail.isReference
+                            x:8; y:8
+                            width:refTag.implicitWidth+12; height:refTag.implicitHeight+6; radius:4
+                            color:page.warning
+                            Label { id:refTag; anchors.centerIn:parent; text:qsTr("REFERENCE"); color:"#1b1b20"; font.bold:true; font.pixelSize:10; font.letterSpacing:0.5 }
+                        }
+                    }
+                    RowLayout {
+                        visible:postDetail.videoFile.length>0
+                        Layout.fillWidth:true; spacing:2
+                        ToolButton {
+                            objectName:"scheduleReelPlay"
+                            text:reelPlayer.playbackState===MediaPlayer.PlayingState ? "❚❚" : "▶"
+                            Accessible.name:reelPlayer.playbackState===MediaPlayer.PlayingState ? qsTr("Pause") : qsTr("Play")
+                            onClicked:reelPlayer.playbackState===MediaPlayer.PlayingState ? reelPlayer.pause() : reelPlayer.play()
+                        }
+                        Slider {
+                            objectName:"scheduleReelSeek"
+                            Layout.fillWidth:true; Layout.preferredWidth:0
+                            from:0; to:Math.max(1, reelPlayer.duration)
+                            value:pressed ? value : reelPlayer.position
+                            enabled:reelPlayer.seekable
+                            onMoved:reelPlayer.position=value
+                            Accessible.name:qsTr("Position")
+                        }
+                        Label {
+                            function clock(ms) { var s=Math.floor(ms/1000); return Math.floor(s/60)+":"+String(s%60).padStart(2,"0") }
+                            text:clock(reelPlayer.position)+" / "+clock(reelPlayer.duration)
+                            color:page.dim; font.pixelSize:11; font.features:{ "tnum":1 }
+                        }
+                        ToolButton {
+                            id:reelMute
+                            objectName:"scheduleReelMute"
+                            checkable:true
+                            text:checked ? "🔇" : "🔊"
+                            Accessible.name:checked ? qsTr("Unmute") : qsTr("Mute")
+                        }
+                    }
+                    // The reference's own actions sit with the reference.
+                    RowLayout {
+                        visible:postDetail.link.length>0
+                        Layout.fillWidth:true; spacing:4
+                        Button {
+                            flat:true; text:qsTr("Open original ↗")
+                            onClicked:backend.openLink(postDetail.link)
+                        }
+                        Button {
+                            objectName:"scheduleCopyOriginalLink"
+                            flat:true
+                            Layout.minimumWidth:96
+                            text:postDetail.copied==="link" ? qsTr("Copied ✓") : qsTr("Copy link")
+                            onClicked:postDetail.copy(postDetail.link,"link")
+                        }
+                        Item { Layout.fillWidth:true }
+                    }
+                    // A post with no video on disk: its still, in a fixed slot so the card doesn't jump.
+                    Rectangle {
+                        visible:postDetail.videoFile.length===0
+                        Layout.alignment:Qt.AlignHCenter
+                        Layout.preferredWidth:160; Layout.preferredHeight:284
+                        radius:10; color:page.bg; clip:true
+                        Image {
+                            anchors.fill:parent
+                            source:postDetail.videoFile.length===0 ? page.previewFor(page.selectedPost) : ""
+                            sourceSize.width:320
+                            fillMode:Image.PreserveAspectCrop; asynchronous:true
+                        }
+                    }
+                    Label {
+                        visible:text.length>0
+                        Layout.fillWidth:true; Layout.preferredWidth:0; wrapMode:Text.Wrap
+                        text:page.selectedPost && !postDetail.placeholder ? (page.selectedPost.error||"") : ""
+                        color:page.danger
+                    }
+                    Label {
+                        visible:page.selectedPost !== null && page.selectedPost.status==="awaiting"
+                        Layout.fillWidth:true; Layout.preferredWidth:0; wrapMode:Text.Wrap
+                        text:qsTr("The scheduled time has passed, but Reelcut has not confirmed publication. Refresh Stats or check the platform.")
+                        color:page.warning
+                    }
+                }
+
+                // The plan: what this slot posts, and the clips to film for it.
+                ColumnLayout {
+                    visible:postDetail.placeholder
+                    Layout.fillWidth:true; Layout.preferredWidth:0; Layout.minimumWidth:0
+                    Layout.fillHeight:true
+                    spacing:8
+                    Label { text:qsTr("WILL POST"); color:page.dim; font.pixelSize:11; font.bold:true; font.letterSpacing:0.4 }
+                    Label {
+                        objectName:"schedulePlaceholderNote"
+                        Layout.fillWidth:true; Layout.preferredWidth:0; wrapMode:Text.Wrap
+                        text:postDetail.placeholder ? (page.selectedPost.note||qsTr("The finished reel, once it's made.")) : ""
+                        color:page.ink; font.pixelSize:14; lineHeight:1.25
+                    }
+                    Label {
+                        id:captionLabel
+                        visible:postDetail.placeholder && (page.selectedPost.caption||"").length>0
+                        Layout.fillWidth:true; Layout.preferredWidth:0
+                        wrapMode:Text.Wrap; maximumLineCount:2; elide:Text.ElideRight
+                        text:postDetail.placeholder ? qsTr("Caption · %1").arg(page.selectedPost.caption||"") : ""
+                        color:page.dim; font.pixelSize:12
+                        HoverHandler { id:captionHover }
+                        ToolTip.visible:captionHover.hovered && truncated; ToolTip.text:text; ToolTip.delay:400
+                    }
+                    Rectangle { Layout.fillWidth:true; Layout.topMargin:8; Layout.bottomMargin:4; height:1; color:page.line }
+                    RowLayout {
+                        Layout.fillWidth:true
+                        Label { text:qsTr("CLIPS TO FILM"); color:page.dim; font.pixelSize:11; font.bold:true; font.letterSpacing:0.4 }
+                        Item { Layout.fillWidth:true }
+                        Label { text:postDetail.steps.length===1 ? qsTr("1 step") : qsTr("%1 steps").arg(postDetail.steps.length); color:page.dim; font.pixelSize:11 }
+                    }
+                    ScrollView {
+                        id:guideScroll
+                        Layout.fillWidth:true; Layout.fillHeight:true
+                        Layout.preferredWidth:0; Layout.preferredHeight:0
+                        contentWidth:availableWidth
+                        clip:true
+                        ScrollBar.horizontal.policy:ScrollBar.AlwaysOff
+                        ColumnLayout {
+                            width:guideScroll.availableWidth
+                            spacing:10
+                            Repeater {
+                                objectName:"schedulePlaceholderGuide"
+                                model:postDetail.steps
+                                RowLayout {
+                                    id:guideStep
+                                    required property int index
+                                    required property string modelData
+                                    Layout.fillWidth:true; spacing:10
+                                    Label {
+                                        Layout.preferredWidth:20; Layout.alignment:Qt.AlignTop
+                                        horizontalAlignment:Text.AlignRight
+                                        text:guideStep.index+1; color:page.dim; font.pixelSize:13; font.bold:true
+                                        font.features:{ "tnum":1 }
+                                    }
+                                    Label {
+                                        Layout.fillWidth:true; Layout.preferredWidth:0; Layout.rightMargin:12
+                                        text:guideStep.modelData; wrapMode:Text.Wrap
+                                        color:page.ink; font.pixelSize:13; lineHeight:1.3
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Where the filmed clips go: one click opens it (made if missing).
+                    Rectangle {
+                        visible:postDetail.folder.length>0
+                        Layout.fillWidth:true; Layout.topMargin:4
+                        implicitHeight:48; radius:8
+                        color:folderHover.hovered ? (page.dark ? "#ffffff0d" : "#0000000a") : "transparent"
+                        border.color:page.line
+                        Behavior on color { ColorAnimation { duration:120 } }
+                        HoverHandler { id:folderHover; cursorShape:Qt.PointingHandCursor }
+                        TapHandler { onTapped:backend.openPlaceholderFolder(page.selectedPost.id) }
                         RowLayout {
-                            id:guideStep
-                            required property int index
-                            required property string modelData
-                            Layout.fillWidth:true; spacing:8
-                            Label { text:(guideStep.index+1)+"."; color:page.warning; font.bold:true; Layout.alignment:Qt.AlignTop }
-                            Label { text:guideStep.modelData; color:page.ink; wrapMode:Text.Wrap; Layout.fillWidth:true; font.pixelSize:13 }
+                            anchors.fill:parent; anchors.leftMargin:14; anchors.rightMargin:6
+                            spacing:8
+                            ColumnLayout {
+                                Layout.fillWidth:true; Layout.preferredWidth:0; spacing:0
+                                Label { text:qsTr("Clips folder"); color:page.ink; font.pixelSize:12; font.bold:true }
+                                Label {
+                                    Layout.fillWidth:true; Layout.preferredWidth:0
+                                    text:postDetail.folder; elide:Text.ElideMiddle
+                                    color:page.dim; font.pixelSize:11
+                                    ToolTip.visible:folderHover.hovered && truncated; ToolTip.text:text; ToolTip.delay:400
+                                }
+                            }
+                            Button {
+                                objectName:"scheduleOpenClipFolder"
+                                flat:true; text:qsTr("Open folder")
+                                onClicked:backend.openPlaceholderFolder(page.selectedPost.id)
+                            }
                         }
                     }
                 }
             }
+
+            // Footer: every action in one row.
+            Rectangle { Layout.fillWidth:true; height:1; color:page.line }
             RowLayout {
-                Layout.fillWidth:true
-                Button {
-                    visible:postDetail.placeholder && (page.selectedPost.referenceUrl||"").length>0
-                    text:qsTr("Open original"); flat:true
-                    onClicked:backend.openLink(page.selectedPost.referenceUrl)
-                }
-                Item { Layout.fillWidth:true }
+                id:detailFooter
+                Layout.fillWidth:true; spacing:8
                 Button {
                     objectName:"scheduleRemovePlaceholder"
-                    text:qsTr("Remove placeholder"); flat:true
+                    visible:postDetail.placeholder
+                    flat:true; text:qsTr("Remove placeholder")
+                    Material.foreground:page.danger
                     onClicked:{ if (backend.removePlaceholder(page.selectedPost.id)) postDetail.close() }
                 }
-                Button { text:qsTr("Close"); onClicked:postDetail.close() }
+                Item { Layout.fillWidth:true }
+                Label {
+                    visible:postDetail.placeholder
+                    text:qsTr("Language"); color:page.dim; font.pixelSize:12
+                }
+                ComboBox {
+                    id:editLanguage
+                    objectName:"scheduleEditLanguage"
+                    visible:postDetail.placeholder
+                    Layout.preferredWidth:180; Layout.preferredHeight:40
+                    topInset:0; bottomInset:0
+                    // First keeps the original's language; last lets you type any other.
+                    model:[qsTr("Same as original"),"English","Hinglish","Hindi","Spanish","Portuguese","German","French","Arabic","Indonesian","Tagalog",qsTr("Other…")]
+                    readonly property bool other:currentIndex===count-1
+                    readonly property string language:currentIndex===0 ? "" : other ? otherLanguage.text.trim() : currentText
+                    onActivated:if (other) otherLanguage.forceActiveFocus()
+                    Accessible.name:qsTr("Audience language")
+                    ToolTip.visible:hovered && !popup.visible; ToolTip.delay:500
+                    ToolTip.text:qsTr("The audience: language for the hook, on-screen text and caption")
+                }
+                TextField {
+                    id:otherLanguage
+                    visible:postDetail.placeholder && editLanguage.other
+                    Layout.preferredWidth:140; Layout.preferredHeight:40
+                    topInset:0; bottomInset:0
+                    placeholderText:qsTr("Language")
+                    Accessible.name:qsTr("Other language")
+                }
+                Button {
+                    objectName:"scheduleCopyEditPrompt"
+                    visible:postDetail.placeholder
+                    highlighted:true; Material.elevation:0
+                    Layout.preferredHeight:40; topInset:0; bottomInset:0
+                    Layout.minimumWidth:200
+                    text:postDetail.copied==="prompt" ? qsTr("Copied ✓  Paste in Claude") : qsTr("Copy Claude edit prompt")
+                    onClicked:postDetail.copy(Plan.editPrompt(page.selectedPost,editLanguage.language),"prompt")
+                }
+                Button {
+                    visible:!postDetail.placeholder && page.selectedPost !== null && (page.selectedPost.link||"").length>0
+                    highlighted:true; Material.elevation:0
+                    Layout.preferredHeight:40; topInset:0; bottomInset:0
+                    text:qsTr("Open on platform")
+                    onClicked:backend.openLink(page.selectedPost.link)
+                }
+                Button {
+                    visible:!postDetail.placeholder
+                    flat:true; text:qsTr("Close")
+                    onClicked:postDetail.close()
+                }
             }
-          }
         }
     }
 }

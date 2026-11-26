@@ -24,3 +24,8 @@ SOURCES += ../src/accounts.cpp
 
 HEADERS += ../src/automationregistry.h ../src/appbridge.h
 SOURCES += ../src/automationregistry.cpp ../src/appbridge.cpp
+
+RESOURCES += ../src/songs.qrc
+
+HEADERS += ../src/songrequest.h ../src/modalusage.h ../src/songgen.h
+SOURCES += ../src/songrequest.cpp ../src/modalusage.cpp ../src/songgen.cpp

@@ -46,13 +46,14 @@ QtObject {
     function execute(action, args) {
         if (action === "state") return snapshot()
         if (action === "navigate") {
-            if (["editor","stats","schedule","settings","downloads","help"].indexOf(args.page)<0) return fail("Unknown page.")
+            if (["editor","stats","schedule","settings","downloads","help","songs"].indexOf(args.page)<0) return fail("Unknown page.")
             if (args.platform !== "" && ["instagram","facebook","youtube","tiktok"].indexOf(args.platform)<0) return fail("Unknown platform.")
             if (!idlePost()) return fail("Wait for publishing or cancel the job explicitly first.")
             postItem.close()
             if (args.page !== "settings") settingsItem.close()
             windowItem.statsVisible=args.page === "stats"
             windowItem.scheduleVisible=args.page === "schedule"
+            if (windowItem.songsVisible !== undefined) windowItem.songsVisible=args.page === "songs"
             if (args.page === "settings") settingsItem.openFor(args.platform)
             if (args.page === "downloads") windowItem.downloadsVisible=true
             if (args.page === "help") windowItem.helpVisible=true
